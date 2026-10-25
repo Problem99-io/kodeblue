@@ -4,6 +4,7 @@
 # Produces:
 #   OUT/agent/   what a hub serves to servers: install.sh, kodeblue-linux-{amd64,arm64}.tar.gz, SHA256SUMS
 #   OUT/kodeblue-hub-linux-{amd64,arm64}.tar.gz   hub bundles (binary, agent files, systemd unit, installer)
+#   OUT/install-hub.sh    the hub installer on its own, which downloads a bundle (curl … | sudo sh)
 # Environment:
 #   ARCHES="amd64"        build one architecture (default: amd64 arm64)
 #   VERSION=v1.2.3        version stamped into every binary (default: git describe)
@@ -65,4 +66,5 @@ for arch in $ARCHES; do
   cp -R "$OUT/agent" "$d/dist"
   pack "$tmp/hub-$arch" kodeblue-hub "$OUT/kodeblue-hub-linux-$arch.tar.gz"
 done
+cp deploy/hub/install-hub.sh "$OUT/install-hub.sh"
 echo "release files in $OUT"

@@ -5,9 +5,8 @@
   </picture>
 </h1>
 
-<!-- The release badge is static while the repository is private (shields.io cannot read it); bump it with each release, and switch back to https://img.shields.io/github/v/release/Problem99-io/kodeblue?sort=semver when the repository is public. -->
 [![CI](https://github.com/Problem99-io/kodeblue/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Problem99-io/kodeblue/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/Problem99-io/kodeblue/releases/latest)
+[![Release](https://img.shields.io/github/v/release/Problem99-io/kodeblue?sort=semver)](https://github.com/Problem99-io/kodeblue/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 > Hackers have agents that attack 24/7. Now you have one that defends.
@@ -161,49 +160,52 @@ These are estimates at about $0.20 per million input tokens, with prompt caching
 ## Requirements
 
 - Linux with systemd, amd64 or arm64
-- an OpenAI-compatible model endpoint (a hosted API, OpenRouter, or your own vLLM, Ollama or LiteLLM; for a keyless endpoint put any placeholder in `/etc/kodeblue/inference.key`), or none: without one, kodeblue runs sensors, detection and monitors only
+- `curl`, to install
+- an OpenAI-compatible model endpoint (a hosted API, OpenRouter, or your own vLLM, Ollama or LiteLLM; for a keyless endpoint give any placeholder as the key), or none: without one, kodeblue runs sensors, detection and monitors, and its learning waits until you add one
 - to build: Go (the version in `go.mod`)
 - for the hub: a small Linux host or a Docker host that your servers can reach over HTTPS
 
 ## Quick start
 
-Download a release from [GitHub Releases](https://github.com/Problem99-io/kodeblue/releases), or build it yourself (see [Build](#build)). Each release has the server tarballs (`kodeblue-linux-{amd64,arm64}.tar.gz`), the hub bundles (`kodeblue-hub-linux-{amd64,arm64}.tar.gz`), `install.sh` and `SHA256SUMS`.
+Each step is one command plus your model's API key. The installers download the latest [release](https://github.com/Problem99-io/kodeblue/releases) for the server's architecture and check it against the release's `SHA256SUMS` before installing. To download and check the files yourself, or to build them, see [docs/deploy.md](docs/deploy.md#install-from-the-release-files) and [Build](#build).
 
 ### A. One server, no hub
 
 ```bash
-base=https://github.com/Problem99-io/kodeblue/releases/latest/download
-curl -fsSLO "$base/kodeblue-linux-amd64.tar.gz" -O "$base/SHA256SUMS"
-sha256sum -c --ignore-missing SHA256SUMS
-tar xzf kodeblue-linux-amd64.tar.gz
-sudo ./kodeblue/deploy/install.sh --inference-url https://api.example.com --model <model> [--mode recommend]
-sudoedit /etc/kodeblue/kodeblue.toml     # response mode, protected users/IPs/units, budget
-journalctl -fu kodeblue
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
 ```
 
-The installer asks for the endpoint's API key and an optional Slack webhook (input is not echoed). kodeblue takes snapshots of the server for about 30 minutes. With a model, a learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours. Without one, it starts watching after the snapshots, and the learning session and assessment wait until you set a model, then run on their own. Change the model endpoint later with `sudo kodeblue inference --url … --model …`, then `sudo systemctl restart kodeblue`.
+Use any OpenAI-compatible endpoint, with or without `/v1` at the end. The installer asks for its API key and an optional Slack webhook (input is not echoed), and starts kodeblue. kodeblue takes snapshots of the server for about 30 minutes. A learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours.
+
+Without `--inference-url`, kodeblue starts watching after the snapshots, and the learning session and assessment wait until you set a model; they then run on their own. Set or change the model, and its key, with one command (it asks for the key and restarts kodeblue):
+
+```bash
+sudo kodeblue inference --url https://openrouter.ai/api --model <model> --key-file -
+```
+
+Then review the policy (response mode, protected users, IPs and units, budget) with `sudoedit /etc/kodeblue/kodeblue.toml`, and follow along with `sudo journalctl -fu kodeblue`.
 
 ### B. A hub and several servers
 
 On the hub host, here with a self-signed certificate that servers pin:
 
 ```bash
-base=https://github.com/Problem99-io/kodeblue/releases/latest/download
-curl -fsSLO "$base/kodeblue-hub-linux-amd64.tar.gz" -O "$base/SHA256SUMS"
-sha256sum -c --ignore-missing SHA256SUMS
-tar xzf kodeblue-hub-linux-amd64.tar.gz
-sudo kodeblue-hub/install-hub.sh --public-url https://hub.example.com:8443 --self-signed
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
 ```
 
 Or run the hub image: `ghcr.io/problem99-io/kodeblue-hub:latest` (see [docs/deploy.md](docs/deploy.md#with-docker)).
 
-The installer creates the first operator account (it asks for a password) and prints the certificate pin. Sign in at the public URL, add a model connection in **Settings** and pick it as the default model, then use **Add server**. Until a server has a model, its learning waits and the hub shows an alert. Copy the one-line command it prints and run it on the server. It looks like this:
+The installer asks for the first operator's password (twice) and starts the hub. Then:
+
+1. Sign in at the public URL. The browser warns once about the self-signed certificate.
+2. Open **Settings**, choose **Add connection** and paste your model's API key. The hub then asks which model every agent should use.
+3. Open **Servers**, choose **Add server**, and run the command it prints on the server, as root or as a user with sudo. Start the line with a space so the token stays out of your shell history (see [docs/deploy.md](docs/deploy.md#keep-the-token-out-of-your-shell-history)). The command looks like this:
 
 ```bash
-f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey 'sha256//…' -o "$f" https://hub.example.com:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | sudo sh "$f" --hub https://hub.example.com:8443 --pin 'sha256//…' --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
+ f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey 'sha256//…' -o "$f" https://hub.example.com:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://hub.example.com:8443 --pin 'sha256//…' --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
 ```
 
-It saves the installer, checks its hash before running it as root, and passes the single-use token on stdin so it never appears in a process's arguments. It is still in the line you paste, so keep that line out of your shell history: start it with a space (see [docs/deploy.md](docs/deploy.md#keep-the-token-out-of-your-shell-history)).
+It saves the installer, checks its hash before running it as root, and passes the single-use token on stdin so it never appears in a process's arguments. The server takes the hub's model and key at enrollment and asks nothing. A server that has no model yet watches with its deterministic detection, and the hub shows that its learning is waiting for one.
 
 For a hub on the internet, we recommend putting it behind Cloudflare with a `cloudflared` tunnel: the hub host opens no port, servers verify Cloudflare's public certificate (no pin), and Cloudflare Access can guard the console. Cloudflare then sees the traffic between servers and the hub; see [docs/deploy.md](docs/deploy.md#behind-cloudflare) for the setup and the trade-off.
 
@@ -229,7 +231,7 @@ sudo kodeblue incidents ; sudo kodeblue incident <id>
 sudo kodeblue findings --status needs_ack ; sudo kodeblue ack <id> [--allow]
 sudo kodeblue maintenance 2h "deploy v42"    # planned work: absorb non-critical changes
 sudo kodeblue respond list                   # then: respond approve|deny|undo <id>
-sudo kodeblue inference                      # show the model endpoint (set it with --url and --model)
+sudo kodeblue inference                      # show the model endpoint (set it with --url, --model and --key-file -)
 ```
 
 On the hub:

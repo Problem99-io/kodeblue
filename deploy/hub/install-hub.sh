@@ -1,5 +1,10 @@
 #!/bin/sh
-# Install the kodeblue hub from an unpacked kodeblue-hub-linux-<arch>.tar.gz.
+# Install the kodeblue hub. In one command, from the latest GitHub release
+# (the bundle is checked against the release's SHA256SUMS):
+#
+#   curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
+#
+# or from an unpacked kodeblue-hub-linux-<arch>.tar.gz:
 #
 #   sudo ./install-hub.sh --public-url https://hub.example.com --self-signed
 #   sudo ./install-hub.sh --public-url https://hub.example.com --tls-cert /etc/ssl/hub.crt --tls-key /etc/ssl/hub.key
@@ -17,6 +22,9 @@
 #
 # Re-running keeps lines you added to /etc/kodeblue-hub/env yourself, and the
 # --trusted-proxy, --console-allow and --http-listen values you do not pass again.
+# KODEBLUE_RELEASE_URL picks another release to download from (default
+# https://github.com/Problem99-io/kodeblue/releases/latest/download).
+#:usage-end
 set -eu
 PUBLIC="" LISTEN=":8443" SELF=0 CERT="" KEY="" PROXY=0 ADMIN="admin" TRUSTED="" ALLOW="" HTTPL=""
 while [ $# -gt 0 ]; do
@@ -31,7 +39,7 @@ while [ $# -gt 0 ]; do
     --console-allow) ALLOW=$2; shift 2 ;;
     --http-listen) HTTPL=$2; shift 2 ;;
     --admin) ADMIN=$2; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^#:usage-end/ { /^#:usage-end/d; s/^# \{0,1\}//; p; }' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -41,8 +49,44 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 [ -n "$PUBLIC" ] || die "--public-url is required (e.g. https://hub.example.com:8443)"
 case "$PUBLIC" in https://*) ;; *) die "--public-url must be https://" ;; esac
 [ "$SELF" = 1 ] || [ -n "$CERT" ] || [ "$PROXY" = 1 ] || die "choose --self-signed, --tls-cert/--tls-key, or --behind-proxy"
-here=$(cd "$(dirname "$0")" && pwd)
-[ -x "$here/kodeblue-hub" ] || die "run from the unpacked kodeblue-hub directory"
+here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)
+
+# ---- bootstrap: not run from an unpacked bundle, so fetch the release ----
+if [ ! -x "$here/kodeblue-hub" ] || [ ! -f "$here/kodeblue-hub.service" ]; then
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH=amd64 ;;
+    aarch64|arm64) ARCH=arm64 ;;
+    *) die "unsupported architecture $(uname -m) (amd64 and arm64 are built)" ;;
+  esac
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v tar >/dev/null 2>&1 || die "tar is required"
+  REL=${KODEBLUE_RELEASE_URL:-https://github.com/Problem99-io/kodeblue/releases/latest/download}
+  REL=${REL%/}
+  # Only HTTPS, redirects included (GitHub redirects downloads to its CDN).
+  case "$REL" in
+    https://*) PROTO=https ;;
+    http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
+    *) die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
+  esac
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+  say "downloading the kodeblue hub ($ARCH) from $REL"
+  curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/hub.tgz" "$REL/kodeblue-hub-linux-$ARCH.tar.gz" || die "download of kodeblue-hub-linux-$ARCH.tar.gz failed"
+  curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/SHA256SUMS" "$REL/SHA256SUMS" || die "download of SHA256SUMS failed"
+  want=$(grep " kodeblue-hub-linux-$ARCH.tar.gz\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+  got=$(sha256sum "$tmp/hub.tgz" | cut -d' ' -f1)
+  { [ -n "$want" ] && [ "$want" = "$got" ]; } || die "checksum mismatch for kodeblue-hub-linux-$ARCH.tar.gz"
+  tar -xzf "$tmp/hub.tgz" -C "$tmp"
+  set -- --public-url "$PUBLIC" --listen "$LISTEN" --admin "$ADMIN"
+  [ "$SELF" = 1 ] && set -- "$@" --self-signed
+  [ -n "$CERT" ] && set -- "$@" --tls-cert "$CERT" --tls-key "$KEY"
+  [ "$PROXY" = 1 ] && set -- "$@" --behind-proxy
+  [ -n "$TRUSTED" ] && set -- "$@" --trusted-proxy "$TRUSTED"
+  [ -n "$ALLOW" ] && set -- "$@" --console-allow "$ALLOW"
+  [ -n "$HTTPL" ] && set -- "$@" --http-listen "$HTTPL"
+  sh "$tmp/kodeblue-hub/install-hub.sh" "$@"
+  exit $?
+fi
 
 id kodeblue-hub >/dev/null 2>&1 || useradd --system --home-dir /var/lib/kodeblue-hub --shell /usr/sbin/nologin --user-group kodeblue-hub
 install -m 0755 "$here/kodeblue-hub" /usr/local/bin/kodeblue-hub.new && mv -f /usr/local/bin/kodeblue-hub.new /usr/local/bin/kodeblue-hub
@@ -89,12 +133,10 @@ fi
 systemctl enable kodeblue-hub >/dev/null 2>&1
 systemctl restart kodeblue-hub
 sleep 1
-say "hub running at $PUBLIC (journalctl -fu kodeblue-hub)"
+say "hub running at $PUBLIC (logs: sudo journalctl -fu kodeblue-hub)"
 if [ "$SELF" = 1 ]; then
   for _ in 1 2 3 4 5; do [ -f /var/lib/kodeblue-hub/tls/cert.pem ] && break; sleep 1; done
   say "self-signed certificate pin (servers use it; browsers will warn once): $(runuser -u kodeblue-hub -- /usr/local/bin/kodeblue-hub pin --data /var/lib/kodeblue-hub)"
 fi
-say "optional fleet settings (value on stdin; inference-* set the default model connection; add more in the console, the hub posts to Slack itself):"
-for k in inference-url inference-model inference-key slack-webhook; do
-  echo "    runuser -u kodeblue-hub -- kodeblue-hub fleet set $k --data /var/lib/kodeblue-hub"
-done
+say "next: sign in at $PUBLIC as $ADMIN, add your model's API key in Settings, then use Add server and run the command it prints on each server"
+say "manage the hub: sudo -u kodeblue-hub kodeblue-hub user|fleet|pin … --data /var/lib/kodeblue-hub (see docs/hub.md)"

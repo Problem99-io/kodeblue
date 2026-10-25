@@ -1,21 +1,26 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/user"
 	"strconv"
 	"strings"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
 )
 
-// inferenceCmd shows or sets the model endpoint ([inference] in the config).
-// Without flags it prints the current endpoint and exits 1 when the model
-// layers are off, so the installer can tell whether to ask for one.
-func inferenceCmd(cfg config.Config, baseURL, provider, model string) {
-	if baseURL == "" && provider == "" && model == "" {
+// inferenceCmd shows or sets the model endpoint ([inference] in the config)
+// and its key. Without flags it prints the current endpoint and exits 1 when
+// the model layers are off, so the installer can tell whether to ask for one.
+// Setting either restarts kodeblue, so the change applies at once.
+func inferenceCmd(cfg config.Config, baseURL, provider, model, keyFile string) {
+	if baseURL == "" && provider == "" && model == "" && keyFile == "" {
 		in := cfg.Inference
 		fmt.Printf("endpoint  %s\nprovider  %s\ntriage    %s\nagents    %s\n", orNone(in.BaseURL), orNone(in.Provider), orNone(in.TriageModel), orNone(in.AgentModel))
 		if in.EscalationModel != "" {
@@ -29,12 +34,105 @@ func inferenceCmd(cfg config.Config, baseURL, provider, model string) {
 		return
 	}
 	if os.Geteuid() != 0 {
-		fatal(errors.New("setting the model endpoint must run as root (it writes the config)"))
+		fatal(errors.New("setting the model endpoint must run as root (it writes the config): use sudo"))
 	}
-	if err := writeInference(cfg, baseURL, provider, model); err != nil {
-		fatal(err)
+	if baseURL != "" || provider != "" || model != "" {
+		if err := writeInference(cfg, baseURL, provider, model); err != nil {
+			fatal(err)
+		}
+		fmt.Println("model endpoint saved")
 	}
-	fmt.Println("model endpoint saved; restart kodeblue to use it (systemctl restart kodeblue)")
+	if keyFile != "" {
+		key, err := readKey(keyFile)
+		if err == nil {
+			err = writeKey(cfg.Inference.APIKeyFile, key)
+		}
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Println("API key saved in " + cfg.Inference.APIKeyFile)
+	}
+	restartService()
+}
+
+// readKey reads the API key from a file, or from stdin for "-", asking for it
+// without echo when stdin is a terminal.
+func readKey(f string) (string, error) {
+	var b []byte
+	var err error
+	if f == "-" {
+		if fi, e := os.Stdin.Stat(); e == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprint(os.Stderr, "API key for the model endpoint: ")
+			off := exec.Command("stty", "-echo")
+			off.Stdin = os.Stdin
+			_ = off.Run()
+			defer func() {
+				on := exec.Command("stty", "echo")
+				on.Stdin = os.Stdin
+				_ = on.Run()
+				fmt.Fprintln(os.Stderr)
+			}()
+			line, e := bufio.NewReader(os.Stdin).ReadString('\n')
+			b, err = []byte(line), e
+			if errors.Is(err, io.EOF) {
+				err = nil
+			}
+		} else {
+			b, err = io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
+		}
+	} else {
+		b, err = os.ReadFile(f)
+	}
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(b))
+	if key == "" || strings.ContainsAny(key, "\r\n") {
+		return "", errors.New("the API key must be one non-empty line")
+	}
+	return key, nil
+}
+
+// writeKey stores the key as root:kodeblue 0640, the way the installer does.
+func writeKey(path, key string) error {
+	if path == "" {
+		return errors.New("[inference] api_key_file is not set in the config")
+	}
+	gid := -1
+	if g, err := user.LookupGroup("kodeblue"); err == nil {
+		gid, _ = strconv.Atoi(g.Gid)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(key+"\n"), 0o640); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o640); err != nil {
+		return err
+	}
+	if gid >= 0 {
+		if err := os.Chown(tmp, 0, gid); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tmp, path)
+}
+
+// restartService restarts a running kodeblue under systemd so a new endpoint
+// or key applies; a stopped one (or the installer, before it starts it) uses
+// them when it starts. Without systemd it says to restart it.
+func restartService() {
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		if exec.Command("systemctl", "is-active", "--quiet", "kodeblue.service").Run() != nil {
+			return
+		}
+		if out, err := exec.Command("systemctl", "restart", "kodeblue.service").CombinedOutput(); err == nil {
+			fmt.Println("kodeblue restarted to use it")
+			return
+		} else {
+			fmt.Fprintf(os.Stderr, "could not restart kodeblue: %v %s\n", err, strings.TrimSpace(string(out)))
+		}
+	}
+	fmt.Println("restart kodeblue to use it (sudo systemctl restart kodeblue)")
 }
 
 // writeInference rewrites the [inference] table with the given endpoint,
@@ -47,7 +145,7 @@ func writeInference(cfg config.Config, baseURL, provider, model string) error {
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			return fmt.Errorf("--url must be an http(s) URL, e.g. https://api.example.com (got %q)", baseURL)
 		}
-		in.BaseURL = strings.TrimRight(baseURL, "/")
+		in.BaseURL = config.NormalizeBaseURL(baseURL)
 	}
 	if provider != "" {
 		in.Provider = provider

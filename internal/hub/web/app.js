@@ -604,7 +604,7 @@ function serverBar(srv, tab) {
         h("span", null, srv.online ? "online" : "last seen " + ago(srv.last_seen)),
         srv.hostname ? h("span", null, srv.hostname) : null,
         st.os ? h("span", null, st.os) : null,
-        srv.version ? h("span", null, "v" + srv.version) : null,
+        srv.version ? h("span", null, "v" + String(srv.version).replace(/^v/, "")) : null,
         srv.last_ip ? h("span", null, srv.last_ip) : null),
       h("div", { class: "sp" }),
       h("div", { class: "btns" },
@@ -1845,7 +1845,7 @@ function ask(title, text, okLabel, danger) {
 function installView(res) {
   const cmd = h("div", { class: "cmd" }, res.install_command);
   return [
-    h("div", { class: "note" }, "Run this on the server as root (Ubuntu/Debian/RHEL with systemd, amd64 or arm64):"),
+    h("div", { class: "note" }, "Run this on the server, as root or as a user with sudo (Ubuntu/Debian/RHEL with systemd, amd64 or arm64):"),
     cmd,
     h("div", { class: "btns" }, h("button", { class: "btn small", type: "button", on: { click: async () => { try { await navigator.clipboard.writeText(res.install_command); toast("Copied"); } catch { toast("Copy failed; select the command and copy it", true); } } } }, ic("copy", 12), "Copy command")),
     h("div", { class: "note" }, h("ul", null,
@@ -2681,7 +2681,7 @@ function connectionDialog(conn, orUrl) {
 
 // connectionsPanel lists the fleet's connections. onChange runs after any
 // change with the new list.
-function connectionsPanel(cat, orUrl, onChange) {
+function connectionsPanel(cat, orUrl, onChange, onAdded) {
   const rows = h("div", { class: "mconns" });
   const msg = statusLine();
   const set = (list) => { cat.conns.splice(0, cat.conns.length, ...(list || [])); paint(); cat.models(true); onChange(); };
@@ -2728,7 +2728,10 @@ function connectionsPanel(cat, orUrl, onChange) {
   const addBtn = h("button", { class: "btn primary", type: "button" }, ic("plus", 12), "Add connection");
   addBtn.addEventListener("click", async () => {
     const r = await connectionDialog(null, orUrl);
-    if (r) { set(r.connections); msg.say("Connection added. Pick its models under Agent models.", "ok"); }
+    if (!r) return;
+    set(r.connections);
+    msg.say("Connection added. Pick its models under Agent models.", "ok");
+    if (onAdded) onAdded(msg);
   });
   paint();
   return { el: panel("Model connections", h("div", { class: "bd stack" },
@@ -2784,6 +2787,16 @@ async function fleetAgents(box) {
     placeholders();
     for (const [, f] of models) f.set(f.get()); // repaint connection names
     api("GET", "/api/me").then((r) => (S.info = r)).catch(() => {});
+  }, async (msg) => {
+    // Without a Default nothing uses the new key yet: pick it now, so adding
+    // a key is all a fresh hub needs before Add server.
+    if (!defF || defF.get()) return;
+    const r = await pickModel("Model for every agent", null, cat);
+    if (!r) { msg.say("Connection added. Pick a Default model under Agent models so servers use it.", "ok"); return; }
+    defF.set(r);
+    placeholders();
+    agSave.click();
+    msg.say("Connection added; " + cat.label(r) + " is the Default model for every agent.", "ok");
   });
   const instr = (schema.instruction_roles || []).map((role) => [role, instrBox(fi[role], max, roleName(role))]);
   const appr = (schema.actions || []).map((a) => [a, ruleSelect(fa[a], "Server policy (default)", actionName(a))]);

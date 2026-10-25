@@ -44,6 +44,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; background: none; border: 0; padding: 0; }
 code, pre, kbd, .mono, .tool, .cmd, .tmeta, .cnt, .count { font-family: var(--mono); }
 code { font-size: .9em; }
+code, pre { font-variant-ligatures: none; }   /* "!=" must not draw as "≠" in commands people copy */
 h1, h2, h3, h4 { margin: 0; line-height: 1.3; font-weight: 600; }
 h1 { font-size: 18px; color: rgb(var(--fg)); }
 h2 { font-size: 14px; }

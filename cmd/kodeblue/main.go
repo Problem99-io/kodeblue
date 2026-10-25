@@ -25,9 +25,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,6 +66,7 @@ func main() {
 	infURL := fs.String("url", "", "inference: OpenAI-compatible base URL (https://…)")
 	infModel := fs.String("model", "", "inference: model for triage and agents")
 	infProvider := fs.String("provider", "", "inference: provider label, for gateways that serve several vendors")
+	infKeyFile := fs.String("key-file", "", "inference: file with the endpoint's API key (- reads it from stdin, asking on a terminal)")
 	// Positional args may come before or after flags.
 	var pos []string
 	for len(args) > 0 {
@@ -99,7 +102,7 @@ func main() {
 	case "enroll":
 		enrollCmd(cfg, *hubURL, *hubPin, *hubCA, *name)
 	case "inference":
-		inferenceCmd(cfg, *infURL, *infProvider, *infModel)
+		inferenceCmd(cfg, *infURL, *infProvider, *infModel, *infKeyFile)
 	case "mcp":
 		st := mustStore(cfg)
 		defer st.Close()
@@ -295,21 +298,34 @@ func statusCmd(cfg config.Config) {
 	usd, per, tokens := st.SpentSince(day)
 	hb := st.Get("heartbeat")
 	fmt.Printf("server:        %s\n", cfg.Server.Name)
-	fmt.Printf("heartbeat:     %s\n", hb)
-	fmt.Printf("learned at:    %s\n", st.Get("learned_at"))
+	fmt.Printf("heartbeat:     %s\n", orDash(hb))
+	learned := st.Get("learned_at")
+	if learned == "" {
+		learned = "(still learning)"
+	}
+	fmt.Printf("learned at:    %s\n", learned)
 	if st.Get(store.LearnerPendingKey) != "" {
 		fmt.Println("learning:      waiting for a model; the learner and the vulnerability assessment run once one is set (detection is on)")
 	}
-	fmt.Printf("last review:   %s\n", st.Get("last_review_at"))
-	fmt.Printf("spend today:   $%.4f of $%.2f (%d tokens) %v\n", usd, cfg.Budget.DailyUSD, tokens, per)
-	fmt.Printf("baseline:      %v\n", st.BaselineCounts())
+	fmt.Printf("last review:   %s\n", orDash(st.Get("last_review_at")))
+	fmt.Printf("spend today:   $%.4f of $%.2f (%d tokens)%s\n", usd, cfg.Budget.DailyUSD, tokens, listCounts(per, func(v float64) string { return fmt.Sprintf("$%.4f", v) }))
+	counts := st.BaselineCounts()
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	fmt.Printf("baseline:      %d items%s\n", total, listCounts(counts, strconv.Itoa))
 	fmt.Printf("response mode: %s\n", cfg.Response.Mode)
 	models := cfg.EffectiveModels()
-	fmt.Printf("models:        triage=%s learner=%s responder=%s reviewer=%s operator=%s", models["triage"], models["learner"], models["responder"], models["reviewer"], models["operator"])
-	if m := models["critical"]; m != "" {
-		fmt.Printf(" critical=%s", m)
+	if models["triage"] == "" && models["responder"] == "" {
+		fmt.Println("models:        off (no model set: pick one on the hub, or sudo kodeblue inference --url … --model … --key-file -)")
+	} else {
+		fmt.Printf("models:        triage=%s learner=%s responder=%s reviewer=%s operator=%s", models["triage"], models["learner"], models["responder"], models["reviewer"], models["operator"])
+		if m := models["critical"]; m != "" {
+			fmt.Printf(" critical=%s", m)
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 	var rules []string
 	for _, a := range respond.ActionNames() {
 		rules = append(rules, a+"="+cfg.ActionRule(a))
@@ -552,9 +568,31 @@ func checkRootOwned(path string) error {
 func mustStore(cfg config.Config) *store.Store {
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
+		if os.Geteuid() != 0 {
+			fatal(fmt.Errorf("cannot open %s: kodeblue's state is readable by root only, run it with sudo", cfg.DBPath()))
+		}
 		fatal(err)
 	}
 	return st
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// listCounts formats a map as " (k1 v1, k2 v2)" sorted by key, or "".
+func listCounts[V any](m map[string]V, f func(V) string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		parts = append(parts, k+" "+f(m[k]))
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 func mustID(pos []string) int64 {

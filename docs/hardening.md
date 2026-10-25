@@ -386,7 +386,7 @@ WireGuard drops packets that are not from a configured peer key, so leaving UDP 
 Sign in at `https://10.66.0.1:8443` from a laptop peer. **Add server** prints a command that already uses the WireGuard address and the pin:
 
 ```bash
-f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey sha256//… -o "$f" https://10.66.0.1:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && sudo sh "$f" --hub https://10.66.0.1:8443 --pin sha256//… --token kbe_…; s=$?; rm -f "$f"; (exit "$s"); }
+f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey sha256//… -o "$f" https://10.66.0.1:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://10.66.0.1:8443 --pin sha256//… --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
 ```
 
 Run it on a server whose tunnel is up. Each server still reaches its model endpoint directly, outside the tunnel, unless you route that through a private network too.
@@ -551,7 +551,7 @@ Without a reported cost or these prices, calls count as $0 and the daily budget 
 - **Separate keys per risk.** Use different connections (and keys) for groups of servers with different exposure, and pick models per server in its **Settings** tab, so one leaked key does not cover the fleet.
 - **A key stays with its endpoint.** The console never shows a stored key, and it never moves one to another endpoint: changing a connection's scheme, host or port needs the key pasted again. The audit log records every URL change.
 - **What the hub calls.** The hub calls model endpoints itself only to test a connection and list models, and posts to the Slack webhook. All of these go through the same guard. It refuses loopback, link-local and cloud-metadata addresses unless `--endpoint-allow` lists them ([hub.md](hub.md#connection-and-security-model)), so an operator cannot point it at the hub host's own services or the cloud metadata service. Leave `--endpoint-allow` unset unless a model gateway runs on the hub host.
-- **Rotate.** Create the new key at the provider, paste it into the connection in **Settings**, and revoke the old key once servers have synced (the server's **Settings** tab shows whether it applied the change). Servers with `accept_settings = false` keep their own key: replace `/etc/kodeblue/inference.key` and run `sudo systemctl restart kodeblue`. Rotate the fleet default with `kodeblue-hub fleet set inference-key` (value on stdin).
+- **Rotate.** Create the new key at the provider, paste it into the connection in **Settings**, and revoke the old key once servers have synced (the server's **Settings** tab shows whether it applied the change). Servers with `accept_settings = false` keep their own key: run `sudo kodeblue inference --key-file -` on each, which asks for the new key, stores it and restarts kodeblue. Rotate the fleet default with `kodeblue-hub fleet set inference-key` (value on stdin).
 
 ## Keeping kodeblue itself healthy
 

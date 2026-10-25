@@ -333,6 +333,12 @@ func userCmd(st *hub.Store, pos []string) {
 			fatal(errors.New("usage: kodeblue-hub user add <name>  (password on stdin)"))
 		}
 		pw := readSecret("Password for " + pos[1] + " (min 12 chars): ")
+		// On a terminal, a typo would lock the operator out: ask twice.
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			if again := readSecret("Repeat the password: "); again != pw {
+				fatal(errors.New("the passwords do not match"))
+			}
+		}
 		if err := st.AddUser(pos[1], pw); err != nil {
 			fatal(err)
 		}

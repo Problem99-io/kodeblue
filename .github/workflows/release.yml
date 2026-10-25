@@ -5,8 +5,8 @@ name: Release
 # changed, as the rolling "nightly" pre-release. Pull requests that touch the
 # release build run everything without publishing.
 #
-# Each release has the server tarballs, install.sh, the hub bundles and
-# SHA256SUMS; the hub image goes to ghcr.io/problem99-io/kodeblue-hub.
+# Each release has the server tarballs, install.sh, the hub bundles,
+# install-hub.sh and SHA256SUMS; the hub image goes to ghcr.io/problem99-io/kodeblue-hub.
 
 on:
   push:
@@ -144,7 +144,7 @@ jobs:
       - name: Collect assets
         run: |
           mkdir release
-          cp dist/agent/install.sh dist/agent/kodeblue-linux-*.tar.gz dist/kodeblue-hub-linux-*.tar.gz release/
+          cp dist/agent/install.sh dist/agent/kodeblue-linux-*.tar.gz dist/kodeblue-hub-linux-*.tar.gz dist/install-hub.sh release/
           (cd release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

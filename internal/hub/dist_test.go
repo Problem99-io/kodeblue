@@ -68,8 +68,8 @@ func TestInstallScriptPinsTarballs(t *testing.T) {
 	if snap.sum != sha(snap.script) || !strings.Contains(cmd, `echo "`+snap.sum+`  $f" | sha256sum -c - && `) {
 		t.Fatalf("command does not pin the served script (%s):\n%s", snap.sum, cmd)
 	}
-	for _, part := range []string{`f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey sha256//AbC+/x= -o "$f" https://hub.example.com:8443/install.sh`,
-		`sudo sh "$f" --hub https://hub.example.com:8443 --pin sha256//AbC+/x= --token kbe_tok-123; s=$?; rm -f "$f"; (exit "$s"); }`} {
+	for _, part := range []string{`f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey sha256//AbC+/x= -o "$f" https://hub.example.com:8443/install.sh`,
+		`$r sh "$f" --hub https://hub.example.com:8443 --pin sha256//AbC+/x= --token kbe_tok-123; s=$?; rm -f "$f"; (exit "$s"); }`} {
 		if !strings.Contains(cmd, part) {
 			t.Fatalf("command lacks %q:\n%s", part, cmd)
 		}
@@ -112,7 +112,7 @@ func TestInstallCommandTokenForm(t *testing.T) {
 	s := distHub(t, map[string]string{"install.sh": "#!/bin/sh\n# --token-file F  read the token from F (- for stdin)\nKODEBLUE_ENROLL_TOKEN=$TOKEN\n"})
 	r, _ := http.NewRequest("GET", "https://x/", nil)
 	cmd := s.InstallCommand(r, "kbe_abc")
-	if !strings.Contains(cmd, `printf '%s\n' kbe_abc | sudo sh "$f" --hub https://hub.example.com:8443 --pin sha256//AbC+/x= --token-file -; s=$?`) || strings.Contains(cmd, "--token ") {
+	if !strings.Contains(cmd, `printf '%s\n' kbe_abc | $r sh "$f" --hub https://hub.example.com:8443 --pin sha256//AbC+/x= --token-file -; s=$?`) || strings.Contains(cmd, "--token ") {
 		t.Fatalf("stdin form:\n%s", cmd)
 	}
 	// An older installer (which mentions KODEBLUE_ENROLL_TOKEN only for its
