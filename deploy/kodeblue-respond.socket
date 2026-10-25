@@ -1,0 +1,14 @@
+[Unit]
+Description=kodeblue containment helper socket
+PartOf=kodeblue.service
+
+[Socket]
+ListenStream=/run/kodeblue/respond.sock
+SocketUser=root
+SocketGroup=kodeblue
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

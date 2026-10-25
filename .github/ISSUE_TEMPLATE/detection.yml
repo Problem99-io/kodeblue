@@ -1,0 +1,43 @@
+name: Detection gap or false alert
+description: kodeblue missed something it should have noticed, or alerted on something normal.
+labels: [detection]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the gap lets an attacker blind or disable kodeblue itself, report it privately through **Security → Report a vulnerability** instead. See [SECURITY.md](https://github.com/Problem99-io/kodeblue/blob/main/SECURITY.md).
+
+        Remove addresses, host names, keys and tokens from anything you paste.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - missed detection (an attack or change went unnoticed)
+        - false alert (normal activity was flagged)
+        - wrong verdict (noticed, but triaged or handled wrongly)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kodeblue version`.
+    validations:
+      required: true
+  - type: textarea
+    id: activity
+    attributes:
+      label: The activity
+      description: What happened on the server, step by step, and what it runs (services, containers, web apps).
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What kodeblue did
+      description: Findings, incident summary, monitors that ran (`kodeblue status`, the hub, or the journal).
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it should have done

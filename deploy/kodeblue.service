@@ -1,0 +1,60 @@
+[Unit]
+Description=kodeblue host security monitor
+Documentation=https://github.com/Problem99-io/kodeblue
+After=network-online.target
+Wants=network-online.target
+# Starting kodeblue brings its containment socket back too (stopping kodeblue
+# stops the socket: PartOf= in kodeblue-respond.socket).
+Wants=kodeblue-respond.socket
+# A monitor that gives up is what an attacker wants: never stop restarting.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=kodeblue
+Group=kodeblue
+# Log access without root.
+SupplementaryGroups=adm systemd-journal
+ExecStart=/usr/local/bin/kodeblue run --config /etc/kodeblue/kodeblue.toml
+# Back up whatever brings it down: a crash, a kill, the OOM killer (Restart=),
+# or a hang, when the main loop stops sweeping and stops pinging the watchdog
+# (systemd sends SIGABRT, the stacks land in the journal, then it restarts).
+Restart=always
+RestartSec=5
+WatchdogSec=2min
+NotifyAccess=main
+# Not the kernel's first choice when memory runs out (a miner, a runaway
+# process): the host's monitor should be the last thing it kills.
+OOMScoreAdjust=-900
+
+# Read-only visibility into the whole host, nothing more:
+#  CAP_DAC_READ_SEARCH  read any file (sudoers, other users' authorized_keys, /root)
+#  CAP_SYS_PTRACE       read /proc/<pid>/exe, fd and cmdline of every process
+#  CAP_AUDIT_READ       read the audit log via netlink
+#  CAP_NET_RAW          read HTTP request lines off the wire (request tap;
+#                       [requests] disabled = true and drop it here to opt out)
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_AUDIT_READ CAP_NET_RAW
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_AUDIT_READ CAP_NET_RAW
+NoNewPrivileges=yes
+
+# The daemon (and the agents' tools it spawns) cannot modify the host.
+# Containment actions go through kodeblue-respond.socket, a separate root service.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/kodeblue
+# No PrivateTmp: the tmp_exec sensor must see the host's real /tmp.
+Environment=TMPDIR=/var/lib/kodeblue/tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

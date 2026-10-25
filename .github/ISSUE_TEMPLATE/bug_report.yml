@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in the agent, hub, installer or response helper does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem (a way to get around the response policy, the hub, enrollment, or to read another server's data) goes through **Security → Report a vulnerability**, not here. See [SECURITY.md](https://github.com/Problem99-io/kodeblue/blob/main/SECURITY.md).
+
+        Remove addresses, host names, keys and tokens from anything you paste.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - agent (kodeblue)
+        - hub (kodeblue-hub)
+        - installer / packaging
+        - response helper
+        - engine
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kodeblue version` (and `kodeblue-hub version` for hub issues).
+      placeholder: kodeblue v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Distribution and architecture
+      placeholder: Ubuntu 24.04, arm64
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: For example `journalctl -u kodeblue --since "10 min ago"`.
+      render: text

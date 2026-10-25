@@ -1,0 +1,11 @@
+[Unit]
+Description=kodeblue containment helper (one request)
+
+[Service]
+# Runs as root, outside the monitor's sandbox, for exactly one request.
+# Policy is read from the root-owned config; the caller cannot change it.
+ExecStart=/usr/local/bin/kodeblue respond exec --config /etc/kodeblue/kodeblue.toml
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutSec=120

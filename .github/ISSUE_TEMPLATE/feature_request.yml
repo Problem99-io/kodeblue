@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest a new sensor, monitor kind, response action, hub feature or integration.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and why kodeblue does not cover it today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+  - type: textarea
+    id: security
+    attributes:
+      label: Effect on the security model
+      description: Does it need new privileges, a new tool for the agents, or a new path from the hub to servers? See "Guidelines" in CONTRIBUTING.md.

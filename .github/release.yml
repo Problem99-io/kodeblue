@@ -1,0 +1,20 @@
+# Sections of the release notes GitHub generates for a stable release, by
+# pull request label.
+changelog:
+  exclude:
+    labels: [skip-changelog]
+  categories:
+    - title: Security
+      labels: [security]
+    - title: Detection
+      labels: [detection]
+    - title: Features
+      labels: [enhancement]
+    - title: Fixes
+      labels: [bug]
+    - title: Documentation
+      labels: [documentation]
+    - title: Dependencies
+      labels: [dependencies]
+    - title: Other changes
+      labels: ["*"]

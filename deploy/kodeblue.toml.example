@@ -1,0 +1,94 @@
+# /etc/kodeblue/kodeblue.toml — root:kodeblue 0640. The response helper refuses
+# to run if this file is writable by anyone but root.
+
+[server]
+name = "web-1"                  # defaults to the hostname
+state_dir = "/var/lib/kodeblue"
+
+[inference]
+# Any OpenAI-compatible endpoint: kodeblue calls {base_url}/v1/chat/completions
+# with a Bearer key. Until base_url, a key and the models are set, the model
+# layers (triage, agents) stay off; sensors, detection and monitors still run.
+# `kodeblue inference --url … --model …` sets this table for you.
+# base_url = "https://api.example.com"
+api_key_file = "/etc/kodeblue/inference.key"   # root:kodeblue 0640, one line
+# provider = "openai-compatible"      # routing label, for gateways that serve several vendors
+# triage_model = "small-model"        # one batched call per triage window
+# agent_model = "small-model"         # learning, incidents, reviews
+# escalation_model = "larger-model"   # optional: critical incidents use a stronger model
+# agent_models = { responder = "larger-model" }   # optional: a model per agent (learner, responder, reviewer, operator)
+# OpenRouter: base_url = "https://openrouter.ai/api", provider = "openrouter", models like "vendor/model".
+# With a hub, the console (Settings) can add several model connections (an inference manager,
+# OpenRouter, any OpenAI-compatible API) and pick a model per agent from any of them; see
+# [hub] accept_settings.
+
+# [agents]
+# Extra instructions added after an agent's own prompt: all, learner, responder, reviewer, operator.
+# instructions = { all = "Our maintenance window is Sunday 02:00-04:00 UTC." }
+
+[schedule]
+sweep_seconds = 60          # sensors + detection + monitors (no tokens)
+fast_watch_seconds = 5      # stat() of high-value paths; a change triggers a sweep immediately
+triage_seconds = 120        # batching window for the triage model
+review_hours = 24           # drift review + false-positive tuning session
+learning_minutes = 30       # baseline learning window before detection starts
+learning_sweeps = 10
+# retention_days = 90       # settled findings, journal and cost ledger; never open incidents (negative: keep forever)
+
+[detect]
+collectors = []                     # empty = all
+extra_integrity_paths = []          # e.g. ["/opt/app/bin/server"]
+debounce_sweeps = 2                 # a change must persist this many sweeps (instant rules excepted)
+realert_hours = 24
+bruteforce_threshold = 20           # failures / 10 min from one IP
+auto_accept_confidence = 0.85       # triage "benign" at or above this is absorbed (never for protected rules)
+
+[budget]
+daily_usd = 1.00                    # past this, only critical findings reach a model (hard stop at 2x)
+# Spend is the cost the endpoint reports per call. If yours reports none, set
+# your model's prices (USD per million tokens) or daily_usd is not enforced.
+# input_usd_per_mtok = 0.10
+# output_usd_per_mtok = 0.40
+max_concurrent_incidents = 2
+max_incidents_per_hour = 6
+incident_max_iterations = 30
+
+[response]
+# off       — agents can only recommend in their reports
+# recommend — agents request actions; an operator runs `kodeblue respond approve <id>`
+# contain   — agents execute actions immediately (reversible, journaled, rate-limited)
+mode = "recommend"
+allowed_actions = ["kill_process", "quarantine_file", "block_ip", "disable_ssh_key", "lock_user", "stop_unit"]
+protected_users = ["root"]                     # never locked, keys never disabled (also root, uid 0, sudo/wheel/admin)
+protected_ips = []                             # your office / VPN / bastion, IPs or CIDRs
+refuse_private_ips = false                     # true: never block private addresses, even internal attackers
+protected_units = ["ssh", "sshd", "kodeblue", "systemd-*", "dbus", "networking", "docker", "containerd"]
+max_actions_per_hour = 10
+
+[notify]
+# With a kodeblue hub, Slack is configured on the hub (Settings): this server
+# queues its notifications and the hub posts them; the webhook below is ignored
+# unless direct = true (an extra, independent channel the hub cannot suppress).
+# direct = false
+#
+# Without a hub: one-way updates to a Slack channel via an incoming webhook (not a bot; no replies).
+# Put the webhook URL in this file (root:kodeblue 0640) — it is a credential.
+slack_webhook_file = "/etc/kodeblue/slack.webhook"
+# slack_webhook_url = "https://hooks.slack.com/services/…"   # inline alternative
+min_severity = "high"            # automatic incident-opened/outcome notices at or above this
+                                 # (agents still post anything suspicious themselves)
+agent_messages_per_hour = 20     # cap on the agents' notify_slack tool
+# Containment actions (executed, awaiting approval, refused, undone) are ALWAYS posted.
+
+# [hub] — written by `kodeblue enroll` (the installer runs it when given --token).
+# kodeblue dials out to the hub; nothing on this server listens for it.
+# url = "https://hub.example.com"
+# key_file = "/etc/kodeblue/hub.key"     # this server's own API key, root:kodeblue 0640
+# pin = "sha256//…"                      # only for a hub with a self-signed certificate
+# accept_messages = true                 # operators can message this server's agents from the hub
+# share_transcripts = true               # agents' reasoning and tool calls are visible on the hub
+# messages_per_hour = 20
+# accept_approvals = true                # operators can approve/deny containment the agents asked for (recommend mode)
+# accept_settings = true                 # take the model endpoint, per-agent models and instructions, and approval
+#                                        # rules from the hub console; rules can only tighten [response] above
+# accept_learning = true                 # operators can run the learner or relearn the baseline from the hub
