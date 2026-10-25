@@ -1,0 +1,23 @@
+# A disposable server WITHOUT kodeblue, for testing the real install path:
+# the hub's one-line install command, enrollment and the hub link.
+#   docker build -f deploy/e2e/Dockerfile.bare -t kodeblue-e2e-bare .
+# There is no systemd in the container, so after installing (with --no-start)
+# touch /etc/kodeblue/.e2e-start and the entrypoint runs kodeblue as its own
+# user with the capabilities the systemd unit grants.
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server cron sudo procps iproute2 iptables python3 netcat-openbsd curl ca-certificates rsyslog util-linux file \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash -G sudo alice \
+ && install -d -o alice -g alice -m 700 /home/alice/.ssh \
+ && echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeAliceKeyForE2eTestingOnly00000000000 alice@laptop" > /home/alice/.ssh/authorized_keys \
+ && chown alice:alice /home/alice/.ssh/authorized_keys && chmod 600 /home/alice/.ssh/authorized_keys \
+ && echo 'alice ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/alice && chmod 440 /etc/sudoers.d/alice \
+ && mkdir -p /run/sshd /opt/shop \
+ && printf '*/10 * * * * root /usr/bin/find /opt/shop -name "*.tmp" -mmin +60 -delete\n' > /etc/cron.d/shop-cleanup \
+ && echo 'kodeblue ALL=(root) NOPASSWD: /usr/local/bin/kodeblue respond exec --config /etc/kodeblue/kodeblue.toml' > /etc/sudoers.d/kodeblue \
+ && chmod 440 /etc/sudoers.d/kodeblue
+COPY deploy/e2e/shop.py /opt/shop/app.py
+COPY deploy/e2e/slack_mock.py /usr/local/lib/slack_mock.py
+COPY deploy/e2e/entrypoint-bare.sh /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

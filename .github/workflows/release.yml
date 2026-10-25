@@ -1,0 +1,243 @@
+name: Release
+
+# Stable: push a tag vMAJOR.MINOR.PATCH (or vMAJOR.MINOR.PATCH-rc.N for a
+# pre-release) on a commit of main. Nightly: every night when main has
+# changed, as the rolling "nightly" pre-release. Pull requests that touch the
+# release build run everything without publishing.
+#
+# Each release has the server tarballs, install.sh, the hub bundles and
+# SHA256SUMS; the hub image goes to ghcr.io/problem99-io/kodeblue-hub.
+
+on:
+  push:
+    tags: ['v*']
+  schedule:
+    - cron: '17 2 * * *' # 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build a nightly even if main has not changed since the last one
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - deploy/build-dist.sh
+      - deploy/hub/Dockerfile
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/problem99-io/kodeblue-hub
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      latest: ${{ steps.plan.outputs.latest }}
+      skip: ${{ steps.plan.outputs.skip }}
+      sha: ${{ steps.plan.outputs.sha }}
+      epoch: ${{ steps.plan.outputs.epoch }}
+      tags: ${{ steps.plan.outputs.tags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -eu
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=12 HEAD)
+          epoch=$(git log -1 --format=%ct HEAD)
+          last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || echo v0.0.0)
+          skip=false publish=true prerelease=true latest=false
+          case "$EVENT" in
+            push)
+              channel=stable version=$REF_NAME
+              if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+                echo "::error::tag $version is not vMAJOR.MINOR.PATCH[-pre]"; exit 1
+              fi
+              if ! git merge-base --is-ancestor "$sha" origin/main; then
+                echo "::error::$version does not point at a commit on main"; exit 1
+              fi
+              mm=$(printf '%s' "$version" | sed -E 's/^(v[0-9]+\.[0-9]+)\..*/\1/')
+              case "$version" in
+                *-*) tags="$IMAGE:$version" ;;
+                *) prerelease=false latest=true tags="$IMAGE:$version,$IMAGE:$mm,$IMAGE:latest" ;;
+              esac
+              ;;
+            pull_request)
+              channel=dry-run publish=false version="$last-dryrun.$short" tags="$IMAGE:dry-run"
+              ;;
+            *)
+              channel=nightly
+              day=$(date -u +%Y%m%d)
+              version="$last-nightly.$day.$short"
+              tags="$IMAGE:nightly,$IMAGE:nightly-$day"
+              prev=$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)
+              if [ "$prev" = "$sha" ] && [ "$FORCE" != true ]; then
+                echo "main has not changed since the last nightly ($short); skipping"
+                skip=true
+              fi
+              ;;
+          esac
+          {
+            echo "channel=$channel"; echo "version=$version"; echo "publish=$publish"
+            echo "prerelease=$prerelease"; echo "latest=$latest"; echo "skip=$skip"
+            echo "sha=$sha"; echo "epoch=$epoch"; echo "tags=$tags"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [plan, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build release files
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.sha }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.epoch }}
+        run: sh deploy/build-dist.sh dist
+      - name: Check the build is reproducible
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.sha }}
+          SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.epoch }}
+        run: |
+          sh deploy/build-dist.sh /tmp/again
+          (cd dist && sha256sum agent/* kodeblue-hub-*.tar.gz) > /tmp/a
+          (cd /tmp/again && sha256sum agent/* kodeblue-hub-*.tar.gz) > /tmp/b
+          diff /tmp/a /tmp/b
+      - name: Check the stamped version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          tar -xzf dist/agent/kodeblue-linux-amd64.tar.gz -C /tmp
+          test "$(/tmp/kodeblue/kodeblue version)" = "kodeblue $VERSION"
+      - name: Collect assets
+        run: |
+          mkdir release
+          cp dist/agent/install.sh dist/agent/kodeblue-linux-*.tar.gz dist/kodeblue-hub-linux-*.tar.gz release/
+          (cd release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  image:
+    needs: [plan, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: needs.plan.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/hub/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          tags: ${{ needs.plan.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.plan.outputs.version }}
+            COMMIT=${{ needs.plan.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ needs.plan.outputs.epoch }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.sha }}
+          provenance: mode=max
+          sbom: true
+
+  publish:
+    needs: [plan, build, image]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+      LATEST: ${{ needs.plan.outputs.latest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+      - name: Is the repository public?
+        id: vis
+        run: echo "public=$([ "$(gh api "repos/$GH_REPO" --jq .visibility)" = public ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      # Build provenance (verify with `gh attestation verify <file> -R Problem99-io/kodeblue`).
+      # GitHub only offers it for public repositories on this plan.
+      - if: steps.vis.outputs.public == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+      - name: Stable release
+        if: env.CHANNEL == 'stable'
+        run: |
+          set -eu
+          flags=(--verify-tag --generate-notes --title "kodeblue $VERSION")
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          if [ "$LATEST" = true ]; then flags+=(--latest); else flags+=(--latest=false); fi
+          gh release create "$VERSION" release/* "${flags[@]}" --notes "Hub image: \`ghcr.io/problem99-io/kodeblue-hub:$VERSION\`"
+      - name: Nightly release
+        if: env.CHANNEL == 'nightly'
+        run: |
+          set -eu
+          # Move the rolling tag, then replace the release that hangs off it.
+          if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$SHA" >/dev/null
+          fi
+          gh release delete nightly --yes 2>/dev/null || true
+          cat > notes.md <<EOF
+          Nightly build \`$VERSION\` from $SHA. Not for production: use the latest stable release.
+
+          Hub image: \`ghcr.io/problem99-io/kodeblue-hub:nightly\`
+          EOF
+          gh release create nightly release/* --prerelease --latest=false --title "kodeblue nightly" --notes-file notes.md

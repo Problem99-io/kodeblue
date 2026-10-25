@@ -1,0 +1,11 @@
+.git
+.github
+.kodeblue
+bin
+dist
+*.db
+*.db-wal
+*.db-shm
+*.out
+*.tar.gz
+.DS_Store

@@ -1,0 +1,32 @@
+[server]
+name = "shop-prod-1"
+state_dir = "/var/lib/kodeblue"
+
+[inference]
+# Point this at your OpenAI-compatible endpoint and models before building.
+base_url = "https://api.example.com"
+api_key_file = "/etc/kodeblue/inference.key"
+triage_model = "small-model"
+agent_model = "small-model"
+
+[schedule]
+sweep_seconds = 15
+fast_watch_seconds = 3
+triage_seconds = 30
+review_hours = 1000
+learning_minutes = 1
+learning_sweeps = 3
+
+[budget]
+daily_usd = 2.0
+max_concurrent_incidents = 2
+max_incidents_per_hour = 20
+incident_max_iterations = 30
+
+[response]
+mode = "contain"
+protected_ips = []
+
+[notify]
+slack_webhook_file = "/etc/kodeblue/slack.webhook"
+min_severity = "high"

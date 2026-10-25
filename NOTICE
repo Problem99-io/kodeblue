@@ -1,0 +1,16 @@
+kodeblue
+Copyright 2026 Problem99
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party material under its own license:
+
+- internal/tokenestimate/assets/o200k_base.tiktoken: the o200k_base BPE
+  vocabulary from OpenAI's tiktoken (https://github.com/openai/tiktoken),
+  Copyright (c) 2022 OpenAI, Shantanu Jain. MIT License.
+- internal/hub/web/JetBrainsMono-Regular.woff2 (and the glyphs outlined from it
+  in the console logo): JetBrains Mono, Copyright 2020 The JetBrains Mono
+  Project Authors. SIL Open Font License 1.1
+  (internal/hub/web/JetBrainsMono-OFL.txt).
+
+Go module dependencies are listed in go.mod; each carries its own license.

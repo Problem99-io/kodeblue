@@ -1,0 +1,41 @@
+[Unit]
+Description=kodeblue hub (central console for kodeblue servers)
+Documentation=https://github.com/Problem99-io/kodeblue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kodeblue-hub
+Group=kodeblue-hub
+EnvironmentFile=/etc/kodeblue-hub/env
+ExecStart=/usr/local/bin/kodeblue-hub serve
+Restart=always
+RestartSec=5
+# Bind 443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/kodeblue-hub
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

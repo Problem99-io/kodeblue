@@ -1,0 +1,38 @@
+# Build output
+bin/
+dist/
+
+# Local runtime state (may contain credentials)
+/.kodeblue/
+
+# Secrets that must never be committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+im.key
+hub.key
+slack.webhook
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Go
+*.exe
+*.test
+*.out
+
+# Local builds and release output
+/kodeblue
+/kodeblue-hub
+/kodeblue-engine
+*.tar.gz
+
+# Editor and OS clutter
+.DS_Store
+.idea/
+.vscode/
+*.swp

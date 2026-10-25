@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Problem99-io/kodeblue/security/advisories/new
+    about: Privately, so it can be fixed before it is public. Please do not open an issue.
+  - name: Documentation
+    url: https://github.com/Problem99-io/kodeblue/tree/main/docs
+    about: Deploying, hardening, the hub and how detection works.
