@@ -241,6 +241,7 @@ func Load(path string) (Config, error) {
 	// The hub and the model endpoints are infrastructure block_ip must never
 	// cut off. They come from the root-owned config (the root helper reads
 	// only that), never from a request.
+	c.Inference.BaseURL = NormalizeBaseURL(c.Inference.BaseURL)
 	c.Response.InfraHosts = nil
 	for _, h := range []string{c.Hub.URL, c.Inference.BaseURL} {
 		if strings.TrimSpace(h) != "" {
@@ -261,6 +262,13 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Path() string { return c.path }
+
+// NormalizeBaseURL turns an endpoint as vendors document it ("…/v1",
+// trailing slash) into the base kodeblue appends /v1/chat/completions to.
+func NormalizeBaseURL(u string) string {
+	u = strings.TrimRight(strings.TrimSpace(u), "/")
+	return strings.TrimSuffix(u, "/v1")
+}
 
 // IntegrityPaths is the full list of extra files the integrity collector
 // hashes: configured paths, paths the agents added (learned), and kodeblue's

@@ -1,6 +1,9 @@
 #!/bin/sh
 # kodeblue installer — one kodeblue per server, running as its own user.
 #
+# One server, no hub (downloads the latest release from GitHub and checks it
+# against the release's SHA256SUMS; asks for the model's API key):
+#   curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
 # From a kodeblue hub (the command the hub's "Add server" dialog prints):
 #   curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- --hub https://hub.example.com --token kbe_…
 # From an unpacked release directory (offline):
@@ -24,6 +27,10 @@
 #   --slack-webhook-file F Slack incoming-webhook URL, only for servers WITHOUT a hub (with a hub, Slack is set on the hub)
 #   --no-start             install and enroll, but do not start the services
 #   --uninstall [--purge]  remove kodeblue (--purge also deletes its config and state)
+#
+# Without --hub, KODEBLUE_RELEASE_URL picks another release to download from
+# (default https://github.com/Problem99-io/kodeblue/releases/latest/download;
+# e.g. …/releases/download/v0.2.0 for one version).
 #:usage-end
 set -eu
 
@@ -88,16 +95,8 @@ fi
 here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)
 root=$(cd "$here/.." 2>/dev/null && pwd || echo /nonexistent)
 
-# ---- bootstrap: fetch the release from the hub when not run from one ----
+# ---- bootstrap: fetch the release (from the hub, or GitHub) when not run from one ----
 if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$here/kodeblue.service" ]; then
-  [ -n "$HUB" ] || die "not run from a release directory: pass --hub (and --token) to download kodeblue from your hub"
-  # curl may use only the hub URL's own protocol, redirects included, so a
-  # proxy cannot downgrade the download (and its credential) to plain HTTP.
-  case "$HUB" in
-    https://*) PROTO=https ;;
-    http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
-    *) die "--hub must be an https:// URL" ;;
-  esac
   case "$(uname -m)" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
@@ -105,33 +104,54 @@ if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$her
   esac
   command -v curl >/dev/null 2>&1 || die "curl is required"
   command -v tar >/dev/null 2>&1 || die "tar is required"
-  AUTH=$TOKEN
-  if [ -z "$AUTH" ] && [ -s /etc/kodeblue/hub.key ]; then AUTH=$(cat /etc/kodeblue/hub.key); fi
-  [ -n "$AUTH" ] || die "pass --token (from the hub's Add server dialog) to download kodeblue"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT INT TERM
-  # The credential goes in a header file, never on curl's command line.
-  printf 'Authorization: Bearer %s\n' "$AUTH" > "$tmp/auth.h"
-  chmod 600 "$tmp/auth.h"
-  fetch() {
-    if [ -n "$PIN" ]; then
-      curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -k --pinnedpubkey "$PIN" -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
-    elif [ -n "$CA" ]; then
-      curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 --cacert "$CA" -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
-    else
-      curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
-    fi
-  }
-  say "downloading kodeblue ($ARCH) from $HUB"
-  fetch "kodeblue-linux-$ARCH.tar.gz" "$tmp/kodeblue.tgz" || die "download failed (expired token? wrong pin?)"
-  if [ -n "${KODEBLUE_DIST_SHA256SUMS:-}" ]; then
-    # Pinned into this script by the hub that served it, so a tarball swapped
-    # together with the SHA256SUMS beside it still fails the check.
-    printf '%s\n' "$KODEBLUE_DIST_SHA256SUMS" > "$tmp/SHA256SUMS"
+  if [ -z "$HUB" ]; then
+    REL=${KODEBLUE_RELEASE_URL:-https://github.com/Problem99-io/kodeblue/releases/latest/download}
+    REL=${REL%/}
+    # Only HTTPS, redirects included (GitHub redirects downloads to its CDN).
+    case "$REL" in
+      https://*) PROTO=https ;;
+      http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
+      *) die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
+    esac
+    say "downloading kodeblue ($ARCH) from $REL"
+    curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/kodeblue.tgz" "$REL/kodeblue-linux-$ARCH.tar.gz" || die "download of kodeblue-linux-$ARCH.tar.gz failed"
+    curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/SHA256SUMS" "$REL/SHA256SUMS" || die "download of SHA256SUMS failed"
   else
-    fetch SHA256SUMS "$tmp/SHA256SUMS" || die "download of SHA256SUMS failed"
+    # curl may use only the hub URL's own protocol, redirects included, so a
+    # proxy cannot downgrade the download (and its credential) to plain HTTP.
+    case "$HUB" in
+      https://*) PROTO=https ;;
+      http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
+      *) die "--hub must be an https:// URL" ;;
+    esac
+    AUTH=$TOKEN
+    if [ -z "$AUTH" ] && [ -s /etc/kodeblue/hub.key ]; then AUTH=$(cat /etc/kodeblue/hub.key); fi
+    [ -n "$AUTH" ] || die "pass --token (from the hub's Add server dialog) to download kodeblue"
+    # The credential goes in a header file, never on curl's command line.
+    printf 'Authorization: Bearer %s\n' "$AUTH" > "$tmp/auth.h"
+    chmod 600 "$tmp/auth.h"
+    fetch() {
+      if [ -n "$PIN" ]; then
+        curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -k --pinnedpubkey "$PIN" -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
+      elif [ -n "$CA" ]; then
+        curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 --cacert "$CA" -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
+      else
+        curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -H @"$tmp/auth.h" -o "$2" "$HUB/dist/$1"
+      fi
+    }
+    say "downloading kodeblue ($ARCH) from $HUB"
+    fetch "kodeblue-linux-$ARCH.tar.gz" "$tmp/kodeblue.tgz" || die "download failed (expired token? wrong pin?)"
+    if [ -n "${KODEBLUE_DIST_SHA256SUMS:-}" ]; then
+      # Pinned into this script by the hub that served it, so a tarball swapped
+      # together with the SHA256SUMS beside it still fails the check.
+      printf '%s\n' "$KODEBLUE_DIST_SHA256SUMS" > "$tmp/SHA256SUMS"
+    else
+      fetch SHA256SUMS "$tmp/SHA256SUMS" || die "download of SHA256SUMS failed"
+    fi
+    rm -f "$tmp/auth.h"
   fi
-  rm -f "$tmp/auth.h"
   want=$(grep " kodeblue-linux-$ARCH.tar.gz\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
   got=$(sha256sum "$tmp/kodeblue.tgz" | cut -d' ' -f1)
   { [ -n "$want" ] && [ "$want" = "$got" ]; } || die "checksum mismatch for kodeblue-linux-$ARCH.tar.gz"
@@ -260,15 +280,16 @@ fi
 # ---- model endpoint (flags > hub default from enrollment > prompt) ----
 kb() { /usr/local/bin/kodeblue "$@" --config /etc/kodeblue/kodeblue.toml; }
 if [ -n "$INFURL" ] || [ -n "$INFMODEL" ]; then
-  kb inference --url "$INFURL" --model "$INFMODEL" || die "could not set the model endpoint"
+  kb inference --url "$INFURL" --model "$INFMODEL" >/dev/null || die "could not set the model endpoint"
 elif ! kb inference >/dev/null 2>&1 && ! grep -q '^base_url *= *"' /etc/kodeblue/kodeblue.toml; then
-  u=$(readline "Model endpoint, any OpenAI-compatible base URL (Enter to skip; the model layers stay off until it is set): ")
+  u=$(readline "Model endpoint, any OpenAI-compatible base URL such as https://openrouter.ai/api (Enter to skip; the model layers stay off until it is set): ")
   if [ -n "$u" ]; then
     m=$(readline "Model name for triage and agents: ")
-    if [ -n "$m" ]; then kb inference --url "$u" --model "$m" || warn "model endpoint not saved"; fi
+    if [ -n "$m" ]; then kb inference --url "$u" --model "$m" >/dev/null || warn "model endpoint not saved"; fi
   fi
 fi
-if [ ! -s /etc/kodeblue/inference.key ]; then
+# A key only means something with the server's own endpoint.
+if [ ! -s /etc/kodeblue/inference.key ] && grep -q '^base_url *= *"' /etc/kodeblue/kodeblue.toml; then
   k=$(readsecret "API key for the model endpoint (Enter to skip): ")
   if [ -n "$k" ]; then putsecret "$k" /etc/kodeblue/inference.key; fi
 fi
@@ -285,22 +306,28 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
   install -m 0644 "$here/kodeblue.service" "$here/kodeblue-respond.socket" "$here/kodeblue-respond@.service" /etc/systemd/system/
   systemctl daemon-reload
   if [ "$START" = 1 ]; then
-    systemctl enable --now kodeblue-respond.socket >/dev/null
+    systemctl --quiet enable --now kodeblue-respond.socket
     # Enabled = started at boot; the unit restarts it after a crash, a kill,
     # the OOM killer or a hang (watchdog).
     systemctl enable kodeblue.service >/dev/null 2>&1 || die "could not enable kodeblue.service, so it would not start at boot (systemctl enable kodeblue)"
     systemctl restart kodeblue.service
-    say "kodeblue is running and restarts itself if it crashes, is killed or hangs: journalctl -fu kodeblue"
+    say "kodeblue is running and restarts itself if it crashes, is killed or hangs"
   fi
 else
   warn "systemd not found: services not installed. Run '/usr/local/bin/kodeblue run' as the kodeblue user under your supervisor."
 fi
 
-kb inference >/dev/null 2>&1 || warn "model layers are off ($(kb inference 2>/dev/null | sed -n 's/^models *off (\(.*\))$/\1/p')): sensors, detection and monitors run. Set the endpoint with 'kodeblue inference --url … --model …', the key in /etc/kodeblue/inference.key, then systemctl restart kodeblue"
+if ! kb inference >/dev/null 2>&1; then
+  if [ -s /etc/kodeblue/hub.key ]; then
+    warn "no model yet: sensors, detection and monitors run, and learning waits for a model. Add a model connection in the hub's Settings; this server picks it up on its own."
+  else
+    warn "no model yet: sensors, detection and monitors run, and learning waits for a model. Set one with: sudo kodeblue inference --url https://… --model … --key-file -"
+  fi
+fi
 if [ "$UPGRADE" = 1 ]; then
   say "upgraded. A 10-minute maintenance window absorbs the binary swap (journaled; visible on the hub)."
 else
   say "done. kodeblue first learns this server (about 30 minutes), then watches it."
 fi
 if [ -s /etc/kodeblue/hub.key ]; then say "reporting to the hub at $(grep -m1 '^url = ' /etc/kodeblue/kodeblue.toml | cut -d'"' -f2)"; fi
-say "status: kodeblue status · policy: /etc/kodeblue/kodeblue.toml ([response] mode)"
+say "status: sudo kodeblue status · logs: sudo journalctl -fu kodeblue · policy: /etc/kodeblue/kodeblue.toml ([response] mode)"

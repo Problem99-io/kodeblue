@@ -436,12 +436,13 @@ func (s *Server) InstallCommand(r *http.Request, token string) string {
 		// with the hub's explanation.
 		return fmt.Sprintf("%s %s/install.sh | sudo sh -s -- --hub %s%s --token %s", curl, base, base, extra, shq(token))
 	}
-	run := fmt.Sprintf(`sudo sh "$f" --hub %s%s --token %s`, base, extra, shq(token))
+	// $r is sudo, or nothing for root: root on a minimal server may have no sudo.
+	run := fmt.Sprintf(`$r sh "$f" --hub %s%s --token %s`, base, extra, shq(token))
 	if snap.tokenStdin {
-		run = fmt.Sprintf(`printf '%%s\n' %s | sudo sh "$f" --hub %s%s --token-file -`, shq(token), base, extra)
+		run = fmt.Sprintf(`printf '%%s\n' %s | $r sh "$f" --hub %s%s --token-file -`, shq(token), base, extra)
 	}
 	// The braces keep the installer's exit status past the cleanup.
-	return fmt.Sprintf(`f=$(mktemp) && { %s -o "$f" %s/install.sh && echo "%s  $f" | sha256sum -c - && %s; s=$?; rm -f "$f"; (exit "$s"); }`, curl, base, snap.sum, run)
+	return fmt.Sprintf(`f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { %s -o "$f" %s/install.sh && echo "%s  $f" | sha256sum -c - && %s; s=$?; rm -f "$f"; (exit "$s"); }`, curl, base, snap.sum, run)
 }
 
 func (s *Server) publicURL(r *http.Request) string {

@@ -4,7 +4,18 @@ This page covers installing the hub, adding servers, running kodeblue without a 
 
 ## Get the release files
 
-Download them from [GitHub Releases](https://github.com/Problem99-io/kodeblue/releases):
+The quickest way needs no download step: `install.sh` (a server) and `install-hub.sh` (the hub) from a release fetch the right files for the machine's architecture, check them against the release's `SHA256SUMS` and install them, in one command:
+
+```bash
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
+```
+
+`KODEBLUE_RELEASE_URL` (passed through `sudo`: `sudo KODEBLUE_RELEASE_URL=… sh -s -- …`) points them at another release, such as `https://github.com/Problem99-io/kodeblue/releases/download/nightly` or a mirror on your network (`https://` only).
+
+### Install from the release files
+
+To check the files yourself before anything runs as root, download them from [GitHub Releases](https://github.com/Problem99-io/kodeblue/releases):
 
 - **stable**: `vX.Y.Z` releases; `releases/latest/download/<file>` always points at the newest one
 - **nightly**: the rolling `nightly` pre-release, rebuilt every night that `main` changed (`releases/download/nightly/<file>`); for testing, not production
@@ -33,6 +44,7 @@ This produces the same files as a release:
 | `dist/agent/kodeblue-linux-{amd64,arm64}.tar.gz` | the server release: `kodeblue`, `kodeblue-engine`, `deploy/` (installer, units, example config) |
 | `dist/agent/SHA256SUMS` | checksums the installer verifies downloads against |
 | `dist/kodeblue-hub-linux-{amd64,arm64}.tar.gz` | hub bundles: `kodeblue-hub`, `install-hub.sh`, `kodeblue-hub.service`, and a copy of `dist/agent` as `dist/` |
+| `dist/install-hub.sh` | the hub installer on its own, which downloads a hub bundle |
 
 Environment variables: `ARCHES="amd64"` builds one architecture, `VERSION=v1.2.3` stamps a version (default: `git describe --tags --always --dirty`). `SOURCE_DATE_EPOCH` defaults to the commit time, so with GNU tar the same commit gives byte-identical tarballs; compare yours with a release's `SHA256SUMS` to check it.
 
@@ -51,6 +63,14 @@ Without one of these, the hub refuses to start unless it listens on a loopback a
 `--public-url` is the URL that servers and browsers use to reach the hub. It goes into the install commands the hub prints. It must be `https://` (plain `http://` only to localhost), and `--behind-proxy` requires an `https://` public URL.
 
 ### On a Linux host with systemd
+
+In one command, from the latest release:
+
+```bash
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
+```
+
+Or from a bundle you copied over:
 
 ```bash
 scp dist/kodeblue-hub-linux-amd64.tar.gz hub.example.com:
@@ -86,10 +106,10 @@ The installer:
 3. creates `/var/lib/kodeblue-hub` (0700) and copies the agent release to `/var/lib/kodeblue-hub/dist`
 4. writes `/etc/kodeblue-hub/env` (root:kodeblue-hub 0640) with the `KODEBLUE_HUB_*` settings
 5. installs `/etc/systemd/system/kodeblue-hub.service` (sandboxed: `ProtectSystem=strict`, `NoNewPrivileges`, only `CAP_NET_BIND_SERVICE`)
-6. asks for the first operator's password if there is no operator yet (use `ssh -t`: it reads from the terminal)
+6. asks for the first operator's password, twice, if there is no operator yet (use `ssh -t`: it reads from the terminal)
 7. enables and starts the service, and prints the pin when self-signed
 
-Logs: `journalctl -fu kodeblue-hub`. Health: `GET /healthz` returns `ok`.
+Logs: `sudo journalctl -fu kodeblue-hub`. Health: `GET /healthz` returns `ok`.
 
 Running `install-hub.sh` again rewrites the `KODEBLUE_HUB_*` keys for the TLS mode and addresses (`DATA`, `LISTEN`, `PUBLIC_URL`, `SELF_SIGNED`, `BEHIND_PROXY`, `TLS_CERT`, `TLS_KEY`) in `/etc/kodeblue-hub/env`, so pass the same mode and `--public-url` again. `TRUSTED_PROXIES`, `CONSOLE_ALLOW` and `HTTP_LISTEN` change only when you pass their option; otherwise the existing value is kept. Other lines you added are kept too.
 
@@ -301,15 +321,15 @@ The password is read from stdin (without echo on a terminal). `user add` for an 
 
 ### From the console
 
-1. Optional, once: in **Settings**, add a model connection and pick the default model. New servers receive it, with its key, when they enroll.
+1. Once: in **Settings**, **Add connection** and paste your model's API key. When no default model is set yet, the hub asks which model every agent should use. New servers receive it, with its key, when they enroll, so the install asks nothing. Without one, servers watch with their deterministic detection, and their learning waits until you add a model.
 2. **Add server**, give it a name. The hub shows a one-line command with a single-use token (`kbe_…`), valid for 2 hours by default (`--enroll-ttl`).
-3. Run the command on the server, as a user who can `sudo`:
+3. Run the command on the server, as root or as a user who can `sudo` (it uses `sudo` only when not root):
 
 ```bash
-f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -o "$f" https://hub.example.com/install.sh && echo "<sha256>  $f" | sha256sum -c - && sudo sh "$f" --hub https://hub.example.com --token kbe_…; s=$?; rm -f "$f"; (exit "$s"); }
+f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -o "$f" https://hub.example.com/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://hub.example.com --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
 ```
 
-For a self-signed hub the command also carries the pin (`curl -k --pinnedpubkey sha256//…` and `--pin sha256//…`). When the hub's installer reads the token from stdin, the command pipes it in as `printf '%s\n' kbe_… | sudo sh "$f" … --token-file -` instead of `--token`, so the token is on no command line. Copy the command from the console rather than typing it: `<sha256>` is the hash of the `install.sh` this hub serves. The command saves the script, checks that hash, and only then runs it as root. The script in turn carries the hash of each release tarball.
+For a self-signed hub the command also carries the pin (`curl -k --pinnedpubkey sha256//…` and `--pin sha256//…`). The token goes to the installer on stdin (`--token-file -`), so it is on no command line; a hub serving an older installer puts it in `--token` instead. Copy the command from the console rather than typing it: `<sha256>` is the hash of the `install.sh` this hub serves. The command saves the script, checks that hash, and only then runs it as root. The script in turn carries the hash of each release tarball.
 
 The installer downloads the release from the hub with the token, checks it against the hash pinned in the script, installs it, enrolls (trading the token for the server's own `kbk_…` key in `/etc/kodeblue/hub.key`) and starts kodeblue. The server shows as online in the console within seconds.
 
@@ -362,6 +382,14 @@ sudo systemctl restart kodeblue
 The token is read from the environment so it stays out of the process list.
 
 ## Without a hub
+
+In one command, from the latest release (asks for the API key and an optional Slack webhook):
+
+```bash
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
+```
+
+The base URL works with or without `/v1` at the end. Set or change the model and its key later with `sudo kodeblue inference --url … --model … --key-file -`: it asks for the key (or reads it from stdin or a file), saves it as `/etc/kodeblue/inference.key` (root:kodeblue 0640) and restarts kodeblue.
 
 From an unpacked server release:
 

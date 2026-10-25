@@ -152,7 +152,7 @@ The key and the Slack webhook live in the hub database (0600, in a 0700 director
 In the console, **Add server** gives you the command. Run it on the server:
 
 ```bash
-f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -o "$f" https://hub.example.com/install.sh && echo "<sha256>  $f" | sha256sum -c - && sudo sh "$f" --hub https://hub.example.com --token kbe_…; s=$?; rm -f "$f"; (exit "$s"); }
+f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -o "$f" https://hub.example.com/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://hub.example.com --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
 ```
 
 The command checks `install.sh` against the hash the hub pinned (`<sha256>`) before running it as root.
