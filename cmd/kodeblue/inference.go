@@ -8,9 +8,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
 )
@@ -51,6 +54,9 @@ func inferenceCmd(cfg config.Config, baseURL, provider, model, keyFile string) {
 			fatal(err)
 		}
 		fmt.Println("API key saved in " + cfg.Inference.APIKeyFile)
+		if strings.TrimSpace(cfg.Inference.APIKey) != "" {
+			fmt.Fprintln(os.Stderr, "warning: [inference] api_key in "+cfg.Path()+" takes precedence over the key file: remove it to use the new key")
+		}
 	}
 	restartService()
 }
@@ -66,12 +72,25 @@ func readKey(f string) (string, error) {
 			off := exec.Command("stty", "-echo")
 			off.Stdin = os.Stdin
 			_ = off.Run()
-			defer func() {
+			echoOn := func() {
 				on := exec.Command("stty", "echo")
 				on.Stdin = os.Stdin
 				_ = on.Run()
 				fmt.Fprintln(os.Stderr)
+			}
+			// Ctrl-C must not leave the terminal without echo.
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-sig:
+					echoOn()
+					os.Exit(130)
+				case <-done:
+				}
 			}()
+			defer func() { close(done); signal.Stop(sig); echoOn() }()
 			line, e := bufio.NewReader(os.Stdin).ReadString('\n')
 			b, err = []byte(line), e
 			if errors.Is(err, io.EOF) {
@@ -93,43 +112,65 @@ func readKey(f string) (string, error) {
 	return key, nil
 }
 
-// writeKey stores the key as root:kodeblue 0640, the way the installer does.
+// writeKey stores the key as root:kodeblue 0640, the way the installer does:
+// a new file created beside the target (never following a link planted
+// there), synced, then renamed over it.
 func writeKey(path, key string) error {
 	if path == "" {
 		return errors.New("[inference] api_key_file is not set in the config")
 	}
-	gid := -1
+	f, err := os.CreateTemp(filepath.Dir(path), ".inference-key-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // after a successful rename there is nothing left to remove
+	if err := f.Chmod(0o640); err != nil {
+		f.Close()
+		return err
+	}
 	if g, err := user.LookupGroup("kodeblue"); err == nil {
-		gid, _ = strconv.Atoi(g.Gid)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(key+"\n"), 0o640); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o640); err != nil {
-		return err
-	}
-	if gid >= 0 {
-		if err := os.Chown(tmp, 0, gid); err != nil {
+		gid, _ := strconv.Atoi(g.Gid)
+		if err := f.Chown(0, gid); err != nil {
+			f.Close()
 			return err
 		}
+	} else if os.Geteuid() == 0 {
+		f.Close()
+		return errors.New("no kodeblue group: is kodeblue installed? (the daemon could not read the key)")
+	}
+	if _, err := f.WriteString(key + "\n"); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
 	}
 	return os.Rename(tmp, path)
 }
 
-// restartService restarts a running kodeblue under systemd so a new endpoint
-// or key applies; a stopped one (or the installer, before it starts it) uses
-// them when it starts. Without systemd it says to restart it.
+// restartService asks a running kodeblue to restart with the new endpoint or
+// key once no agent session or learning run is in progress (systemctl reload
+// sends SIGHUP, see kodeblue.service), so an
+// incident under way is not cut short. A stopped kodeblue, or the installer
+// (KODEBLUE_NO_RESTART), uses them when it starts.
 func restartService() {
+	if os.Getenv("KODEBLUE_NO_RESTART") != "" {
+		return
+	}
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		if exec.Command("systemctl", "is-active", "--quiet", "kodeblue.service").Run() != nil {
 			return
 		}
-		if out, err := exec.Command("systemctl", "restart", "kodeblue.service").CombinedOutput(); err == nil {
-			fmt.Println("kodeblue restarted to use it")
+		if out, err := exec.Command("systemctl", "reload", "kodeblue.service").CombinedOutput(); err == nil {
+			fmt.Println("kodeblue restarts to use it as soon as no agent session or learning run is in progress")
 			return
 		} else {
-			fmt.Fprintf(os.Stderr, "could not restart kodeblue: %v %s\n", err, strings.TrimSpace(string(out)))
+			fmt.Fprintf(os.Stderr, "could not signal kodeblue: %v %s\n", err, strings.TrimSpace(string(out)))
 		}
 	}
 	fmt.Println("restart kodeblue to use it (sudo systemctl restart kodeblue)")

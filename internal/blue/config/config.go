@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -265,9 +266,12 @@ func (c Config) Path() string { return c.path }
 
 // NormalizeBaseURL turns an endpoint as vendors document it ("…/v1",
 // trailing slash) into the base kodeblue appends /v1/chat/completions to.
-func NormalizeBaseURL(u string) string {
-	u = strings.TrimRight(strings.TrimSpace(u), "/")
-	return strings.TrimSuffix(u, "/v1")
+func NormalizeBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if u, err := url.Parse(raw); err == nil && u.Host != "" && strings.HasSuffix(u.Path, "/v1") && u.RawQuery == "" && u.Fragment == "" {
+		return strings.TrimSuffix(raw, "/v1")
+	}
+	return raw
 }
 
 // IntegrityPaths is the full list of extra files the integrity collector

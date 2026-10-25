@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -279,6 +280,16 @@ func runDaemon(cfg config.Config, logger *slog.Logger) {
 			d.Wake("signal")
 		}
 	}()
+	// SIGHUP (kodeblue inference, systemctl reload): restart with the new
+	// config once no agent session or learning run is in progress.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			logger.Info("SIGHUP: restarting with the new config once no agent session or learning runs")
+			d.ApplySettings()
+		}
+	}()
 	logger.Info("kodeblue starting", "server", cfg.Server.Name, "state", cfg.Server.StateDir, "models", cfg.EffectiveModels(), "response_mode", cfg.Response.Mode, "hub_settings", cfg.HubSettingsVersion)
 	err := d.Run(ctx)
 	if errors.Is(err, daemon.ErrRestart) {
@@ -305,7 +316,11 @@ func statusCmd(cfg config.Config) {
 	}
 	fmt.Printf("learned at:    %s\n", learned)
 	if st.Get(store.LearnerPendingKey) != "" {
-		fmt.Println("learning:      waiting for a model; the learner and the vulnerability assessment run once one is set (detection is on)")
+		if cfg.ModelsReady() == nil {
+			fmt.Println("learning:      has not run yet; kodeblue runs the learner and the vulnerability assessment once its agent engine works, and retries failures (detection is on)")
+		} else {
+			fmt.Println("learning:      waiting for a model; the learner and the vulnerability assessment run once one is set (detection is on)")
+		}
 	}
 	fmt.Printf("last review:   %s\n", orDash(st.Get("last_review_at")))
 	fmt.Printf("spend today:   $%.4f of $%.2f (%d tokens)%s\n", usd, cfg.Budget.DailyUSD, tokens, listCounts(per, func(v float64) string { return fmt.Sprintf("$%.4f", v) }))
@@ -568,8 +583,10 @@ func checkRootOwned(path string) error {
 func mustStore(cfg config.Config) *store.Store {
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
-		if os.Geteuid() != 0 {
-			fatal(fmt.Errorf("cannot open %s: kodeblue's state is readable by root only, run it with sudo", cfg.DBPath()))
+		// A user who cannot even look into the state directory needs sudo;
+		// anything else is the real error.
+		if _, serr := os.Stat(cfg.DBPath()); errors.Is(serr, fs.ErrPermission) {
+			fatal(fmt.Errorf("cannot open %s: only root and the kodeblue user can read kodeblue's state, run it with sudo", cfg.DBPath()))
 		}
 		fatal(err)
 	}

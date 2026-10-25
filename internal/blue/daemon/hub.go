@@ -140,7 +140,9 @@ func (d *Daemon) Learn(ctx context.Context, m hubproto.OperatorMessage) hubproto
 	go func() {
 		defer d.wg.Done()
 		defer d.learning.Store(false)
-		d.finishLearner(ctx, in, sess)
+		if !learnerRan(d.finishLearner(ctx, in, sess)) || ctx.Err() != nil {
+			return // a waiting learner stays waiting
+		}
 		d.assess(ctx)
 		d.checkServiceCoverage("learning")
 		if ctx.Err() == nil {

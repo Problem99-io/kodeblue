@@ -66,6 +66,11 @@ func TestWriteInferenceDropsV1(t *testing.T) {
 	if cfg, err = config.Load(p); err != nil || cfg.Inference.BaseURL != "https://openrouter.ai/api" {
 		t.Fatalf("base_url %q, err %v", cfg.Inference.BaseURL, err)
 	}
+	for in, want := range map[string]string{"https://v1": "https://v1", "http://v1/": "http://v1", "https://x/v1?a=1": "https://x/v1?a=1", " https://x/api/v1/ ": "https://x/api"} {
+		if got := config.NormalizeBaseURL(in); got != want {
+			t.Errorf("NormalizeBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
 	// A config written by hand with /v1 is read the same way.
 	if err := os.WriteFile(p, []byte("[inference]\nbase_url = \"https://api.example.com/v1\"\n"), 0o640); err != nil {
 		t.Fatal(err)
@@ -91,10 +96,25 @@ func TestReadKey(t *testing.T) {
 		t.Fatal("two-line key accepted")
 	}
 	out := filepath.Join(dir, "inference.key")
+	// A link planted where the old code wrote its temp file must not be
+	// followed: the key goes to a new file, and the link's target is untouched.
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, out+".tmp"); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeKey(out, "sk-test"); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(out); err != nil || fi.Mode().Perm() != 0o640 {
-		t.Fatalf("key file mode %v, err %v", fi.Mode().Perm(), err)
+	if fi, err := os.Lstat(out); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("key file %v, err %v", fi.Mode(), err)
+	}
+	if b, _ := os.ReadFile(out); string(b) != "sk-test\n" {
+		t.Fatalf("key file holds %q", b)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("link target overwritten: %q", b)
 	}
 }

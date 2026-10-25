@@ -718,6 +718,37 @@ func TestLearnerWaitsForModel(t *testing.T) {
 	}
 }
 
+// A pending learner that fails (its engine went away, it would not start)
+// used to clear the waiting state and announce success. It now stays
+// pending and is retried until a run works.
+func TestPendingLearnerRetriesAfterFailure(t *testing.T) {
+	d, st, _, out := newTestDaemon(t)
+	_ = st.Set("learned_at", time.Now().UTC().Format(time.RFC3339))
+	_ = st.Set(store.LearnerPendingKey, time.Now().UTC().Format(time.RFC3339))
+	d.modelsOn = true
+	d.engCheckEvery, d.learnRetry = 10*time.Millisecond, 50*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	broken := &fakeEngine{id: 1}
+	broken.stopped.Store(true) // StartSession fails: "connection refused"
+	d.setEngine(broken)
+	d.learnWhenModelReady(ctx)
+	waitFor(t, func() bool { return len(st.Incidents(`WHERE kind=?`, "learning")) >= 1 })
+	if st.Get(store.LearnerPendingKey) == "" {
+		t.Fatal("a learner that failed to start cleared the waiting state")
+	}
+	for _, title := range out.titles() {
+		if strings.Contains(title, "has learned") {
+			t.Fatalf("announced success after a failed run: %q", title)
+		}
+	}
+	d.setEngine(&fakeEngine{id: 2, runFor: time.Millisecond}) // a working engine
+	waitFor(t, func() bool { return st.Get(store.LearnerPendingKey) == "" && !d.learnWaiting.Load() })
+	if !slices.Contains(out.titles(), "kodeblue has learned this server") {
+		t.Fatalf("no success message after the retry: %v", out.titles())
+	}
+}
+
 // A learner the hub asks for does the pending learning run too.
 func TestHubLearnClearsPendingLearner(t *testing.T) {
 	d, st, _, _ := newTestDaemon(t)

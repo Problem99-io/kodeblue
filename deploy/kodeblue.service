@@ -16,6 +16,8 @@ Group=kodeblue
 # Log access without root.
 SupplementaryGroups=adm systemd-journal
 ExecStart=/usr/local/bin/kodeblue run --config /etc/kodeblue/kodeblue.toml
+# Reload: restart with the new config once no agent session or learning runs.
+ExecReload=/bin/kill -HUP $MAINPID
 # Back up whatever brings it down: a crash, a kill, the OOM killer (Restart=),
 # or a hang, when the main loop stops sweeping and stops pinging the watchdog
 # (systemd sends SIGABRT, the stacks land in the journal, then it restarts).
