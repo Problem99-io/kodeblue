@@ -31,7 +31,7 @@ fast watch (5s) ─► sensors (60s, 0 tokens) ─► deterministic filters (0 t
               daily review session ◄─ reports/skills/monitors ◄─ one agent session per incident ─► respond (policy) ─► Slack
 ```
 
-An optional **hub** (`kodeblue-hub`) gives a fleet one console: every server's incidents, reports, the agents' reasoning and tool calls (live), monitors, findings and pending approvals, and a way to message the agents. Servers only dial out to it, always over TLS.
+An optional **hub** (`kodeblue-hub`) gives a fleet one console: every server's incidents, reports, the agents' reasoning and tool calls (live), monitors, findings and pending approvals, and a way to message the agents. Servers only dial out to it, always over TLS (plain HTTP is allowed only to a hub on the same machine).
 
 ## The problem
 
@@ -60,7 +60,7 @@ risk     postgres listening on 0.0.0.0:5432
 + 6 monitors, 2 host skills written
 ```
 
-**2. Notice change in seconds.** Keys, accounts, sudoers, cron, systemd, PAM and `ld.so.preload` are checked every 5 seconds, and a change starts a full sweep at once. A critical change, such as a key planted for root, becomes an incident within seconds; other changes are confirmed on the next sweep, a minute or two later.
+**2. Notice change in seconds.** Keys, accounts, sudoers, cron, systemd, PAM and `ld.so.preload` are checked every 5 seconds, and a change starts a sweep at once. A critical change, such as a key planted for root, becomes an incident within seconds; other changes are confirmed on the next sweep, a minute or two later.
 
 **3. Filter first, model second.** Deterministic sensors and filters cost zero tokens and remove the noise. A small, cheap model only sees what survives them, which keeps false positives and spend low.
 
@@ -84,9 +84,9 @@ verdict   true_positive · confidence 0.94
 **5. Contain it, reversibly where it can.** When policy allows, it blocks the IP, disables the key, quarantines the file, stops the unit, locks the account or kills the process through a root helper. In the default `recommend` mode each action waits for your approval; in `contain` mode it runs at once. An administrator's keys and account (root, uid 0 accounts, sudo/wheel/admin members and `protected_users`) are never touched: for those it recommends, and you decide. Every action is rate-limited, journaled and posted to Slack. Blocks, disabled keys, quarantined files, stopped units and locked accounts can be undone; a killed process cannot, so its binary is kept for forensics first. Locking an account also kills its processes, and those do not come back on undo.
 
 ```
-disable_ssh_key   deploy · backup@ci            undo: kodeblue respond undo act_3f9c2a71e0
+disable_ssh_key   deploy · backup@ci            undo: sudo kodeblue respond undo act_3f9c2a71e0
 kill_process      pid 3312 · /tmp/.x/kworkerd   binary preserved for forensics
-block_ip          185.220.x.x                   undo: kodeblue respond undo act_8b41d07c55
+block_ip          185.220.x.x                   undo: sudo kodeblue respond undo act_8b41d07c55
 ```
 
 **6. Get sharper every day.** A daily review reads the outcomes, tunes noisy monitors, prunes stale rules and covers new blind spots, so the system adapts to the server instead of you adapting to it.
@@ -116,7 +116,7 @@ Every day the reviewer reads a 7-day outcome table per rule, then tunes or disab
 
 What it never learns on a model's word:
 - **Protected detections** (such as new SSH keys, uid 0, sudoers, privileged groups, PAM, `ld.so.preload`, SUID files and checksum mismatches) are never allow-listed or absorbed by a model. A benign verdict on one asks a human.
-- **An attacker's first login** never makes its IP "known": after learning, a flagged login is learned only once it is judged benign. (Logins already in the auth log at install are learned as normal, so look over the learned login sources after setup.)
+- **An attacker's first login** never makes its IP "known": after learning, a flagged login is learned only once it is judged benign. (Logins already in the auth log at install, or seen during the learning window, are learned as normal, so look over the learned login sources after setup.)
 - **Maintenance windows** never absorb an item that an open finding is about.
 - Every automatic decision is recorded, and the reviewer reads those records.
 
@@ -161,7 +161,7 @@ These are estimates at about $0.20 per million input tokens, with prompt caching
 ## Requirements
 
 - Linux with systemd, amd64 or arm64
-- an OpenAI-compatible model endpoint (a hosted API, OpenRouter, or your own vLLM, Ollama or LiteLLM), or none: without one, kodeblue runs sensors, detection and monitors only
+- an OpenAI-compatible model endpoint (a hosted API, OpenRouter, or your own vLLM, Ollama or LiteLLM; for a keyless endpoint put any placeholder in `/etc/kodeblue/inference.key`), or none: without one, kodeblue runs sensors, detection and monitors only
 - to build: Go (the version in `go.mod`)
 - for the hub: a small Linux host or a Docker host that your servers can reach over HTTPS
 
@@ -181,14 +181,16 @@ sudoedit /etc/kodeblue/kodeblue.toml     # response mode, protected users/IPs/un
 journalctl -fu kodeblue
 ```
 
-The installer asks for the endpoint's API key and an optional Slack webhook (input is not echoed). kodeblue takes snapshots of the server for about 30 minutes. With a model, a learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours. Change the model endpoint later with `sudo kodeblue inference --url … --model …`.
+The installer asks for the endpoint's API key and an optional Slack webhook (input is not echoed). kodeblue takes snapshots of the server for about 30 minutes. With a model, a learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours. Change the model endpoint later with `sudo kodeblue inference --url … --model …`, then `sudo systemctl restart kodeblue`.
 
 ### B. A hub and several servers
 
 On the hub host, here with a self-signed certificate that servers pin:
 
 ```bash
-curl -fsSLO https://github.com/Problem99-io/kodeblue/releases/latest/download/kodeblue-hub-linux-amd64.tar.gz
+base=https://github.com/Problem99-io/kodeblue/releases/latest/download
+curl -fsSLO "$base/kodeblue-hub-linux-amd64.tar.gz" -O "$base/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
 tar xzf kodeblue-hub-linux-amd64.tar.gz
 sudo kodeblue-hub/install-hub.sh --public-url https://hub.example.com:8443 --self-signed
 ```
