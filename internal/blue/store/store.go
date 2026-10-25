@@ -184,6 +184,11 @@ func (s *Store) addItemColumns() error {
 
 // ---- kv ----
 
+// LearnerPendingKey is set (to the time) while learning has collected the
+// baseline but its learner session and vulnerability assessment wait for a
+// model; detection already watches the server meanwhile.
+const LearnerPendingKey = "learner_pending"
+
 func (s *Store) Get(k string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT v FROM kv WHERE k=?`, k).Scan(&v)

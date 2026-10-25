@@ -297,6 +297,9 @@ func statusCmd(cfg config.Config) {
 	fmt.Printf("server:        %s\n", cfg.Server.Name)
 	fmt.Printf("heartbeat:     %s\n", hb)
 	fmt.Printf("learned at:    %s\n", st.Get("learned_at"))
+	if st.Get(store.LearnerPendingKey) != "" {
+		fmt.Println("learning:      waiting for a model; the learner and the vulnerability assessment run once one is set (detection is on)")
+	}
 	fmt.Printf("last review:   %s\n", st.Get("last_review_at"))
 	fmt.Printf("spend today:   $%.4f of $%.2f (%d tokens) %v\n", usd, cfg.Budget.DailyUSD, tokens, per)
 	fmt.Printf("baseline:      %v\n", st.BaselineCounts())

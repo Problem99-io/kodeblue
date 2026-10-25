@@ -42,6 +42,8 @@ The agents run in a small agent engine that kodeblue starts as a child process: 
 
 Then a second, short session (`blue-assessor`) records the **vulnerabilities** of each service: weaknesses someone can fix, with the evidence, how to fix each and, where one can be written, a check that tells kodeblue when it is fixed. It is a separate session so a learner that runs out of turns cannot leave the assessment out.
 
+**Without a model** the learning phase still collects the baseline, and detection starts when it ends. The learner and the assessment wait: the hub shows **Learning is waiting for a model** on the server and the fleet page, and `kodeblue status` says so too. Once a model is set (a model connection and a default model in the hub's **Settings**, or `sudo kodeblue inference --url … --model …` with the key in `/etc/kodeblue/inference.key` and a restart), both run on their own, beside detection.
+
 **Service coverage.** The learner does not work from what it happens to notice. `service_inventory` lists every service kodeblue finds itself, running or able to start:
 - processes in system units (from their cgroup), containers (docker, podman, containerd, CRI-O), and daemons started by init;
 - the owner of every listening socket, in kodeblue's network namespace and in every other one a service lives in;

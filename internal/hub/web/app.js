@@ -615,7 +615,23 @@ function serverBar(srv, tab) {
       k === "board" && nOpen ? h("span", { class: "n" }, nOpen) : null,
       k === "findings" && c.needs_ack ? h("span", { class: "n" }, c.needs_ack) : null,
       k === "services" && openVulns(c) ? h("span", { class: "n" + (worstVuln(c) ? " warn" : ""), title: "open vulnerabilities" }, openVulns(c)) : null,
-      k === "activity" && c.pending_actions ? h("span", { class: "n warn" }, c.pending_actions) : null))));
+      k === "activity" && c.pending_actions ? h("span", { class: "n warn" }, c.pending_actions) : null))),
+    learnWaitAlert(st));
+}
+
+// learnWaits: the server's learner session and vulnerability assessment
+// cannot run without a model. Detection watches regardless; both start on
+// their own once a model is set.
+function learnWaits(st) { return !!st.learner_pending || (st.phase === "learning" && st.models_enabled === false); }
+function learnWaitAlert(st) {
+  if (!learnWaits(st)) return null;
+  return h("div", { class: "callout warn sbar-alert" }, h("div", { class: "lbl" }, "Learning is waiting for a model"),
+    st.phase === "learning"
+      ? "kodeblue is collecting this server's baseline, but the learning session (server profile, monitors, skills) and the vulnerability assessment cannot start without a model. "
+      : "kodeblue is watching this server with its deterministic detection, but the learning session (server profile, monitors, skills) and the vulnerability assessment have not run: they need a model. ",
+    st.models_enabled
+      ? "A model is set; they start once the agent engine is running."
+      : ["Add a model connection and pick a default model in ", h("a", { href: "#/settings" }, "Settings"), " (or set one on the server with ", h("code", null, "kodeblue inference"), "); they start on their own."]);
 }
 
 // ---------- board ----------
@@ -1543,6 +1559,7 @@ function learningControls(srv, cmds, after) {
   const last = cmds[cmds.length - 1];
   const lastNote = last ? h("div", { class: "small " + (last.status === "done" ? "muted" : "c-red") },
     `${last.author}: ${last.command}${last.status === "done" ? "" : " " + last.status} ${ago(last.replied_at || last.created_at)}`, last.reply ? " — " + last.reply : "") : null;
+  if (st.phase === "learning" && st.models_enabled === false) return h("div", { class: "stack" }, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), "Collecting the baseline. The learning session waits for a model."), lastNote);
   if (st.learning || st.phase === "learning") return h("div", { class: "stack" }, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), "Learning now: the board shows the learning run."), lastNote);
   if (!st.accepts_learning) {
     return h("div", { class: "appr-cli" }, lastNote, h("span", { class: "faint small" }, "This server starts learning on its CLI only (older kodeblue, or hub.accept_learning = false):"),
@@ -1834,7 +1851,7 @@ function installView(res) {
     h("div", { class: "note" }, h("ul", null,
       h("li", null, "The token is single-use and expires ", when(res.expires), ". The server trades it for its own API key, so the token is worthless afterwards."),
       h("li", null, "The server only connects out to this hub. Nothing on the server listens for the hub."),
-      h("li", null, S.info && S.info.fleet_model ? "The fleet's default model (" + S.info.fleet_model + ") and its key are handed over at enrollment; the per-agent models follow on the first sync." : "No default model is picked on the hub yet, so the installer asks for an endpoint. Add a model connection and pick a default model under Settings to skip that."),
+      h("li", null, S.info && S.info.fleet_model ? "The fleet's default model (" + S.info.fleet_model + ") and its key are handed over at enrollment; the per-agent models follow on the first sync." : "No default model is picked on the hub yet, so the installer asks for an endpoint. Add a model connection and pick a default model under Settings to skip that. Without a model the server still watches, but its learning waits until you add one."),
       h("li", null, "Containment starts in recommend mode: agents ask, and an operator approves here or on the server."))),
   ];
 }
@@ -1922,6 +1939,12 @@ async function vFleet(main) {
         h("p", { class: "muted" }, "Add a server to get a one-line install command. The server connects out to this hub with its own key."),
         h("button", { class: "btn primary", type: "button", on: { click: addServerDialog } }, ic("plus", 14), "Add server"))));
       return;
+    }
+    const waiting = fleet.filter((s) => s.enrolled && !s.revoked && learnWaits(s.status || {}));
+    if (waiting.length) {
+      body.appendChild(h("div", { class: "callout warn" }, h("div", { class: "lbl" }, "Learning is waiting for a model"),
+        `${waiting.map((s) => s.name).join(", ")} cannot run the learning session or the vulnerability assessment without a model. `,
+        "Add a model connection and pick a default model in ", h("a", { href: "#/settings" }, "Settings"), "; learning starts on its own. Detection watches meanwhile."));
     }
     const rows = fleet.map((s) => {
       const st = s.status || {};
