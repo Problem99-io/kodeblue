@@ -23,7 +23,8 @@
 # Re-running keeps lines you added to /etc/kodeblue-hub/env yourself, and the
 # --trusted-proxy, --console-allow and --http-listen values you do not pass again.
 # KODEBLUE_RELEASE_URL picks another release to download from (default
-# https://github.com/Problem99-io/kodeblue/releases/latest/download).
+# https://github.com/Problem99-io/kodeblue/releases/latest/download); pass it
+# through sudo: curl -fsSL … | sudo KODEBLUE_RELEASE_URL=… sh -s -- …
 #:usage-end
 set -eu
 PUBLIC="" LISTEN=":8443" SELF=0 CERT="" KEY="" PROXY=0 ADMIN="admin" TRUSTED="" ALLOW="" HTTPL=""
@@ -39,7 +40,13 @@ while [ $# -gt 0 ]; do
     --console-allow) ALLOW=$2; shift 2 ;;
     --http-listen) HTTPL=$2; shift 2 ;;
     --admin) ADMIN=$2; shift 2 ;;
-    -h|--help) sed -n '2,/^#:usage-end/ { /^#:usage-end/d; s/^# \{0,1\}//; p; }' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help)
+      if [ -f "$0" ] && [ "${0##*/}" = install-hub.sh ]; then
+        sed -n '2,/^#:usage-end/ { /^#:usage-end/d; s/^# \{0,1\}//; p; }' "$0"
+      else
+        echo "kodeblue hub installer; options: https://github.com/Problem99-io/kodeblue/blob/main/deploy/hub/install-hub.sh"
+      fi
+      exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -49,10 +56,17 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 [ -n "$PUBLIC" ] || die "--public-url is required (e.g. https://hub.example.com:8443)"
 case "$PUBLIC" in https://*) ;; *) die "--public-url must be https://" ;; esac
 [ "$SELF" = 1 ] || [ -n "$CERT" ] || [ "$PROXY" = 1 ] || die "choose --self-signed, --tls-cert/--tls-key, or --behind-proxy"
-here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)
+# Only a script file named install-hub.sh is in an unpacked bundle. Piped in
+# (curl … | sudo sh), $0 is the shell and the current directory, which anyone
+# may have filled, must never be taken for a bundle.
+here=/nonexistent
+if [ -f "$0" ] && [ "${0##*/}" = install-hub.sh ]; then here=$(cd "$(dirname "$0")" && pwd); fi
 
 # ---- bootstrap: not run from an unpacked bundle, so fetch the release ----
-if [ ! -x "$here/kodeblue-hub" ] || [ ! -f "$here/kodeblue-hub.service" ]; then
+if [ ! -f "$here/kodeblue-hub" ] || [ ! -f "$here/kodeblue-hub.service" ]; then
+  # The bundle just unpacked re-runs this script: it must not download again
+  # (a noexec /tmp would loop forever).
+  [ -z "${KODEBLUE_UNPACKED:-}" ] || die "the downloaded bundle is incomplete ($here)"
   case "$(uname -m)" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
@@ -63,13 +77,17 @@ if [ ! -x "$here/kodeblue-hub" ] || [ ! -f "$here/kodeblue-hub.service" ]; then
   REL=${KODEBLUE_RELEASE_URL:-https://github.com/Problem99-io/kodeblue/releases/latest/download}
   REL=${REL%/}
   # Only HTTPS, redirects included (GitHub redirects downloads to its CDN).
+  # Plain HTTP only to this host itself (http://localhost:@evil.example is
+  # evil.example to curl).
   case "$REL" in
     https://*) PROTO=https ;;
-    http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
+    *@*) die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
+    http://localhost|http://localhost/*|http://localhost:[0-9]*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:[0-9]*) PROTO=http ;;
     *) die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
   esac
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT INT TERM
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 130' INT TERM
   say "downloading the kodeblue hub ($ARCH) from $REL"
   curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/hub.tgz" "$REL/kodeblue-hub-linux-$ARCH.tar.gz" || die "download of kodeblue-hub-linux-$ARCH.tar.gz failed"
   curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/SHA256SUMS" "$REL/SHA256SUMS" || die "download of SHA256SUMS failed"
@@ -84,12 +102,13 @@ if [ ! -x "$here/kodeblue-hub" ] || [ ! -f "$here/kodeblue-hub.service" ]; then
   [ -n "$TRUSTED" ] && set -- "$@" --trusted-proxy "$TRUSTED"
   [ -n "$ALLOW" ] && set -- "$@" --console-allow "$ALLOW"
   [ -n "$HTTPL" ] && set -- "$@" --http-listen "$HTTPL"
-  sh "$tmp/kodeblue-hub/install-hub.sh" "$@"
+  KODEBLUE_UNPACKED=1 sh "$tmp/kodeblue-hub/install-hub.sh" "$@"
   exit $?
 fi
 
 id kodeblue-hub >/dev/null 2>&1 || useradd --system --home-dir /var/lib/kodeblue-hub --shell /usr/sbin/nologin --user-group kodeblue-hub
-install -m 0755 "$here/kodeblue-hub" /usr/local/bin/kodeblue-hub.new && mv -f /usr/local/bin/kodeblue-hub.new /usr/local/bin/kodeblue-hub
+install -m 0755 "$here/kodeblue-hub" /usr/local/bin/kodeblue-hub.new || die "could not install /usr/local/bin/kodeblue-hub"
+mv -f /usr/local/bin/kodeblue-hub.new /usr/local/bin/kodeblue-hub
 install -d -o kodeblue-hub -g kodeblue-hub -m 0700 /var/lib/kodeblue-hub
 rm -rf /var/lib/kodeblue-hub/dist
 cp -R "$here/dist" /var/lib/kodeblue-hub/dist

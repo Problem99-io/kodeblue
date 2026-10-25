@@ -30,13 +30,20 @@
 #
 # Without --hub, KODEBLUE_RELEASE_URL picks another release to download from
 # (default https://github.com/Problem99-io/kodeblue/releases/latest/download;
-# e.g. …/releases/download/v0.2.0 for one version).
+# e.g. …/releases/download/v0.2.0 for one version). Pass it through sudo:
+#   curl -fsSL … | sudo KODEBLUE_RELEASE_URL=… sh -s -- …
 #:usage-end
 set -eu
 
 # usage prints the header comment above, from line 2 to the :usage-end marker,
 # so it never drifts when the comment grows. The leading "# " is stripped.
-usage() { sed -n '2,/^#:usage-end/ { /^#:usage-end/d; s/^# \{0,1\}//; p; }' "$0" 2>/dev/null || true; }
+usage() {
+  if [ -f "$0" ] && [ "${0##*/}" = install.sh ]; then
+    sed -n '2,/^#:usage-end/ { /^#:usage-end/d; s/^# \{0,1\}//; p; }' "$0"
+  else
+    echo "kodeblue installer; options: https://github.com/Problem99-io/kodeblue/blob/main/deploy/install.sh"
+  fi
+}
 
 # The token may arrive in the environment (preferred: never on a command line).
 HUB="" TOKEN="${KODEBLUE_ENROLL_TOKEN:-}" PIN="" CA="" NAME="" MODE="" INFURL="" INFMODEL="" KEYFILE="" SLACKFILE="" START=1 UNINSTALL=0 PURGE=0
@@ -92,11 +99,33 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)
-root=$(cd "$here/.." 2>/dev/null && pwd || echo /nonexistent)
+# Only a script file named install.sh is in a release directory. Piped in
+# (curl … | sudo sh), $0 is the shell and the current directory, which anyone
+# may have filled, must never be taken for a release.
+here=/nonexistent root=/nonexistent
+if [ -f "$0" ] && [ "${0##*/}" = install.sh ]; then
+  here=$(cd "$(dirname "$0")" && pwd)
+  root=$(cd "$here/.." && pwd)
+fi
+# loopback_http: a plain-HTTP URL to this host itself, nothing else
+# (http://localhost:@evil.example is evil.example to curl).
+loopback_http() {
+  case "$1" in *@*) return 1 ;; esac
+  case "$1" in
+    http://localhost|http://localhost/*|http://localhost:[0-9]*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:[0-9]*) return 0 ;;
+  esac
+  return 1
+}
 
 # ---- bootstrap: fetch the release (from the hub, or GitHub) when not run from one ----
-if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$here/kodeblue.service" ]; then
+if [ ! -f "$root/kodeblue" ] || [ ! -f "$root/kodeblue-engine" ] || [ ! -f "$here/kodeblue.service" ]; then
+  # The release just unpacked re-runs this script: it must not download again
+  # (a noexec /tmp would loop forever).
+  [ -z "${KODEBLUE_UNPACKED:-}" ] || die "the downloaded release is incomplete ($root)"
+  if [ -z "$HUB" ]; then
+    [ -z "$TOKEN" ] || die "--token needs --hub"
+    { [ -z "$PIN" ] && [ -z "$CA" ]; } || die "--pin and --ca-file need --hub"
+  fi
   case "$(uname -m)" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
@@ -105,15 +134,15 @@ if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$her
   command -v curl >/dev/null 2>&1 || die "curl is required"
   command -v tar >/dev/null 2>&1 || die "tar is required"
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT INT TERM
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 130' INT TERM
   if [ -z "$HUB" ]; then
     REL=${KODEBLUE_RELEASE_URL:-https://github.com/Problem99-io/kodeblue/releases/latest/download}
     REL=${REL%/}
     # Only HTTPS, redirects included (GitHub redirects downloads to its CDN).
     case "$REL" in
       https://*) PROTO=https ;;
-      http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
-      *) die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
+      *) loopback_http "$REL" && PROTO=http || die "KODEBLUE_RELEASE_URL must be an https:// URL" ;;
     esac
     say "downloading kodeblue ($ARCH) from $REL"
     curl -fsSL --proto "=$PROTO" --proto-redir "=$PROTO" --retry 3 -o "$tmp/kodeblue.tgz" "$REL/kodeblue-linux-$ARCH.tar.gz" || die "download of kodeblue-linux-$ARCH.tar.gz failed"
@@ -123,8 +152,7 @@ if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$her
     # proxy cannot downgrade the download (and its credential) to plain HTTP.
     case "$HUB" in
       https://*) PROTO=https ;;
-      http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*) PROTO=http ;;
-      *) die "--hub must be an https:// URL" ;;
+      *) loopback_http "$HUB" && PROTO=http || die "--hub must be an https:// URL" ;;
     esac
     AUTH=$TOKEN
     if [ -z "$AUTH" ] && [ -s /etc/kodeblue/hub.key ]; then AUTH=$(cat /etc/kodeblue/hub.key); fi
@@ -169,12 +197,13 @@ if [ ! -x "$root/kodeblue" ] || [ ! -x "$root/kodeblue-engine" ] || [ ! -f "$her
   [ -n "$KEYFILE" ] && set -- "$@" --inference-key-file "$KEYFILE"
   [ -n "$SLACKFILE" ] && set -- "$@" --slack-webhook-file "$SLACKFILE"
   [ "$START" = 0 ] && set -- "$@" --no-start
-  KODEBLUE_ENROLL_TOKEN=$TOKEN sh "$tmp/kodeblue/deploy/install.sh" "$@"
+  KODEBLUE_UNPACKED=1 KODEBLUE_ENROLL_TOKEN=$TOKEN sh "$tmp/kodeblue/deploy/install.sh" "$@"
   exit $?
 fi
 
 # ---- install from this release directory ----
-say "installing kodeblue $("$root/kodeblue" version 2>/dev/null | cut -d' ' -f2)"
+v=$("$root/kodeblue" version 2>/dev/null | cut -d' ' -f2) || v=""   # empty on a noexec mount
+say "installing kodeblue${v:+ $v}"
 if ! id kodeblue >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/kodeblue --shell /usr/sbin/nologin --user-group kodeblue
 fi
@@ -196,9 +225,11 @@ if [ -x /usr/local/bin/kodeblue ]; then
     chown kodeblue:kodeblue /var/lib/kodeblue/maintenance-until 2>/dev/null || true
   fi
 fi
-install -m 0755 "$root/kodeblue" /usr/local/bin/kodeblue.new && mv -f /usr/local/bin/kodeblue.new /usr/local/bin/kodeblue
+install -m 0755 "$root/kodeblue" /usr/local/bin/kodeblue.new || die "could not install /usr/local/bin/kodeblue"
+mv -f /usr/local/bin/kodeblue.new /usr/local/bin/kodeblue
 install -d -m 0755 /usr/local/lib/kodeblue
-install -m 0755 "$root/kodeblue-engine" /usr/local/lib/kodeblue/engine.new && mv -f /usr/local/lib/kodeblue/engine.new /usr/local/lib/kodeblue/engine
+install -m 0755 "$root/kodeblue-engine" /usr/local/lib/kodeblue/engine.new || die "could not install /usr/local/lib/kodeblue/engine"
+mv -f /usr/local/lib/kodeblue/engine.new /usr/local/lib/kodeblue/engine
 rm -f /usr/local/lib/kodeblue/kodecode   # the engine's name in early releases
 
 install -d -o root -g kodeblue -m 0750 /etc/kodeblue
@@ -278,10 +309,12 @@ if [ -n "$TOKEN" ]; then
 fi
 
 # ---- model endpoint (flags > hub default from enrollment > prompt) ----
-kb() { /usr/local/bin/kodeblue "$@" --config /etc/kodeblue/kodeblue.toml; }
+# The installer starts (or restarts) kodeblue itself, after the units are in place.
+kb() { KODEBLUE_NO_RESTART=1 /usr/local/bin/kodeblue "$@" --config /etc/kodeblue/kodeblue.toml; }
 if [ -n "$INFURL" ] || [ -n "$INFMODEL" ]; then
   kb inference --url "$INFURL" --model "$INFMODEL" >/dev/null || die "could not set the model endpoint"
-elif ! kb inference >/dev/null 2>&1 && ! grep -q '^base_url *= *"' /etc/kodeblue/kodeblue.toml; then
+elif [ ! -s /etc/kodeblue/hub.key ] && ! kb inference >/dev/null 2>&1 && ! grep -q '^base_url *= *"' /etc/kodeblue/kodeblue.toml; then
+  # A server on a hub takes its model from the hub (Settings), never a prompt.
   u=$(readline "Model endpoint, any OpenAI-compatible base URL such as https://openrouter.ai/api (Enter to skip; the model layers stay off until it is set): ")
   if [ -n "$u" ]; then
     m=$(readline "Model name for triage and agents: ")

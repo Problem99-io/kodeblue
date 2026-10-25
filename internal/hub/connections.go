@@ -160,9 +160,13 @@ func (s *Store) connectionUsers(id string) []string {
 
 // normalizeBaseURL trims a trailing slash and /v1: kodeblue appends
 // /v1/chat/completions and /v1/models itself, and people paste either form.
-func normalizeBaseURL(u string) string {
-	u = strings.TrimRight(strings.TrimSpace(u), "/")
-	return strings.TrimSuffix(u, "/v1")
+func normalizeBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	// Only a /v1 path: https://v1 is a host.
+	if u, err := url.Parse(raw); err == nil && u.Host != "" && strings.HasSuffix(u.Path, "/v1") && u.RawQuery == "" && u.Fragment == "" {
+		return strings.TrimSuffix(raw, "/v1")
+	}
+	return raw
 }
 
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)

@@ -102,8 +102,10 @@ type Daemon struct {
 	// relearnNow asks the main loop to run the learning phase again.
 	learning   atomic.Bool
 	relearnNow chan struct{}
-	// learnWaiting is set while learnWhenModelReady waits for the engine.
+	// learnWaiting is set while learnWhenModelReady waits for the engine;
+	// learnRetry is its first delay after a failed run.
 	learnWaiting atomic.Bool
+	learnRetry   time.Duration
 	// Systemd, when kodeblue runs under it, receives the watchdog pings;
 	// progressBy (unix nanoseconds) is when the main loop promised to be
 	// back (expectProgress).
@@ -124,7 +126,7 @@ type Daemon struct {
 
 // ErrRestart is returned by Run when the daemon stopped to apply new
 // settings. The service manager starts it again.
-var ErrRestart = errors.New("restarting to apply new hub settings")
+var ErrRestart = errors.New("restarting to apply new settings")
 
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	env := &sensors.Env{Root: cfg.Server.Root, Logger: logger, State: sensors.NewCursorStore(cfg.CursorPath())}
@@ -132,6 +134,7 @@ func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
 	d.newEngine = func() agentEngine { return runtime.New(cfg, logger) }
 	d.engCheckEvery, d.engMinBackoff, d.wakeGap = 30*time.Second, time.Minute, 10*time.Second
+	d.learnRetry = 10 * time.Minute
 	d.reg = sensors.NewRegistry(cfg.Detect.Collectors, d.integrityPaths())
 	st.SetPricing(cfg.Budget.InputUSDPerMTok, cfg.Budget.OutputUSDPerMTok)
 	opts := detect.DefaultOptions()
@@ -863,21 +866,31 @@ func (d *Daemon) learn(ctx context.Context) error {
 	}
 	_ = d.st.Set("baseline_at", time.Now().UTC().Format(time.RFC3339))
 
-	waits := ""
+	learned := false
 	if d.engine() != nil {
-		_ = d.st.Set(store.LearnerPendingKey, "")
 		brief := fmt.Sprintf("Learning run for server %q. kodeblue collected %d baseline snapshots over %s.", d.cfg.Server.Name, sweeps, time.Duration(d.cfg.Schedule.LearningMinutes)*time.Minute)
 		if in, sess, err := d.startLearner(ctx, d.learnBrief(brief)); err == nil {
 			d.expectProgress(learnerTimeout + loopGrace)
-			d.finishLearner(ctx, in, sess)
+			if learned = learnerRan(d.finishLearner(ctx, in, sess)); learned {
+				d.assess(ctx)
+			}
 		}
-		d.assess(ctx)
+	}
+	waits := ""
+	if learned {
+		_ = d.st.Set(store.LearnerPendingKey, "")
 	} else {
-		// No model yet: detection starts on the baseline, and the learner and
-		// the assessment run once a model is set (learnWhenModelReady).
+		// No model (or no working engine) yet: detection starts on the
+		// baseline, and the learner and the assessment run once they can
+		// (learnWhenModelReady).
 		_ = d.st.Set(store.LearnerPendingKey, time.Now().UTC().Format(time.RFC3339))
-		d.log.Warn("learning session waits for a model; detection starts on the baseline meanwhile")
-		waits = "\nThe learning session (server profile, monitors, skills) and the vulnerability assessment wait for a model: add one on the hub (Settings) or with kodeblue inference, and they start on their own."
+		if d.modelsOn {
+			d.log.Warn("learning session did not run; it is retried while detection runs on the baseline")
+			waits = "\nThe learning session (server profile, monitors, skills) and the vulnerability assessment did not run (the agent engine is not working yet); kodeblue retries them on its own."
+		} else {
+			d.log.Warn("learning session waits for a model; detection starts on the baseline meanwhile")
+			waits = "\nThe learning session (server profile, monitors, skills) and the vulnerability assessment wait for a model: add one on the hub (Settings) or with sudo kodeblue inference, and they start on their own."
+		}
 	}
 	d.seedRequestMonitors()
 	coverage := d.checkServiceCoverage("learning")
@@ -916,9 +929,15 @@ func (d *Daemon) learnBrief(intro string) string {
 	return msg
 }
 
+// learnerRan reports whether a learner session did its work: it completed,
+// or ran out of time (its report says how far it got). One that failed or
+// lost its engine is retried.
+func learnerRan(status string) bool { return status == "completed" || status == "timeout" }
+
 // learnWhenModelReady runs the learner and the assessment that learning
-// left for lack of a model, once the agent engine is up. They run beside
-// detection, which has watched the server since the baseline. The models
+// left for lack of a model (or of a working engine), once the agent engine
+// is up. They run beside detection, which has watched the server since the
+// baseline. A run that fails is retried with a growing delay. The models
 // only change with a restart, so without them there is nothing to wait for.
 func (d *Daemon) learnWhenModelReady(ctx context.Context) {
 	if !d.modelsOn || d.st.Get(store.LearnerPendingKey) == "" || !d.learnWaiting.CompareAndSwap(false, true) {
@@ -928,39 +947,72 @@ func (d *Daemon) learnWhenModelReady(ctx context.Context) {
 	go func() {
 		defer d.wg.Done()
 		defer d.learnWaiting.Store(false)
+		retry := d.learnRetry
 		for {
-			if d.st.Get(store.LearnerPendingKey) == "" {
-				return // a learner the hub asked for did it
+			if !d.claimPendingLearner(ctx) {
+				return
 			}
-			if d.engine() != nil && d.learning.CompareAndSwap(false, true) {
-				break
+			ok := d.runPendingLearner(ctx)
+			d.learning.Store(false)
+			d.nudgeHub()
+			if ok || ctx.Err() != nil {
+				return
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(d.engCheckEvery):
+			case <-time.After(retry):
 			}
+			retry = min(retry*2, 6*time.Hour)
 		}
-		defer d.learning.Store(false)
-		d.nudgeHub()
-		since := d.st.Get(store.LearnerPendingKey)
-		brief := fmt.Sprintf("Learning run for server %q. kodeblue collected the baseline before a model was set (learning finished %s) and detection has watched the server since; this run waited for the model.", d.cfg.Server.Name, since)
-		in, sess, err := d.startLearner(ctx, d.learnBrief(brief))
-		if err != nil {
-			return // still pending: the next start tries again
-		}
-		d.finishLearner(ctx, in, sess)
-		d.assess(ctx)
-		coverage := d.checkServiceCoverage("learning")
-		if ctx.Err() != nil {
-			return
-		}
-		_ = d.st.Set(store.LearnerPendingKey, "")
-		d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "learning", Severity: "info",
-			Title: "kodeblue has learned this server",
-			Body:  fmt.Sprintf("The learning session that waited for a model is done: %d monitors; %s.", len(d.mon.Specs()), coverage)}, nil)
-		d.nudgeHub()
 	}()
+}
+
+// claimPendingLearner waits until the engine is up and no other learning
+// runs, and takes the learning flag; false when there is nothing left to do.
+func (d *Daemon) claimPendingLearner(ctx context.Context) bool {
+	for {
+		if d.st.Get(store.LearnerPendingKey) == "" {
+			return false // a learner the hub asked for did it
+		}
+		if d.engine() != nil && d.learning.CompareAndSwap(false, true) {
+			if d.st.Get(store.LearnerPendingKey) != "" {
+				return true
+			}
+			d.learning.Store(false) // done while we waited for the flag
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(d.engCheckEvery):
+		}
+	}
+}
+
+// runPendingLearner runs the waiting learner and assessment; true when the
+// learner did its work, which clears the waiting state.
+func (d *Daemon) runPendingLearner(ctx context.Context) bool {
+	d.nudgeHub()
+	since := d.st.Get(store.LearnerPendingKey)
+	brief := fmt.Sprintf("Learning run for server %q. kodeblue collected the baseline earlier (learning finished %s) and detection has watched the server since; this run waited for a model.", d.cfg.Server.Name, since)
+	in, sess, err := d.startLearner(ctx, d.learnBrief(brief))
+	if err != nil {
+		return false
+	}
+	if !learnerRan(d.finishLearner(ctx, in, sess)) || ctx.Err() != nil {
+		return false
+	}
+	d.assess(ctx)
+	coverage := d.checkServiceCoverage("learning")
+	if ctx.Err() != nil {
+		return false
+	}
+	_ = d.st.Set(store.LearnerPendingKey, "")
+	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "learning", Severity: "info",
+		Title: "kodeblue has learned this server",
+		Body:  fmt.Sprintf("The learning session that waited for a model is done: %d monitors; %s.", len(d.mon.Specs()), coverage)}, nil)
+	return true
 }
 
 // rootKeysNote lists root's authorized SSH keys that learning took into the
@@ -1005,9 +1057,11 @@ func (d *Daemon) startLearner(ctx context.Context, brief string) (*store.Inciden
 	return d.startLearning(ctx, "blue-learner", "Learning run", brief)
 }
 
-func (d *Daemon) finishLearner(ctx context.Context, in *store.Incident, sess *runtime.Session) {
+// finishLearner returns the session's outcome status.
+func (d *Daemon) finishLearner(ctx context.Context, in *store.Incident, sess *runtime.Session) string {
 	out := d.finishLearning(ctx, in, sess, "learning.md")
 	d.log.Info("learner finished", "status", out.Status, "cost_usd", fmt.Sprintf("%.4f", in.CostUSD), "monitors", len(d.mon.Specs()))
+	return out.Status
 }
 
 // startLearning opens a learning case titled title and starts agent on it.
