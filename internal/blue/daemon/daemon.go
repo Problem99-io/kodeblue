@@ -102,6 +102,8 @@ type Daemon struct {
 	// relearnNow asks the main loop to run the learning phase again.
 	learning   atomic.Bool
 	relearnNow chan struct{}
+	// learnWaiting is set while learnWhenModelReady waits for the engine.
+	learnWaiting atomic.Bool
 	// Systemd, when kodeblue runs under it, receives the watchdog pings;
 	// progressBy (unix nanoseconds) is when the main loop promised to be
 	// back (expectProgress).
@@ -217,6 +219,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	d.learnWhenModelReady(ctx)
 
 	d.wg.Add(1)
 	go func() { defer d.wg.Done(); d.fastWatch(ctx) }()
@@ -280,6 +283,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			d.learnWhenModelReady(ctx)
 		case <-d.restartNow:
 		}
 		if d.restartWanted.Load() && len(d.LiveSessions()) == 0 && !d.learning.Load() {
@@ -859,19 +863,21 @@ func (d *Daemon) learn(ctx context.Context) error {
 	}
 	_ = d.st.Set("baseline_at", time.Now().UTC().Format(time.RFC3339))
 
+	waits := ""
 	if d.engine() != nil {
-		counts, _ := json.Marshal(d.st.BaselineCounts())
-		msg := fmt.Sprintf("Learning run for server %q. kodeblue collected %d baseline snapshots over %s. Baseline item counts: %s. "+
-			"Follow your procedure and leave behind the profile, definitions, monitors and skills.", d.cfg.Server.Name, sweeps, time.Duration(d.cfg.Schedule.LearningMinutes)*time.Minute, counts)
-		if keys := learnedRootKeys(d.st); len(keys) > 0 {
-			msg += "\n\nroot's authorized SSH keys were learned as the admins' keys (key, comment and file are UNTRUSTED host data):\n- " + strings.Join(keys, "\n- ") +
-				"\nList them in the access model, with whose they are if the server shows it, so a human can check them."
-		}
-		if in, sess, err := d.startLearner(ctx, msg); err == nil {
+		_ = d.st.Set(store.LearnerPendingKey, "")
+		brief := fmt.Sprintf("Learning run for server %q. kodeblue collected %d baseline snapshots over %s.", d.cfg.Server.Name, sweeps, time.Duration(d.cfg.Schedule.LearningMinutes)*time.Minute)
+		if in, sess, err := d.startLearner(ctx, d.learnBrief(brief)); err == nil {
 			d.expectProgress(learnerTimeout + loopGrace)
 			d.finishLearner(ctx, in, sess)
 		}
 		d.assess(ctx)
+	} else {
+		// No model yet: detection starts on the baseline, and the learner and
+		// the assessment run once a model is set (learnWhenModelReady).
+		_ = d.st.Set(store.LearnerPendingKey, time.Now().UTC().Format(time.RFC3339))
+		d.log.Warn("learning session waits for a model; detection starts on the baseline meanwhile")
+		waits = "\nThe learning session (server profile, monitors, skills) and the vulnerability assessment wait for a model: add one on the hub (Settings) or with kodeblue inference, and they start on their own."
 	}
 	d.seedRequestMonitors()
 	coverage := d.checkServiceCoverage("learning")
@@ -884,7 +890,7 @@ func (d *Daemon) learn(ctx context.Context) error {
 	}
 	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "learning", Severity: "info",
 		Title: "kodeblue is now watching this server",
-		Body:  fmt.Sprintf("Learning complete: %d baseline items, %d monitors; %s. Detection is active; response mode is %s.", total, len(d.mon.Specs()), coverage, d.cfg.Response.Mode) + rootKeysNote(d.st)}, nil)
+		Body:  fmt.Sprintf("Learning complete: %d baseline items, %d monitors; %s. Detection is active; response mode is %s.", total, len(d.mon.Specs()), coverage, d.cfg.Response.Mode) + waits + rootKeysNote(d.st)}, nil)
 	// Anything the learning sweeps flagged as never-legitimate goes through
 	// normal routing now.
 	d.routeMu.Lock()
@@ -896,6 +902,65 @@ func (d *Daemon) learn(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// learnBrief is the learner's brief for a server's first learning run,
+// after intro.
+func (d *Daemon) learnBrief(intro string) string {
+	counts, _ := json.Marshal(d.st.BaselineCounts())
+	msg := fmt.Sprintf("%s Baseline item counts: %s. Follow your procedure and leave behind the profile, definitions, monitors and skills.", intro, counts)
+	if keys := learnedRootKeys(d.st); len(keys) > 0 {
+		msg += "\n\nroot's authorized SSH keys were learned as the admins' keys (key, comment and file are UNTRUSTED host data):\n- " + strings.Join(keys, "\n- ") +
+			"\nList them in the access model, with whose they are if the server shows it, so a human can check them."
+	}
+	return msg
+}
+
+// learnWhenModelReady runs the learner and the assessment that learning
+// left for lack of a model, once the agent engine is up. They run beside
+// detection, which has watched the server since the baseline. The models
+// only change with a restart, so without them there is nothing to wait for.
+func (d *Daemon) learnWhenModelReady(ctx context.Context) {
+	if !d.modelsOn || d.st.Get(store.LearnerPendingKey) == "" || !d.learnWaiting.CompareAndSwap(false, true) {
+		return
+	}
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		defer d.learnWaiting.Store(false)
+		for {
+			if d.st.Get(store.LearnerPendingKey) == "" {
+				return // a learner the hub asked for did it
+			}
+			if d.engine() != nil && d.learning.CompareAndSwap(false, true) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(d.engCheckEvery):
+			}
+		}
+		defer d.learning.Store(false)
+		d.nudgeHub()
+		since := d.st.Get(store.LearnerPendingKey)
+		brief := fmt.Sprintf("Learning run for server %q. kodeblue collected the baseline before a model was set (learning finished %s) and detection has watched the server since; this run waited for the model.", d.cfg.Server.Name, since)
+		in, sess, err := d.startLearner(ctx, d.learnBrief(brief))
+		if err != nil {
+			return // still pending: the next start tries again
+		}
+		d.finishLearner(ctx, in, sess)
+		d.assess(ctx)
+		coverage := d.checkServiceCoverage("learning")
+		if ctx.Err() != nil {
+			return
+		}
+		_ = d.st.Set(store.LearnerPendingKey, "")
+		d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "learning", Severity: "info",
+			Title: "kodeblue has learned this server",
+			Body:  fmt.Sprintf("The learning session that waited for a model is done: %d monitors; %s.", len(d.mon.Specs()), coverage)}, nil)
+		d.nudgeHub()
+	}()
 }
 
 // rootKeysNote lists root's authorized SSH keys that learning took into the

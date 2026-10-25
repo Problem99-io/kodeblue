@@ -348,7 +348,7 @@ func (l *Link) status() hubproto.Status {
 		Kernel: firstLine(filepath.Join(l.cfg.Server.Root, "proc/sys/kernel/osrelease")), Uptime: uptime(l.cfg.Server.Root),
 		Phase: l.agent.Phase(), ResponseMode: l.cfg.Response.Mode, RootMode: l.cfg.RootResponseMode, ModelsEnabled: l.agent.ModelsEnabled(),
 		TriageModel: l.cfg.ModelFor(hubproto.RoleTriage), AgentModel: l.cfg.ModelFor(hubproto.RoleResponder),
-		Heartbeat: l.st.Get("heartbeat"), LearnedAt: l.st.Get("learned_at"), LastReviewAt: l.st.Get("last_review_at"),
+		Heartbeat: l.st.Get("heartbeat"), LearnedAt: l.st.Get("learned_at"), LearnerPending: l.st.Get(store.LearnerPendingKey) != "", LastReviewAt: l.st.Get("last_review_at"),
 		SpendToday: usd, SpendByPurpose: per, Spend7d: week, DailyBudget: l.cfg.Budget.DailyUSD, TokensToday: tokens,
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
 		FindingStats7d: l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,

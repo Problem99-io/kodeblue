@@ -181,7 +181,7 @@ sudoedit /etc/kodeblue/kodeblue.toml     # response mode, protected users/IPs/un
 journalctl -fu kodeblue
 ```
 
-The installer asks for the endpoint's API key and an optional Slack webhook (input is not echoed). kodeblue takes snapshots of the server for about 30 minutes. With a model, a learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours. Change the model endpoint later with `sudo kodeblue inference --url … --model …`, then `sudo systemctl restart kodeblue`.
+The installer asks for the endpoint's API key and an optional Slack webhook (input is not echoed). kodeblue takes snapshots of the server for about 30 minutes. With a model, a learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours. Without one, it starts watching after the snapshots, and the learning session and assessment wait until you set a model, then run on their own. Change the model endpoint later with `sudo kodeblue inference --url … --model …`, then `sudo systemctl restart kodeblue`.
 
 ### B. A hub and several servers
 
@@ -197,7 +197,7 @@ sudo kodeblue-hub/install-hub.sh --public-url https://hub.example.com:8443 --sel
 
 Or run the hub image: `ghcr.io/problem99-io/kodeblue-hub:latest` (see [docs/deploy.md](docs/deploy.md#with-docker)).
 
-The installer creates the first operator account (it asks for a password) and prints the certificate pin. Sign in at the public URL, add a model connection in **Settings**, then use **Add server**. Copy the one-line command it prints and run it on the server. It looks like this:
+The installer creates the first operator account (it asks for a password) and prints the certificate pin. Sign in at the public URL, add a model connection in **Settings** and pick it as the default model, then use **Add server**. Until a server has a model, its learning waits and the hub shows an alert. Copy the one-line command it prints and run it on the server. It looks like this:
 
 ```bash
 f=$(mktemp) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey 'sha256//…' -o "$f" https://hub.example.com:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | sudo sh "$f" --hub https://hub.example.com:8443 --pin 'sha256//…' --token-file -; s=$?; rm -f "$f"; (exit "$s"); }

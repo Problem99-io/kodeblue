@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -663,6 +664,77 @@ func TestRunWaitsForGoroutinesWhenRelearnIsCancelled(t *testing.T) {
 	if !exited.Load() {
 		t.Fatal("Run returned before its goroutines stopped")
 	}
+}
+
+// Learning without a model used to end for good: the learner and the
+// vulnerability assessment never ran. Detection still starts on the baseline,
+// but the learner waits for a model and runs once the engine is up.
+func TestLearnerWaitsForModel(t *testing.T) {
+	d, st, _, out := newTestDaemon(t)
+	d.cfg.Schedule.LearningSweeps = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := d.learn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st.Get("learned_at") == "" || st.Get(store.LearnerPendingKey) == "" {
+		t.Fatalf("learned_at %q, learner_pending %q: want both set", st.Get("learned_at"), st.Get(store.LearnerPendingKey))
+	}
+	out.mu.Lock()
+	body := out.msgs[len(out.msgs)-1].Body
+	out.mu.Unlock()
+	if !strings.Contains(body, "wait for a model") {
+		t.Fatalf("learning message does not say the learner waits: %q", body)
+	}
+	d.learnWhenModelReady(ctx) // no models configured: nothing to wait for
+	if d.learnWaiting.Load() {
+		t.Fatal("waiting for an engine without models")
+	}
+
+	// Models are set (a restart applies them) and the engine comes up late.
+	d.modelsOn = true
+	d.engCheckEvery = 10 * time.Millisecond
+	d.learnWhenModelReady(ctx)
+	time.Sleep(50 * time.Millisecond)
+	if st.Get(store.LearnerPendingKey) == "" {
+		t.Fatal("learner pending cleared without an engine")
+	}
+	eng := &engines{runFor: time.Millisecond}
+	d.newEngine = eng.factory
+	if err := d.startEngine(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return st.Get(store.LearnerPendingKey) == "" && !d.learnWaiting.Load() })
+	var titles []string
+	for _, in := range st.Incidents(`WHERE kind=?`, "learning") {
+		titles = append(titles, in.Title)
+	}
+	slices.Sort(titles)
+	if !slices.Equal(titles, []string{"Learning run", "Vulnerability assessment"}) {
+		t.Fatalf("learning cases %v, want the learner and the assessment", titles)
+	}
+	if d.learning.Load() {
+		t.Fatal("learning flag left set")
+	}
+}
+
+// A learner the hub asks for does the pending learning run too.
+func TestHubLearnClearsPendingLearner(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	_ = st.Set("learned_at", time.Now().UTC().Format(time.RFC3339))
+	_ = st.Set(store.LearnerPendingKey, time.Now().UTC().Format(time.RFC3339))
+	d.modelsOn = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng := &engines{runFor: time.Millisecond}
+	d.newEngine = eng.factory
+	if err := d.startEngine(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := d.Learn(ctx, hubproto.OperatorMessage{Command: hubproto.CommandLearn, Author: "ram"}); r.Status != "done" {
+		t.Fatalf("learn: %+v", r)
+	}
+	waitFor(t, func() bool { return st.Get(store.LearnerPendingKey) == "" && !d.learning.Load() })
 }
 
 func waitFor(t *testing.T, cond func() bool) {

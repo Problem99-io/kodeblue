@@ -60,6 +60,7 @@ type Status struct {
 	AgentModel     string             `json:"agent_model"`
 	Heartbeat      string             `json:"heartbeat"`
 	LearnedAt      string             `json:"learned_at,omitempty"`
+	LearnerPending bool               `json:"learner_pending,omitempty"` // learned without a model: the learner and assessment wait for one
 	LastReviewAt   string             `json:"last_review_at,omitempty"`
 	Maintenance    string             `json:"maintenance_until,omitempty"`
 	SpendToday     float64            `json:"spend_today_usd"`

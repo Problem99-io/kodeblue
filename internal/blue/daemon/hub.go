@@ -143,6 +143,9 @@ func (d *Daemon) Learn(ctx context.Context, m hubproto.OperatorMessage) hubproto
 		d.finishLearner(ctx, in, sess)
 		d.assess(ctx)
 		d.checkServiceCoverage("learning")
+		if ctx.Err() == nil {
+			_ = d.st.Set(store.LearnerPendingKey, "")
+		}
 	}()
 	return hubproto.MessageReply{Status: "done", SessionID: sess.ID,
 		Text: fmt.Sprintf("Learner started on the current baseline (%d items): case #%d.", total, in.ID)}

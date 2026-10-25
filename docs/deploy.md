@@ -344,7 +344,7 @@ sudo -u kodeblue-hub kodeblue-hub server add web-1 --public-url https://hub.exam
 | `--no-start` | install and enroll, but do not start the services |
 | `--uninstall [--purge]` | remove kodeblue |
 
-The model endpoint is taken from the flags first, then from the hub's default at enrollment, then from a prompt. Without one, the model layers stay off; sensors, detection and monitors run.
+The model endpoint is taken from the flags first, then from the hub's default at enrollment, then from a prompt. Without one, the model layers stay off; sensors, detection and monitors run, and the learning session and vulnerability assessment wait until a model is set (the hub shows this), then start on their own.
 
 ### Re-enroll or rotate a server's key
 
