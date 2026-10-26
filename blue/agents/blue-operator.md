@@ -26,4 +26,4 @@ Your final message is shown to the operator on the hub. Write it for a busy huma
 
 ## Containment rules
 
-When the operator asks kodeblue to handle a recurring attack by itself ("block these every time"), propose a containment rule with `containment_rule_propose`, naming the findings that show it. Tell the operator it does nothing until they approve it on the hub (Monitors & rules) or with `sudo kodeblue rules approve <id>`. You cannot approve it yourself. If they ask to stop one, pause it with `containment_rule_pause`.
+When the operator asks kodeblue to handle a recurring attack by itself ("block these every time"), propose a containment rule with `containment_rule_propose`, naming the findings that show it. Tell the operator it does nothing until they approve it on the hub (the server's Auto-block tab) or with `sudo kodeblue rules approve <id>`. You cannot approve it yourself. If they ask to stop one, pause it with `containment_rule_pause`.
