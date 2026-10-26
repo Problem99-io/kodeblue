@@ -179,3 +179,59 @@ func TestHubResponseModeIsCappedByRoot(t *testing.T) {
 		}
 	}
 }
+
+// The hub tunes cost, cadence and noise within bounds, never past the
+// server's own budget ceiling, and only adds protections.
+func TestHubTuningAndProtections(t *testing.T) {
+	c := Default()
+	c.Budget.HubMaxDailyUSD = 5
+	c.Response.MaxActionsPerHour = 10
+	s := &hubproto.Settings{Version: "v1",
+		Tuning: map[string]string{
+			"budget.daily_usd":            "50",   // above the server's ceiling
+			"schedule.review_hours":       "6",    //
+			"detect.bruteforce_threshold": "5000", // out of bounds: ignored
+			"hub.share_transcripts":       "false",
+			"notify.min_severity":         "medium",
+			"no.such.key":                 "1",
+		},
+		ProtectedUsers: []string{"deploy"}, ProtectedIPs: []string{"10.0.0.0/8"}, ProtectedUnits: []string{"nginx"},
+		MaxActionsPerHour: 3,
+	}
+	got := c.applyHubSettings(s)
+	if got.Budget.DailyUSD != 5 {
+		t.Errorf("daily budget %v, want the server's ceiling 5", got.Budget.DailyUSD)
+	}
+	if got.Schedule.ReviewHours != 6 || got.Hub.ShareTranscripts || got.Notify.MinSeverity != "medium" {
+		t.Errorf("tuning not applied: review %d, share %v, severity %s", got.Schedule.ReviewHours, got.Hub.ShareTranscripts, got.Notify.MinSeverity)
+	}
+	if got.Detect.BruteForceThreshold != Default().Detect.BruteForceThreshold {
+		t.Errorf("out-of-bounds threshold applied: %d", got.Detect.BruteForceThreshold)
+	}
+	if !contains(got.Response.ProtectedUsers, "root") || !contains(got.Response.ProtectedUsers, "deploy") || !contains(got.Response.ProtectedUnits, "nginx") || !contains(got.Response.ProtectedIPs, "10.0.0.0/8") {
+		t.Errorf("protections: users %v, units %v, ips %v", got.Response.ProtectedUsers, got.Response.ProtectedUnits, got.Response.ProtectedIPs)
+	}
+	if contains(c.Response.ProtectedUsers, "deploy") {
+		t.Error("the root-owned config's lists were modified in place")
+	}
+	if got.Response.MaxActionsPerHour != 3 {
+		t.Errorf("rate limit %d, want 3", got.Response.MaxActionsPerHour)
+	}
+	// The hub cannot raise the limit.
+	s.MaxActionsPerHour = 50
+	if got := c.applyHubSettings(s); got.Response.MaxActionsPerHour != 10 {
+		t.Errorf("rate limit raised to %d", got.Response.MaxActionsPerHour)
+	}
+	if v := got.TuningValues(); v["budget.daily_usd"] != "5" || v["schedule.review_hours"] != "6" || len(v) != len(hubproto.Tunings) {
+		t.Errorf("tuning values: %v", v)
+	}
+}
+
+func contains(l []string, s string) bool {
+	for _, x := range l {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

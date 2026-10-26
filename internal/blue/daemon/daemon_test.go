@@ -972,3 +972,51 @@ func TestRootKeysNoteListsLearnedRootKeys(t *testing.T) {
 		t.Errorf("note lists other users' keys:\n%s", n)
 	}
 }
+
+// New hub settings (say, the model the learner needs) used to wait until the
+// whole baseline was collected, so the hub looked stuck for half an hour.
+// They now restart the daemon between sweeps, and the baseline resumes.
+func TestSettingsRestartBetweenBaselineSweepsAndResume(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	d.cfg.Schedule.LearningSweeps = 3
+	d.cfg.Schedule.LearningMinutes = 60 // 20 min between sweeps: only a restart ends the wait
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan error, 1)
+	go func() { ran <- d.learn(ctx) }()
+	waitFor(t, func() bool { done, _, _ := st.BaselineProgress(); return done == 1 })
+	d.ApplySettings()
+	select {
+	case err := <-ran:
+		if !errors.Is(err, ErrRestart) {
+			t.Fatalf("learn returned %v, want ErrRestart", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("new settings did not restart the daemon during the baseline")
+	}
+	if done, total, eta := st.BaselineProgress(); done != 1 || total != 3 || eta == "" {
+		t.Fatalf("progress after the restart: %d/%d %q", done, total, eta)
+	}
+
+	// After the restart: two sweeps to go, the first at once. Pretend the
+	// second is the last by recording 2 of 3 done.
+	d2, _, _, _ := newTestDaemon(t)
+	d2.st = st
+	d2.cfg.Schedule.LearningSweeps = 3
+	d2.cfg.Schedule.LearningMinutes = 60
+	st.SetBaselineProgress(2, 3, time.Now().Add(20*time.Minute))
+	done := make(chan error, 1)
+	go func() { done <- d2.learn(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the resumed baseline waited instead of taking its last sweep")
+	}
+	if _, total, _ := st.BaselineProgress(); total != 0 || st.Get("learned_at") == "" || st.Get("baseline_at") == "" {
+		t.Fatalf("after the baseline: progress total %d, learned_at %q", total, st.Get("learned_at"))
+	}
+
+}

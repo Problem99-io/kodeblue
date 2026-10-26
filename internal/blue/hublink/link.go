@@ -56,6 +56,9 @@ type Agent interface {
 	// StopSession aborts a running agent session named by the operator
 	// message (SessionID, or the session of IncidentID).
 	StopSession(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply
+	// DecisionMade is called after an operator decision on a containment
+	// request was carried out, so the incident's agent can continue.
+	DecisionMade()
 }
 
 type Link struct {
@@ -355,7 +358,7 @@ func (l *Link) status() hubproto.Status {
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals,
 		AcceptsSettings:  l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
-		Models: l.cfg.EffectiveModels(), Actions: map[string]string{},
+		Models: l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
 	}
 	for _, a := range respond.ActionNames() {
 		s.Actions[a] = l.cfg.ActionRule(a)
@@ -363,6 +366,13 @@ func (l *Link) status() hubproto.Status {
 	// The window the daemon enforces, not the file's raw (kodeblue-writable,
 	// possibly far-future) content.
 	s.Maintenance = l.agent.Maintenance()
+	if s.Phase == "learning" {
+		s.BaselineSweep, s.BaselineSweeps, s.BaselineETA = l.st.BaselineProgress()
+		s.BaselineAt = l.st.Get("baseline_at")
+	}
+	if l.savedSettings != nil && *l.savedSettings != l.cfg.HubSettingsVersion {
+		s.SettingsSaved = *l.savedSettings
+	}
 	return s
 }
 
@@ -417,6 +427,15 @@ func checkSettings(s *hubproto.Settings) error {
 		if r != hubproto.ActionAuto && r != hubproto.ActionApprove && r != hubproto.ActionOff {
 			return fmt.Errorf("bad approval rule %q", r)
 		}
+	}
+	if err := hubproto.CheckTuning(s.Tuning); err != nil {
+		return err
+	}
+	if err := hubproto.CheckProtected(s.ProtectedUsers, s.ProtectedIPs, s.ProtectedUnits); err != nil {
+		return err
+	}
+	if s.MaxActionsPerHour < 0 {
+		return errors.New("bad max_actions_per_hour")
 	}
 	return nil
 }
@@ -473,6 +492,9 @@ func (l *Link) messageLoop(ctx context.Context) {
 
 func (l *Link) answer(ctx context.Context, m hubproto.OperatorMessage) {
 	l.sendReply(ctx, m.ID, l.handle(ctx, m))
+	if m.Decision != "" {
+		l.agent.DecisionMade()
+	}
 	l.Nudge()
 }
 
@@ -566,6 +588,13 @@ func (l *Link) decide(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	}
 	if m.Decision == "approve" && l.cfg.ActionRule(r.Action) == hubproto.ActionOff {
 		return hubproto.MessageReply{Status: "refused", Text: r.Action + " is turned off on this server, so it cannot be approved. Deny the request instead."}
+	}
+	// Protections the hub added since the request (the root helper only
+	// knows the server's own).
+	if m.Decision == "approve" {
+		if err := respond.Check(l.cfg.Response, *r); err != nil {
+			return hubproto.MessageReply{Status: "refused", Text: "This request cannot be approved: " + err.Error() + ". Deny it instead."}
+		}
 	}
 	by := "hub:" + m.Author
 	slack := notify.New(l.cfg.Hub.Enabled(), l.st, l.cfg.Notify.SlackWebhookURL, l.cfg.Notify.SlackWebhookFile, l.cfg.Notify.Direct)

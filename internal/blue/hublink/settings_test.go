@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
@@ -104,3 +105,38 @@ func TestApproveRefusedWhenActionTurnedOff(t *testing.T) {
 		t.Fatalf("approve of a disabled action: %+v", r)
 	}
 }
+
+// The status tells the hub how far the baseline is and that settings it sent
+// are saved but not applied yet, so the console does not look stuck.
+func TestStatusReportsBaselineAndSavedSettings(t *testing.T) {
+	l, _ := newSettingsLink(t)
+	l.agent = &phaseAgent{settingsAgent: settingsAgent{}, phase: "learning"}
+	l.st.SetBaselineProgress(3, 10, time.Now().Add(21*time.Minute))
+	l.saveSettings(&hubproto.Settings{Version: "v2", Models: map[string]hubproto.ModelRef{hubproto.RoleDefault: {Model: "vendor/m"}}})
+	s := l.status()
+	if s.BaselineSweep != 3 || s.BaselineSweeps != 10 || s.BaselineETA == "" {
+		t.Fatalf("baseline: %d/%d %q", s.BaselineSweep, s.BaselineSweeps, s.BaselineETA)
+	}
+	if s.SettingsSaved != "v2" {
+		t.Fatalf("settings_saved %q, want v2", s.SettingsSaved)
+	}
+	// Applied (after the restart) and watching: neither is reported.
+	l.cfg.HubSettingsVersion = "v2"
+	l.agent.(*phaseAgent).phase = "watching"
+	if s := l.status(); s.SettingsSaved != "" || s.BaselineSweeps != 0 {
+		t.Fatalf("after apply: saved %q, sweeps %d", s.SettingsSaved, s.BaselineSweeps)
+	}
+}
+
+// phaseAgent answers what status() asks of the daemon.
+type phaseAgent struct {
+	settingsAgent
+	phase string
+}
+
+func (a *phaseAgent) Phase() string       { return a.phase }
+func (a *phaseAgent) ModelsEnabled() bool { return false }
+func (a *phaseAgent) Learning() bool      { return a.phase == "learning" }
+func (a *phaseAgent) Maintenance() string { return "" }
+func (a *phaseAgent) DecisionMade()       {}
+func (a *phaseAgent) ApplySettings()      { a.applied++ }

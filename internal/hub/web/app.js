@@ -626,22 +626,58 @@ function serverBar(srv, tab) {
 // running agent engine).
 function modelSet(st) { return !!(st.triage_model || (st.models || {}).triage); }
 // hubModelComing: the hub has a Default model and the server takes hub
-// settings; it applies them once its baseline is done (or at once when idle).
+// settings; it applies them on its next sync and restart.
 function hubModelComing(st) { return !!(S.info && S.info.fleet_model && st.accepts_settings); }
+// modelOnItsWay: no model on the server yet, but the hub's is coming, or the
+// server has received it and restarts to apply it.
+function modelOnItsWay(st) { return !modelSet(st) && (!!st.settings_saved || hubModelComing(st)); }
 // During the first learning st.learning is set from the start, so a server
 // still collecting its baseline without a model counts as waiting too; a
 // pending learner that is running now does not.
 function learnWaits(st) { return (st.phase === "learning" && !modelSet(st)) || (!!st.learner_pending && !st.learning); }
+// baselineText: how far the baseline is, from servers that report it
+// ("snapshot 7 of 10, the last around 01:35, in about 9 min").
+function baselineText(st) {
+  if (st.phase !== "learning" || !st.baseline_sweeps) return "";
+  let t = `snapshot ${st.baseline_sweep} of ${st.baseline_sweeps}`;
+  const eta = validTime(st.baseline_eta);
+  if (eta && st.baseline_sweep < st.baseline_sweeps) {
+    const min = Math.round((eta.getTime() - Date.now()) / 60000);
+    t += ", the last around " + eta.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) + (min > 0 ? ` (in about ${min} min)` : "");
+  }
+  return t;
+}
+const learnerModel = (st) => (st.models || {}).learner || st.agent_model || "the learner model";
+// learnModelNote: what follows the baseline, given where the model is.
+function learnModelNote(st) {
+  if (modelSet(st) && st.baseline_at && !baselineText(st)) return `The learning session (server profile, monitors, skills) and the vulnerability assessment are running with ${learnerModel(st)}; follow them on the board.`;
+  if (modelSet(st)) return `The learning session (server profile, monitors, skills) and the vulnerability assessment run right after it, with ${learnerModel(st)}; they show on the board while they run.`;
+  if (st.settings_saved) return "The server has received the hub's model and restarts to use it as soon as no agent session runs; the baseline carries on where it left off. The learning session and the vulnerability assessment then follow it.";
+  if (hubModelComing(st)) return `The hub's Default model (${S.info.fleet_model}) is on its way: the server picks it up on its next sync and restarts to use it, then runs the learning session and the vulnerability assessment after the baseline.`;
+  return "";
+}
 function learnWaitAlert(st) {
+  if (st.phase === "learning") {
+    const prog = baselineText(st);
+    // A server that reports progress and has none collects no baseline now:
+    // past it (baseline_at), the learning session or assessment runs.
+    const doing = prog ? `kodeblue is collecting this server's baseline: ${prog}. `
+      : st.baseline_at ? "kodeblue has collected this server's baseline. "
+        : "kodeblue is collecting this server's baseline (about 30 minutes) or learning it. ";
+    if (modelSet(st) || modelOnItsWay(st)) {
+      return h("div", { class: "callout info sbar-alert" }, h("div", { class: "lbl" }, "Learning this server"), doing, learnModelNote(st));
+    }
+    return h("div", { class: "callout warn sbar-alert" }, h("div", { class: "lbl" }, "Learning is waiting for a model"), doing,
+      "The learning session (server profile, monitors, skills) and the vulnerability assessment follow it, and they need a model. ",
+      ["Add a model connection and pick a default model in ", h("a", { href: "#/settings" }, "Settings"), " (or set one on the server with ", h("code", null, "sudo kodeblue inference"), "); they start on their own."]);
+  }
   if (!learnWaits(st)) return null;
-  const set = modelSet(st) || hubModelComing(st);
+  const set = modelSet(st) || modelOnItsWay(st);
   return h("div", { class: "callout warn sbar-alert" }, h("div", { class: "lbl" }, set ? "Learning has not run yet" : "Learning is waiting for a model"),
-    st.phase === "learning"
-      ? "kodeblue is collecting this server's baseline. The learning session (server profile, monitors, skills) and the vulnerability assessment follow it, and they need a model. "
-      : "kodeblue is watching this server with its deterministic detection, but the learning session (server profile, monitors, skills) and the vulnerability assessment have not run. ",
+    "kodeblue is watching this server with its deterministic detection, but the learning session (server profile, monitors, skills) and the vulnerability assessment have not run. ",
     set
       ? (modelSet(st) ? "A model is set; kodeblue runs them once its agent engine works, and retries them if they fail (see the server's log)."
-        : "The hub's Default model reaches this server on its next restart, once its baseline is done; it then runs them on its own.")
+        : "The hub's Default model reaches this server on its next sync; it restarts to use it and then runs them on its own.")
       : ["Add a model connection and pick a default model in ", h("a", { href: "#/settings" }, "Settings"), " (or set one on the server with ", h("code", null, "sudo kodeblue inference"), "); they start on their own."]);
 }
 
@@ -679,6 +715,7 @@ function boardModel(d) {
     const x = parse(a);
     if (!x || !x.id) continue;
     x._srv = a.server_id;
+    if (decidedDone(decisions.get(a.server_id + "|" + x.id))) continue;
     const k = a.server_id + ":" + x.incident_id;
     approvals.set(k, (approvals.get(k) || []).concat(x));
   }
@@ -1386,6 +1423,7 @@ async function panelRefresh(first, force) {
     if (P.key !== key) return;
     st.decs = st.msgs.filter((m) => m.decision && String(m.incident_id) === String(inc.id)).sort((a, b) => a.id - b.id);
     if (pend) st.pend = pend.map(parse).filter((a) => String(a.incident_id) === String(inc.id));
+    st.decOpen = st.decs.some(decOpen);
     paintApprovals();
     paintChat(inc, st.sess, st.own, notes, st.decs, st.srv);
     paintExt();
@@ -1394,6 +1432,9 @@ async function panelRefresh(first, force) {
   } finally {
     st.loading = false;
     if (st.again && P.key === key) { st.again = false; setTimeout(() => panelRefresh(false, true)); }
+    // A ruling takes the server about a second: follow it closely rather
+    // than on the 5 s poll.
+    else if (st.decOpen && P.key === key && !st.fast) st.fast = setTimeout(() => { st.fast = null; panelRefresh(false, true); }, 1000);
   }
 }
 function notFound(text) {
@@ -1570,7 +1611,11 @@ function learningControls(srv, cmds, after) {
   const last = cmds[cmds.length - 1];
   const lastNote = last ? h("div", { class: "small " + (last.status === "done" ? "muted" : "c-red") },
     `${last.author}: ${last.command}${last.status === "done" ? "" : " " + last.status} ${ago(last.replied_at || last.created_at)}`, last.reply ? " — " + last.reply : "") : null;
-  if (st.phase === "learning" && !modelSet(st)) return h("div", { class: "stack" }, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), "Collecting the baseline. The learning session waits for a model."), lastNote);
+  const prog = baselineText(st);
+  if (st.phase === "learning" && (prog || !modelSet(st))) {
+    const next = modelSet(st) ? "The learning session follows, with " + learnerModel(st) + "." : modelOnItsWay(st) ? "The hub's model is on its way to the server." : "The learning session waits for a model.";
+    return h("div", { class: "stack" }, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), (prog ? "Collecting the baseline: " + prog + ". " : "Collecting the baseline. ") + next), lastNote);
+  }
   if (st.learning || st.phase === "learning") return h("div", { class: "stack" }, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), "Learning now: the board shows the learning run."), lastNote);
   if (!st.accepts_learning) {
     return h("div", { class: "appr-cli" }, lastNote, h("span", { class: "faint small" }, "This server starts learning on its CLI only (older kodeblue, or hub.accept_learning = false):"),
@@ -1644,22 +1689,55 @@ function approvalControls(srvId, a, decs, after) {
   no.addEventListener("click", () => go("deny", no));
   return h("div", { class: "appr-act" }, lastNote, h("div", { class: "btns" }, yes, no));
 }
+// Rulings on their way to the server, and rulings it carried out (the
+// request leaves the pending list on the server's next sync; it is settled now).
+const decOpen = (m) => m.status === "queued" || m.status === "delivered";
+const decidedDone = (m) => !!m && m.decision && m.status === "done";
+async function approveAll(srvId, list, after) {
+  const name = serverName(srvId);
+  const ok = await ask(`Approve all ${list.length} containment actions?`,
+    [h("p", null, `kodeblue on ${name} will run these through its root helper, under the server's own response policy:`),
+      h("ul", { class: "appr-list" }, list.map((a) => h("li", null, h("b", null, a.action), actTarget(a) ? [" ", h("code", null, actTarget(a))] : null)))],
+    `Approve and run ${list.length}`, true);
+  if (!ok) return;
+  const res = await Promise.allSettled(list.map((a) => api("POST", `/api/servers/${enc(srvId)}/actions/${enc(a.id)}/decision`, { decision: "approve" })));
+  const bad = res.filter((r) => r.status === "rejected");
+  if (bad.length) toast(`${list.length - bad.length} of ${list.length} sent; not sent: ${bad[0].reason.message}`, true);
+  else toast(`Approved ${list.length} actions; sent to ${name}`);
+  if (after) after();
+}
 function paintApprovals() {
   const st = P.st;
-  const list = st.pend || [];
-  const sig = JSON.stringify([list.map((a) => a.id), (st.decs || []).map((m) => [m.id, m.status]), acceptsApprovals(st.srv)]);
+  const decs = st.decs || [];
+  const list = (st.pend || []).filter((a) => !decidedDone(decs.filter((m) => m.request_id === a.id).pop()));
+  const foldKey = `kb.apprFold:${st.srv}:${st.id}`;
+  // A fold remembers the requests it hid: a new request opens it again.
+  const folded = (store(foldKey) || "").split(",").filter(Boolean);
+  const fold = list.length > 0 && list.every((a) => folded.includes(a.id));
+  const sig = JSON.stringify([list.map((a) => a.id), decs.map((m) => [m.id, m.status]), acceptsApprovals(st.srv), fold]);
   if (st.apprSig === sig) return;
   st.apprSig = sig;
   P.appr.hidden = !list.length;
+  P.appr.classList.toggle("fold", fold);
   clear(P.appr);
   if (!list.length) return;
   const after = () => { st.apprSig = ""; st.chatSig = ""; panelRefresh(false, true); if (S.timerFn) S.timerFn(); };
-  add(P.appr, [h("div", { class: "appr-hd" }, ic("shield", 13), h("span", null, `Waiting for your approval (${list.length})`), h("div", { class: "sp" }),
-    h("span", { class: "faint small appr-sub" }, "the agent asked for this under the server's recommend policy")),
-  list.map((a) => h("div", { class: "appr-i" },
+  const toggle = () => { store(foldKey, fold ? "" : list.map((a) => a.id).join(",")); st.apprSig = ""; paintApprovals(); };
+  const open = list.filter((a) => !decs.some((m) => m.request_id === a.id && decOpen(m)));
+  const all = acceptsApprovals(st.srv) && open.length > 1
+    ? h("button", { class: "btn small primary", type: "button", on: { click: (e) => { e.stopPropagation(); approveAll(st.srv, open, after); } } }, ic("check", 12), `Approve all (${open.length})`)
+    : null;
+  const sent = list.length - open.length;
+  add(P.appr, [h("div", { class: "appr-hd", role: "button", tabindex: "0", "aria-expanded": String(!fold), title: fold ? "Show the requests" : "Hide the requests",
+    on: { click: toggle, keydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } } } },
+    ic(fold ? "chevRight" : "chevDown", 13), ic("shield", 13), h("span", null, `Waiting for your approval (${list.length})`),
+    sent ? h("span", { class: "appr-st" }, h("span", { class: "pulse" }), `${sent} on the way to the server`) : null,
+    h("div", { class: "sp" }),
+    fold ? null : h("span", { class: "faint small appr-sub" }, "the agent asked for this under the server's recommend policy"), all),
+  fold ? null : list.map((a) => h("div", { class: "appr-i" },
     h("div", { class: "appr-l" }, h("div", null, h("span", { class: "badge b-warn" }, a.action), " ", h("code", { class: "atgt" }, actTarget(a))),
       a.justification ? h("div", { class: "small muted appr-why", title: "Show all", on: { click: (e) => e.currentTarget.classList.toggle("open") } }, a.justification) : null),
-    approvalControls(st.srv, a, st.decs, after)))]);
+    approvalControls(st.srv, a, decs, after)))]);
 }
 
 function noteEvent(n) {
@@ -1951,7 +2029,7 @@ async function vFleet(main) {
         h("button", { class: "btn primary", type: "button", on: { click: addServerDialog } }, ic("plus", 14), "Add server"))));
       return;
     }
-    const waiting = fleet.filter((s) => s.enrolled && !s.revoked && learnWaits(s.status || {}) && !modelSet(s.status || {}) && !hubModelComing(s.status || {}));
+    const waiting = fleet.filter((s) => s.enrolled && !s.revoked && learnWaits(s.status || {}) && !modelSet(s.status || {}) && !modelOnItsWay(s.status || {}));
     if (waiting.length) {
       body.appendChild(h("div", { class: "callout warn" }, h("div", { class: "lbl" }, "Learning is waiting for a model"),
         `${waiting.map((s) => s.name).join(", ")} cannot run the learning session or the vulnerability assessment without a model. Detection watches meanwhile. `,
@@ -1970,7 +2048,8 @@ async function vFleet(main) {
         h("td", null, h("div", { class: "srow" },
           h("span", { class: "dot " + (s.online ? "on" : s.enrolled ? "off" : ""), title: s.online ? "online" : s.enrolled ? "offline" : "not enrolled" }),
           h("div", null, h("div", { class: "fg strong" }, s.name), h("div", { class: "faint small" }, s.hostname || (s.enroll_pending ? "waiting for install" : s.revoked ? "key revoked" : "—"))))),
-        h("td", null, s.enrolled ? phaseBadge(st.phase) : h("span", { class: "badge" }, s.revoked ? "revoked" : "not enrolled")),
+        h("td", null, s.enrolled ? phaseBadge(st.phase) : h("span", { class: "badge" }, s.revoked ? "revoked" : "not enrolled"),
+          s.enrolled && baselineText(st) ? h("div", { class: "faint small", title: "baseline " + baselineText(st) }, `baseline ${st.baseline_sweep}/${st.baseline_sweeps}`) : null),
         h("td", null, st.response_mode ? modeBadge(st.response_mode) : "—"),
         h("td", null, h("div", { class: "sev-strip" },
           SEV.filter((k) => sev[k]).map((k) => h("span", { class: "badge b-" + k }, sev[k] + " " + k)),
@@ -2850,8 +2929,90 @@ async function fleetAgents(box) {
   agents.addEventListener("input", () => agMsg.say("Unsaved changes"));
   agents.addEventListener("change", () => { agMsg.say("Unsaved changes"); placeholders(); });
 
-  box.append(conns.el, agents);
+  // Server settings beyond the agents: saved on their own, so the agent
+  // settings form above is unaffected.
+  const tun = tuningForm(schema.tunings, fleet.tuning || {});
+  tun.paint(() => "each server's own", null);
+  const prot = protectForm(fleet, null);
+  const svSave = h("button", { class: "btn primary", type: "button" }, "Save server settings");
+  const svMsg = statusLine();
+  svSave.addEventListener("click", () => busyBtn(svSave, svMsg, async () => {
+    await api("PUT", "/api/settings/agents", { tuning: tun.values(), ...prot.values() });
+    svMsg.say("Saved. Servers that take hub settings pick these up on their next sync.", "ok");
+  }));
+  const servers = h("div", { class: "stack" },
+    panel("Server settings", h("div", { class: "bd stack" },
+      h("div", { class: "note" }, "Budget, schedule, detection noise, notifications and the hub link for every server. An empty field leaves each server's own value from its ",
+        h("code", null, "/etc/kodeblue/kodeblue.toml"), ". A server's Settings tab can override single values. Each value has bounds, and a server never takes a daily budget above its own ",
+        h("code", null, "[budget] hub_max_daily_usd"), " ($20 unless set)."),
+      tun.el), null, "purple"),
+    panel("Protected users, IPs and services", h("div", { class: "bd stack" }, prot.el), null, "red"),
+    h("div", { class: "savebar" }, svSave, svMsg.el));
+  servers.addEventListener("input", () => svMsg.say("Unsaved changes"));
+  servers.addEventListener("change", () => svMsg.say("Unsaved changes"));
+
+  box.append(conns.el, agents, servers);
   placeholders();
+}
+
+// ----- server tuning and protections (fleet Settings and a server's tab)
+// tuningForm has one field per server setting the hub may set (the hub's
+// schema lists them with their bounds), grouped as on the server. An empty
+// field inherits; hint(t) says what from. fmtTuning shows a value.
+const fmtTuning = (t, v) => v === undefined || v === "" ? "" : t.kind === "usd" ? "$" + v : t.kind === "bool" ? (v === "true" ? "yes" : "no") : String(v);
+function tuningForm(defs, vals) {
+  const fields = (defs || []).map((t) => {
+    let el;
+    if (t.kind === "bool" || t.kind === "severity") {
+      const opts = t.kind === "bool" ? [["true", "Yes"], ["false", "No"]] : ["info", "low", "medium", "high", "critical"].map((v) => [v, v]);
+      el = h("select", { class: "sel", "aria-label": t.label }, h("option", { value: "" }, ""), opts.map(([v, l]) => h("option", { value: v, selected: v === vals[t.key] }, l)));
+    } else {
+      el = h("input", { type: "number", class: "full num", min: t.min, max: t.max, step: t.kind === "usd" ? "0.01" : "1", "aria-label": t.label, value: vals[t.key] || "" });
+    }
+    return { t, el, now: h("span", { class: "frow-now faint small mono" }) };
+  });
+  const groups = [...new Set(fields.map((f) => f.t.group))];
+  return {
+    el: h("div", { class: "stack" }, groups.map((g) => h("div", { class: "fblock" }, h("div", { class: "fhd strong" }, g),
+      h("div", { class: "frows" }, fields.filter((f) => f.t.group === g).map((f) => h("div", { class: "frow c3", title: f.t.help || null },
+        h("span", { class: "frow-l" }, f.t.label, f.t.help ? h("span", { class: "faint small block" }, f.t.help) : null), f.el, f.now)))))),
+    // hint(t) is what an empty field means; reported is what the server runs.
+    paint(hint, reported) {
+      for (const f of fields) {
+        const hv = hint(f.t);
+        if (f.el.tagName === "SELECT") f.el.options[0].textContent = hv;
+        else f.el.placeholder = hv;
+        const r = reported && reported[f.t.key];
+        f.now.textContent = r !== undefined && r !== "" ? "now: " + fmtTuning(f.t, r) : "";
+      }
+    },
+    values() {
+      const out = {};
+      for (const f of fields) { const v = String(f.el.value).trim(); if (v) out[f.t.key] = v; }
+      return out;
+    },
+  };
+}
+// protectForm: protected users, IPs and services the hub adds (one per
+// line), and a lower containment rate limit.
+function protectForm(cur, fleetCur) {
+  const box = (label, v) => h("textarea", { class: "ta", rows: 2, spellcheck: "false", "aria-label": label, placeholder: "one per line" }, (v || []).join("\n"));
+  const users = box("Protected users", cur.protected_users), ips = box("Protected IPs", cur.protected_ips), units = box("Protected services", cur.protected_units);
+  const rate = h("input", { type: "number", class: "full num", min: 1, max: 1000, step: 1, "aria-label": "Containment actions per hour", value: cur.max_actions_per_hour || "" });
+  rate.placeholder = fleetCur && fleetCur.max_actions_per_hour ? "inherits fleet: " + fleetCur.max_actions_per_hour : "the server's own limit";
+  const fleetNote = (l) => fleetCur && (l || []).length ? h("div", { class: "faint small" }, "The fleet adds: " + l.join(", ")) : null;
+  const lines = (ta) => ta.value.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+  return {
+    el: h("div", { class: "stack" },
+      h("div", { class: "note" }, "Added to each server's own protected lists in its root-owned ", h("code", null, "/etc/kodeblue/kodeblue.toml"),
+        ", never in place of them: agents may not lock these users, block these IPs (or CIDRs) or stop these services. The limit can only lower the server's own."),
+      h("div", { class: "frows" },
+        h("div", { class: "frow" }, h("span", { class: "frow-l" }, "Users"), h("div", null, users, fleetNote(fleetCur && fleetCur.protected_users))),
+        h("div", { class: "frow" }, h("span", { class: "frow-l" }, "IPs and CIDRs"), h("div", null, ips, fleetNote(fleetCur && fleetCur.protected_ips))),
+        h("div", { class: "frow" }, h("span", { class: "frow-l" }, "Services"), h("div", null, units, fleetNote(fleetCur && fleetCur.protected_units))),
+        h("div", { class: "frow" }, h("span", { class: "frow-l" }, "Containment actions per hour"), rate))),
+    values: () => ({ protected_users: lines(users), protected_ips: lines(ips), protected_units: lines(units), max_actions_per_hour: Number(rate.value) || 0 }),
+  };
 }
 
 // ----- per-server settings tab
@@ -2887,6 +3048,10 @@ async function vServerSettings(srv, body) {
     const instr = (schema.instruction_roles || []).map((role) => [role, instrBox(oi[role], max, roleName(role))]);
     const appr = (schema.actions || []).map((a) => [a, ruleSelect(oa[a], "Inherit fleet (" + (fa[a] ? ruleName(fa[a]).replace(/ \(.*\)$/, "") : "server policy") + ")", actionName(a))]);
     const badges = {};
+    const ft = fleet.tuning || {};
+    const tun = tuningForm(schema.tunings, own.tuning || {});
+    const tunHint = (t) => ft[t.key] ? "inherits fleet: " + fmtTuning(t, ft[t.key]) : "the server's own";
+    const prot = protectForm(own, fleet);
     const modeNote = h("div", { class: "callout warn", hidden: true });
     // Response mode: the hub switches it up to the server's root ceiling.
     const modeOpts = MODES.map(([v, l]) => h("option", { value: v, selected: v === own.response_mode }, l));
@@ -2897,15 +3062,17 @@ async function vServerSettings(srv, body) {
     const save = h("button", { class: "btn primary", type: "button" }, "Save overrides");
     const reset = h("button", { class: "btn danger", type: "button" }, "Clear overrides");
     const msg = statusLine();
-    reset.hidden = !Object.keys(om).length && !Object.keys(oi).length && !Object.keys(oa).length && !own.response_mode;
+    reset.hidden = !Object.keys(om).length && !Object.keys(oi).length && !Object.keys(oa).length && !own.response_mode && !Object.keys(own.tuning || {}).length &&
+      !(own.protected_users || []).length && !(own.protected_ips || []).length && !(own.protected_units || []).length && !own.max_actions_per_hour;
     save.addEventListener("click", () => busyBtn(save, msg, async () => {
-      await api("PUT", `/api/servers/${enc(srv.id)}/settings`, { models: refs(models), instructions: values(instr.map(([k, b]) => [k, b.ta])), approvals: values(appr), response_mode: modeSel.value });
+      await api("PUT", `/api/servers/${enc(srv.id)}/settings`, { models: refs(models), instructions: values(instr.map(([k, b]) => [k, b.ta])), approvals: values(appr), response_mode: modeSel.value,
+        tuning: tun.values(), ...prot.values() });
       await draw("Saved. The server picks these up on its next sync.");
     }));
     reset.addEventListener("click", async () => {
       if (!(await ask("Clear overrides", "Remove every override for " + srv.name + "? It goes back to the fleet settings.", "Clear overrides", true))) return;
       busyBtn(reset, msg, async () => {
-        await api("PUT", `/api/servers/${enc(srv.id)}/settings`, { models: {}, instructions: {}, approvals: {}, response_mode: "" });
+        await api("PUT", `/api/servers/${enc(srv.id)}/settings`, { models: {}, instructions: {}, approvals: {}, response_mode: "", tuning: {}, protected_users: [], protected_ips: [], protected_units: [], max_actions_per_hour: 0 });
         await draw("Overrides cleared. The server goes back to the fleet settings on its next sync.");
       });
     });
@@ -2927,6 +3094,7 @@ async function vServerSettings(srv, body) {
           h("dt", null, "Connections"), h("dd", null, ec.length ? ec.map((c) => (c.name || c.id) + " (" + kindName(c.kind) + ")").join(", ") : "none from the hub; the server uses the endpoint in its own kodeblue.toml"),
           h("dt", null, "Version"), h("dd", { class: "mono small" }, (eff.version || "—") + (a.settings_version && a.settings_version !== eff.version ? " · server has " + a.settings_version : "")),
           h("dt", null, "Fleet"), h("dd", null, h("a", { href: "#/settings" }, "Fleet settings")))].filter(Boolean));
+      tun.paint(tunHint, a.tuning);
       const am = a.models || {}, aa = a.actions || {};
       for (const [role, el] of Object.entries(now)) { el.textContent = am[role] ? "now: " + am[role] : ""; el.title = am[role] ? am[role] + " (reported by the server)" : ""; }
       for (const [act, el] of Object.entries(badges)) {
@@ -2971,6 +3139,10 @@ async function vServerSettings(srv, body) {
         modeNote,
         h("div", { class: "frows" }, appr.map(([a, el]) => h("div", { class: "frow c3" }, h("span", { class: "frow-l" }, actionName(a)), el,
           h("span", { class: "frow-now" }, badges[a] = h("span", { class: "badge" })))))), null, "orange"),
+      panel("Server settings", h("div", { class: "bd stack" },
+        h("div", { class: "note" }, "Override single values for this server. Empty fields inherit the fleet's value, or the server's own from its kodeblue.toml; “now” is what the server reports it runs."),
+        tun.el), null, "purple"),
+      panel("Protected users, IPs and services", h("div", { class: "bd stack" }, prot.el), null, "red"),
       h("div", { class: "savebar" }, save, reset, msg.el)));
     body.querySelector(".narrow").addEventListener("input", () => msg.say("Unsaved changes"));
     body.querySelector(".narrow").addEventListener("change", () => { msg.say("Unsaved changes"); placeholders(); });

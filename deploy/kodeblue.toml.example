@@ -45,6 +45,7 @@ auto_accept_confidence = 0.85       # triage "benign" at or above this is absorb
 
 [budget]
 daily_usd = 1.00                    # past this, only critical findings reach a model (hard stop at 2x)
+hub_max_daily_usd = 20              # the most a hub operator may set daily_usd to on this server
 # Spend is the cost the endpoint reports per call. If yours reports none, set
 # your model's prices (USD per million tokens) or daily_usd is not enforced.
 # input_usd_per_mtok = 0.10

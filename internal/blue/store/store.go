@@ -189,6 +189,35 @@ func (s *Store) addItemColumns() error {
 // model; detection already watches the server meanwhile.
 const LearnerPendingKey = "learner_pending"
 
+// BaselineProgressKey holds "done/total" baseline sweeps while the learning
+// phase collects them, and BaselineETAKey when the last one is due. A
+// restart mid-baseline resumes from them; both are cleared once it is done.
+const (
+	BaselineProgressKey = "baseline_progress"
+	BaselineETAKey      = "baseline_eta"
+)
+
+// BaselineProgress is the baseline sweeps done and planned, and when the last
+// is due (RFC 3339); total is 0 outside the baseline.
+func (s *Store) BaselineProgress() (done, total int, eta string) {
+	if _, err := fmt.Sscanf(s.Get(BaselineProgressKey), "%d/%d", &done, &total); err != nil || total <= 0 || done < 0 || done > total {
+		return 0, 0, ""
+	}
+	return done, total, s.Get(BaselineETAKey)
+}
+
+// SetBaselineProgress records done of total baseline sweeps, the last due at
+// eta; total 0 clears the progress.
+func (s *Store) SetBaselineProgress(done, total int, eta time.Time) {
+	if total <= 0 {
+		_ = s.Set(BaselineProgressKey, "")
+		_ = s.Set(BaselineETAKey, "")
+		return
+	}
+	_ = s.Set(BaselineProgressKey, fmt.Sprintf("%d/%d", done, total))
+	_ = s.Set(BaselineETAKey, eta.UTC().Format(time.RFC3339))
+}
+
 func (s *Store) Get(k string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT v FROM kv WHERE k=?`, k).Scan(&v)

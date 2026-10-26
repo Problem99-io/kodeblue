@@ -283,3 +283,43 @@ func TestResponseModeSetting(t *testing.T) {
 		t.Fatalf("audit line %q", s)
 	}
 }
+
+// Tuning and protections reach the server merged: a server's value for a key
+// wins, protected lists add up, and a PUT that leaves them out keeps them.
+func TestServerSettingsTuningMergeAndKeep(t *testing.T) {
+	_, st, _ := newHubWith(t, func(o *Options) {})
+	_, tok, _ := st.CreateServer("web-1", "test", time.Hour)
+	srv, _, err := st.Enroll(tok, "web-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleet := AgentSettings{Tuning: map[string]string{"budget.daily_usd": "3", "schedule.review_hours": "12"}, ProtectedUsers: []string{"deploy"}, MaxActionsPerHour: 5}
+	if err := fleet.clean().Validate(nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetFleetAgentSettings(fleet)
+	_ = st.SetServerAgentSettings(srv.ID, AgentSettings{Tuning: map[string]string{"budget.daily_usd": "8"}, ProtectedUsers: []string{"backup"}})
+	eff := st.EffectiveSettings(srv.ID)
+	if eff.Version == "" || eff.Tuning["budget.daily_usd"] != "8" || eff.Tuning["schedule.review_hours"] != "12" || eff.MaxActionsPerHour != 5 {
+		t.Fatalf("effective: %+v", eff)
+	}
+	if strings.Join(eff.ProtectedUsers, ",") != "deploy,backup" {
+		t.Fatalf("protected users %v", eff.ProtectedUsers)
+	}
+	// An older console saves only the agent fields: the rest is kept.
+	body := []byte(`{"models":{},"instructions":{},"approvals":{},"response_mode":""}`)
+	var a AgentSettings
+	_ = json.Unmarshal(body, &a)
+	if kept := keepUnsent(body, a, st.FleetAgentSettings()).clean(); kept.Tuning["budget.daily_usd"] != "3" || kept.MaxActionsPerHour != 5 || len(kept.ProtectedUsers) != 1 {
+		t.Fatalf("a partial save dropped settings: %+v", kept)
+	}
+	for _, bad := range []AgentSettings{
+		{Tuning: map[string]string{"detect.bruteforce_threshold": "100000"}},
+		{Tuning: map[string]string{"server.root": "/"}},
+		{ProtectedIPs: []string{"not-an-ip"}},
+	} {
+		if bad.clean().Validate(nil) == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
