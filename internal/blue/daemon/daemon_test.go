@@ -116,6 +116,8 @@ type fakeEngine struct {
 	// runFor is how long a session's run takes; 0 runs until ctx ends.
 	runFor time.Duration
 	n      atomic.Int32
+	// script, when it holds one, is the next run's outcome.
+	script chan runtime.Outcome
 }
 
 func (f *fakeEngine) Start(context.Context) error {
@@ -145,6 +147,11 @@ func (f *fakeEngine) WaitSession(ctx context.Context, s *runtime.Session, timeou
 	return f.Wait(ctx, s, timeout)
 }
 func (f *fakeEngine) Wait(ctx context.Context, _ *runtime.Session, timeout time.Duration) runtime.Outcome {
+	select {
+	case o := <-f.script:
+		return o
+	default:
+	}
 	var done <-chan time.Time
 	if f.runFor > 0 {
 		done = time.After(f.runFor)
@@ -747,6 +754,56 @@ func TestPendingLearnerRetriesAfterFailure(t *testing.T) {
 	waitFor(t, func() bool { return st.Get(store.LearnerPendingKey) == "" && !d.learnWaiting.Load() })
 	if !slices.Contains(out.titles(), "kodeblue has learned this server") {
 		t.Fatalf("no success message after the retry: %v", out.titles())
+	}
+}
+
+// The assessment after a learner used to run once: when the provider's
+// spending limit stopped it, the server never had one. It now stays pending
+// and runs again, after the limit resets when the provider said when.
+func TestFailedAssessmentIsRetriedAfterTheLimitResets(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	_ = st.Set("learned_at", time.Now().UTC().Format(time.RFC3339))
+	_ = st.Set(store.LearnerPendingKey, time.Now().UTC().Format(time.RFC3339))
+	d.modelsOn = true
+	d.engCheckEvery, d.learnRetry = 10*time.Millisecond, 20*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng := &fakeEngine{id: 1, runFor: time.Millisecond, script: make(chan runtime.Outcome, 4)}
+	eng.alive.Store(true)
+	resets := time.Now().Add(400 * time.Millisecond)
+	eng.script <- runtime.Outcome{Status: "completed", Text: "profile"} // the learner
+	eng.script <- runtime.Outcome{Status: "failed", Error: "The API key's spending limit at the model provider is reached. (HTTP 403)", ErrorClass: "spend_limit", ResetsAt: resets}
+	d.setEngine(eng)
+	d.learnWhenModelReady(ctx)
+	waitFor(t, func() bool { return st.Get(store.LearnerPendingKey) == "" })
+	if st.Get(store.AssessmentPendingKey) == "" {
+		t.Fatal("a failed assessment was not kept pending")
+	}
+	failed := st.Incidents(`WHERE kind=? AND title=?`, "learning", "Vulnerability assessment")
+	if len(failed) != 1 || !strings.Contains(failed[0].Summary, "spending limit") {
+		t.Fatalf("assessment case: %+v", failed)
+	}
+	// The retry waits for the reset (a minute past it), not learnRetry.
+	time.Sleep(200 * time.Millisecond)
+	if n := len(st.Incidents(`WHERE kind=? AND title=?`, "learning", "Vulnerability assessment")); n != 1 {
+		t.Fatalf("retried before the limit reset: %d runs", n)
+	}
+	if !d.limitResetsAt().Equal(resets) {
+		t.Fatalf("reset time %v", d.limitResetsAt())
+	}
+	// Past the reset, a run is tried again and clears it (shortened here).
+	d.limitReset.Store(time.Time{})
+	cancel()
+	waitFor(t, func() bool { return !d.learnWaiting.Load() })
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	d.learnWhenModelReady(ctx)
+	waitFor(t, func() bool { return st.Get(store.AssessmentPendingKey) == "" && !d.learnWaiting.Load() })
+	if n := len(st.Incidents(`WHERE kind=? AND title=?`, "learning", "Vulnerability assessment")); n != 2 {
+		t.Fatalf("assessment runs: %d", n)
+	}
+	if n := len(st.Incidents(`WHERE kind=? AND title=?`, "learning", "Learning run")); n != 1 {
+		t.Fatalf("the learner ran again: %d", n)
 	}
 }
 

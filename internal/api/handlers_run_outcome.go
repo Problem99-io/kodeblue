@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	internal "github.com/Problem99-io/kodeblue/internal"
 )
@@ -28,7 +29,8 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 			writeError(w, 500, "run unavailable")
 			return
 		}
-		status, content, failure := "running", "", ""
+		status, content := "running", ""
+		var failure runFailure
 		if len(events) > 0 {
 			e := events[0]
 			switch e.Type {
@@ -42,7 +44,7 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 				}
 			case internal.EventRunFailed:
 				status = "failed"
-				failure = failureText(e.Payload)
+				failure = readFailure(e.Payload)
 			case internal.EventRunAborted, internal.EventRunInterrupted:
 				status = "aborted"
 			}
@@ -62,30 +64,38 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 			content = string(text[:12000])
 		}
 		out := map[string]any{"session_id": sessionID, "run_id": runID, "status": status, "text": content, "truncated": truncated}
-		if failure != "" {
-			out["error"] = failure
+		if failure.text != "" {
+			out["error"], out["error_class"] = failure.text, failure.class
+			if failure.resetsAt != "" {
+				out["resets_at"] = failure.resetsAt
+			}
 		}
 		writeJSON(w, 200, out)
 	}
 }
 
-// failureText is why a run failed, from its run.failed event: the reason the
-// agent loop wrote for people (the provider's message, such as a rate limit,
-// never the request or a key) and the HTTP status when there was one.
-func failureText(payload json.RawMessage) string {
+// runFailure is why a run failed, from its run.failed event: the reason the
+// agent loop wrote for people (never the request or a key), its class
+// (spend_limit, rate_limit, connection_reset, …) and when a provider's
+// spending limit lifts, if it said.
+type runFailure struct{ text, class, resetsAt string }
+
+func readFailure(payload json.RawMessage) runFailure {
 	var f struct {
 		Reason     string `json:"reason"`
 		HTTPStatus int    `json:"http_status"`
+		Class      string `json:"failure_class"`
+		ResetsAt   string `json:"resets_at"`
 	}
 	if json.Unmarshal(payload, &f) != nil || f.Reason == "" {
-		return ""
+		return runFailure{}
 	}
 	r := []rune(f.Reason)
 	if len(r) > 500 {
 		f.Reason = string(r[:500]) + "…"
 	}
-	if f.HTTPStatus != 0 {
-		return fmt.Sprintf("%s (HTTP %d)", f.Reason, f.HTTPStatus)
+	if f.HTTPStatus != 0 && !strings.Contains(f.Reason, "HTTP") {
+		f.Reason = fmt.Sprintf("%s (HTTP %d)", f.Reason, f.HTTPStatus)
 	}
-	return f.Reason
+	return runFailure{text: f.Reason, class: f.Class, resetsAt: f.ResetsAt}
 }

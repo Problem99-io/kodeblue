@@ -186,103 +186,137 @@ func (l *Loop) streamModelTurn(ctx context.Context, s *runState) (modelTurn, *ru
 			maxOutputTokens = int(room)
 		}
 	}
-	streamCh, err := provider.StreamWithRecovery(streamCtx, cfg.Provider, &provider.Request{
-		Model:           cfg.ModelName,
-		Messages:        s.messages,
-		Tools:           cfg.Tools,
-		SystemPrompt:    s.systemPrompt,
-		PromptCacheKey:  promptCacheKey(cfg),
-		CacheAnchors:    compactionSummaryIndices(s.messages),
-		MaxTokens:       maxOutputTokens,
-		Temperature:     0.5,
-		ReasoningEffort: cfg.ReasoningEffort,
-	}, func(recovery provider.ConnectionRecovery) {
-		fields := recovery.FailureDiagnostic.Fields()
-		fields["state"], fields["attempt"], fields["max_attempts"] = recovery.State, recovery.Attempt, recovery.MaxAttempts
-		fields["retry_at"] = recovery.RetryAt
-		l.emitEvent(cfg, "provider.connection", fields)
-	})
-	if err != nil {
-		cancelStream()
-		l.endProvider(cfg.RunID)
-		// A request that died because the run was stopped is a stop, not a
-		// failure: the provider client can be sitting in a retry backoff
-		// when the user hits the button.
-		if ctx.Err() != nil {
-			return modelTurn{}, l.endAborted(s)
-		}
-		if l.isInterrupted(cfg.RunID) {
-			return modelTurn{}, l.endInterrupted(s, "", "", nil)
-		}
-		// The banner the user reads gets plain language for the transient
-		// failures the client already retried; the wrapped error keeps the
-		// vendor's full response for the logs.
-		return modelTurn{}, l.endFailed(s, provider.FailureFields(err), fmt.Errorf("provider stream: %w", err))
-	}
-
 	var turn modelTurn
 	var content, reasoning strings.Builder
-streamLoop:
-	for event := range streamCh {
-		switch event.Type {
-		case provider.EventToken:
-			if event.Channel == provider.ChannelReasoning {
-				reasoning.WriteString(event.Content)
-			} else {
-				content.WriteString(event.Content)
-			}
-			payload := map[string]any{"content": event.Content}
-			if event.Channel != "" {
-				payload["channel"] = event.Channel
-			}
-			l.emitEvent(cfg, internal.EventModelToken, payload)
-		case provider.EventToolUseDelta:
-			// Live, incremental view of a tool call as the model writes it.
-			// Transient UI signal only: the authoritative tool call is
-			// emitted later via EventToolUse / tool.requested.
-			if event.ToolCall != nil {
-				l.emitEvent(cfg, internal.EventToolCallStreaming, map[string]any{
-					"id":                event.ToolCall.ID,
-					"name":              event.ToolCall.Name,
-					"partial_arguments": event.ToolCall.Arguments,
-				})
-			}
-		case provider.EventToolUse:
-			if event.ToolCall != nil {
-				turn.toolCalls = append(turn.toolCalls, internal.ToolCall{
-					ID:        event.ToolCall.ID,
-					Name:      internal.ToolName(event.ToolCall.Name),
-					Arguments: normalizeToolArguments(event.ToolCall.Arguments),
-				})
-			}
-		case provider.EventDone:
-			if len(event.ReasoningDetails) > 0 {
-				turn.reasoningDetails = event.ReasoningDetails
-			}
-			if event.Usage != nil {
-				turn.usage = *event.Usage
-			}
+restartLoop:
+	for restart := 0; ; restart++ {
+		streamCh, err := provider.StreamWithRecovery(streamCtx, cfg.Provider, &provider.Request{
+			Model:           cfg.ModelName,
+			Messages:        s.messages,
+			Tools:           cfg.Tools,
+			SystemPrompt:    s.systemPrompt,
+			PromptCacheKey:  promptCacheKey(cfg),
+			CacheAnchors:    compactionSummaryIndices(s.messages),
+			MaxTokens:       maxOutputTokens,
+			Temperature:     0.5,
+			ReasoningEffort: cfg.ReasoningEffort,
+		}, func(recovery provider.ConnectionRecovery) {
+			fields := recovery.FailureDiagnostic.Fields()
+			fields["state"], fields["attempt"], fields["max_attempts"] = recovery.State, recovery.Attempt, recovery.MaxAttempts
+			fields["retry_at"] = recovery.RetryAt
+			l.emitEvent(cfg, "provider.connection", fields)
+		})
+		if err != nil {
 			cancelStream()
-			break streamLoop
-		case provider.EventError:
-			if event.Error != nil {
+			l.endProvider(cfg.RunID)
+			// A request that died because the run was stopped is a stop, not a
+			// failure: the provider client can be sitting in a retry backoff
+			// when the user hits the button.
+			if ctx.Err() != nil {
+				return modelTurn{}, l.endAborted(s)
+			}
+			if l.isInterrupted(cfg.RunID) {
+				return modelTurn{}, l.endInterrupted(s, "", "", nil)
+			}
+			// The banner the user reads gets plain language for the transient
+			// failures the client already retried; the wrapped error keeps the
+			// vendor's full response for the logs.
+			return modelTurn{}, l.endFailed(s, provider.FailureFields(err), fmt.Errorf("provider stream: %w", err))
+		}
+
+	streamLoop:
+		for event := range streamCh {
+			switch event.Type {
+			case provider.EventToken:
+				if event.Channel == provider.ChannelReasoning {
+					reasoning.WriteString(event.Content)
+				} else {
+					content.WriteString(event.Content)
+				}
+				payload := map[string]any{"content": event.Content}
+				if event.Channel != "" {
+					payload["channel"] = event.Channel
+				}
+				l.emitEvent(cfg, internal.EventModelToken, payload)
+			case provider.EventToolUseDelta:
+				// Live, incremental view of a tool call as the model writes it.
+				// Transient UI signal only: the authoritative tool call is
+				// emitted later via EventToolUse / tool.requested.
+				if event.ToolCall != nil {
+					l.emitEvent(cfg, internal.EventToolCallStreaming, map[string]any{
+						"id":                event.ToolCall.ID,
+						"name":              event.ToolCall.Name,
+						"partial_arguments": event.ToolCall.Arguments,
+					})
+				}
+			case provider.EventToolUse:
+				if event.ToolCall != nil {
+					turn.toolCalls = append(turn.toolCalls, internal.ToolCall{
+						ID:        event.ToolCall.ID,
+						Name:      internal.ToolName(event.ToolCall.Name),
+						Arguments: normalizeToolArguments(event.ToolCall.Arguments),
+					})
+				}
+			case provider.EventDone:
+				if len(event.ReasoningDetails) > 0 {
+					turn.reasoningDetails = event.ReasoningDetails
+				}
+				if event.Usage != nil {
+					turn.usage = *event.Usage
+				}
 				cancelStream()
-				l.endProvider(cfg.RunID)
-				if ctx.Err() != nil {
-					return modelTurn{}, l.endAborted(s)
+				break streamLoop
+			case provider.EventError:
+				if event.Error != nil {
+					cancelStream()
+					l.endProvider(cfg.RunID)
+					if ctx.Err() != nil {
+						return modelTurn{}, l.endAborted(s)
+					}
+					if l.isInterrupted(cfg.RunID) {
+						return modelTurn{}, l.endInterrupted(s, content.String(), reasoning.String(), turn.reasoningDetails)
+					}
+					// The connection dropped after the model started answering
+					// (recovery only retries before any output). One reset would
+					// otherwise end a run that may have worked for minutes: ask
+					// for the same turn again, a few times.
+					if restart < turnRestarts && provider.RestartableTurn(event.Error) {
+						fields := provider.DiagnoseFailure(event.Error).Fields()
+						fields["state"], fields["attempt"], fields["max_attempts"] = "restarting_turn", restart+1, turnRestarts
+						l.emitEvent(cfg, "provider.connection", fields)
+						select {
+						case <-ctx.Done():
+							return modelTurn{}, l.endAborted(s)
+						case <-time.After(turnRestartDelay(restart + 1)):
+						}
+						if l.isInterrupted(cfg.RunID) {
+							return modelTurn{}, l.endInterrupted(s, "", "", nil)
+						}
+						turn = modelTurn{}
+						content.Reset()
+						reasoning.Reset()
+						streamCtx, cancelStream = context.WithCancel(ctx)
+						l.beginProvider(cfg.RunID, cancelStream)
+						continue restartLoop
+					}
+					return modelTurn{}, l.endFailed(s, provider.FailureFields(event.Error), event.Error)
 				}
-				if l.isInterrupted(cfg.RunID) {
-					return modelTurn{}, l.endInterrupted(s, content.String(), reasoning.String(), turn.reasoningDetails)
-				}
-				return modelTurn{}, l.endFailed(s, provider.FailureFields(event.Error), event.Error)
 			}
 		}
+		cancelStream()
+		l.endProvider(cfg.RunID)
+		turn.content, turn.reasoning = content.String(), reasoning.String()
+		return turn, nil
 	}
-	cancelStream()
-	l.endProvider(cfg.RunID)
-	turn.content, turn.reasoning = content.String(), reasoning.String()
-	return turn, nil
 }
+
+// turnRestarts is how often a turn whose connection dropped mid-answer is
+// requested again before the run fails.
+const turnRestarts = 3
+
+// turnRestartDelay is the wait before a turn is requested again (tests
+// shorten it).
+var turnRestartDelay = provider.RecoveryDelay
 
 // recordModelTurn books the turn's usage, normalizes a textual ask_user call
 // into a real one, and emits model.completed. It ends the run if the user

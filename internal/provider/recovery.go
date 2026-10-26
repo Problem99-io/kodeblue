@@ -86,6 +86,20 @@ func recoverableConnectionError(err error) bool {
 	return false
 }
 
+// RestartableTurn reports whether a model turn that failed after the model
+// had started answering may be requested again: the connection dropped or
+// stalled, as recovery would have retried before any output, and recovery's
+// own retries were not already spent. Nothing of a turn takes effect before
+// it completes (its tool calls run afterwards), so asking again only repeats
+// output tokens.
+func RestartableTurn(err error) bool {
+	var exhausted *RecoveryExhaustedError
+	if errors.As(err, &exhausted) {
+		return false
+	}
+	return recoverableConnectionError(err)
+}
+
 type recoveryContextKey struct{}
 
 // StreamWithRecovery retries only before the request has exposed any output.
