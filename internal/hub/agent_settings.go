@@ -27,6 +27,23 @@ type AgentSettings struct {
 	// ResponseMode switches the server's response mode (off | recommend |
 	// contain, empty = its own), up to what its root-owned config allows.
 	ResponseMode string `json:"response_mode,omitempty"`
+	// Tuning sets server settings by key (hubproto.Tunings): budget,
+	// schedule, detection noise, notifications, the hub link. A server's
+	// value for a key replaces the fleet's.
+	Tuning map[string]string `json:"tuning,omitempty"`
+	// ProtectedUsers, ProtectedIPs and ProtectedUnits are added to every
+	// server's own protected lists (the fleet's and the server's together);
+	// MaxActionsPerHour lowers its containment rate limit (0: its own).
+	ProtectedUsers    []string `json:"protected_users,omitempty"`
+	ProtectedIPs      []string `json:"protected_ips,omitempty"`
+	ProtectedUnits    []string `json:"protected_units,omitempty"`
+	MaxActionsPerHour int      `json:"max_actions_per_hour,omitempty"`
+}
+
+// empty reports whether nothing is set.
+func (a AgentSettings) empty() bool {
+	return len(a.Models)+len(a.Instructions)+len(a.Approvals)+len(a.Tuning)+len(a.ProtectedUsers)+len(a.ProtectedIPs)+len(a.ProtectedUnits) == 0 &&
+		a.ResponseMode == "" && a.MaxActionsPerHour == 0
 }
 
 const (
@@ -48,7 +65,7 @@ func (s *Store) agentSettings(key string) AgentSettings {
 
 func (s *Store) setAgentSettings(key string, a AgentSettings) error {
 	a = a.clean()
-	if len(a.Models)+len(a.Instructions)+len(a.Approvals) == 0 && a.ResponseMode == "" {
+	if a.empty() {
 		return s.SetSetting(key, "")
 	}
 	b, err := json.Marshal(a)
@@ -90,7 +107,18 @@ func (a AgentSettings) clean() AgentSettings {
 			models[role] = r
 		}
 	}
-	return AgentSettings{Models: models, Instructions: trim(a.Instructions), Approvals: trim(a.Approvals), ResponseMode: strings.TrimSpace(a.ResponseMode)}
+	list := func(l []string) []string {
+		var out []string
+		for _, v := range l {
+			if v = strings.TrimSpace(v); v != "" && !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	return AgentSettings{Models: models, Instructions: trim(a.Instructions), Approvals: trim(a.Approvals), ResponseMode: strings.TrimSpace(a.ResponseMode),
+		Tuning: trim(a.Tuning), ProtectedUsers: list(a.ProtectedUsers), ProtectedIPs: list(a.ProtectedIPs), ProtectedUnits: list(a.ProtectedUnits),
+		MaxActionsPerHour: max(a.MaxActionsPerHour, 0)}
 }
 
 // Validate checks role and action names, rules and sizes, and that each
@@ -130,7 +158,53 @@ func (a AgentSettings) Validate(conns []hubproto.Connection) error {
 	if a.ResponseMode != "" && hubproto.ModeRank(a.ResponseMode) < 0 {
 		return errors.New("response mode must be off, recommend or contain")
 	}
+	if err := hubproto.CheckTuning(a.Tuning); err != nil {
+		return err
+	}
+	if err := hubproto.CheckProtected(a.ProtectedUsers, a.ProtectedIPs, a.ProtectedUnits); err != nil {
+		return err
+	}
+	if a.MaxActionsPerHour > 1000 {
+		return errors.New("containment actions per hour: at most 1000")
+	}
 	return nil
+}
+
+// keepUnsent copies the fields a PUT body left out from stored, so a client
+// that only knows some of them (an older console, a script) cannot wipe the
+// rest by saving.
+func keepUnsent(body []byte, a, stored AgentSettings) AgentSettings {
+	var sent map[string]json.RawMessage
+	_ = json.Unmarshal(body, &sent)
+	has := func(k string) bool { _, ok := sent[k]; return ok }
+	if !has("models") {
+		a.Models = stored.Models
+	}
+	if !has("instructions") {
+		a.Instructions = stored.Instructions
+	}
+	if !has("approvals") {
+		a.Approvals = stored.Approvals
+	}
+	if !has("response_mode") {
+		a.ResponseMode = stored.ResponseMode
+	}
+	if !has("tuning") {
+		a.Tuning = stored.Tuning
+	}
+	if !has("protected_users") {
+		a.ProtectedUsers = stored.ProtectedUsers
+	}
+	if !has("protected_ips") {
+		a.ProtectedIPs = stored.ProtectedIPs
+	}
+	if !has("protected_units") {
+		a.ProtectedUnits = stored.ProtectedUnits
+	}
+	if !has("max_actions_per_hour") {
+		a.MaxActionsPerHour = stored.MaxActionsPerHour
+	}
+	return a
 }
 
 func validModel(m string) error {
@@ -176,6 +250,23 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 	if own.ResponseMode != "" {
 		out.ResponseMode = own.ResponseMode
 	}
+	out.Tuning = merge(fleet.Tuning, own.Tuning)
+	union := func(a, b []string) []string {
+		out := slices.Clone(a)
+		for _, v := range b {
+			if !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	out.ProtectedUsers = union(fleet.ProtectedUsers, own.ProtectedUsers)
+	out.ProtectedIPs = union(fleet.ProtectedIPs, own.ProtectedIPs)
+	out.ProtectedUnits = union(fleet.ProtectedUnits, own.ProtectedUnits)
+	out.MaxActionsPerHour = fleet.MaxActionsPerHour
+	if own.MaxActionsPerHour > 0 {
+		out.MaxActionsPerHour = own.MaxActionsPerHour
+	}
 	conns := s.Connections()
 	used := map[string]bool{}
 	for _, m := range []map[string]hubproto.ModelRef{fleet.Models, own.Models} {
@@ -197,7 +288,8 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 			out.Connections = append(out.Connections, c)
 		}
 	}
-	if out.Models == nil && out.Instructions == nil && out.Approvals == nil && out.ResponseMode == "" {
+	if out.Models == nil && out.Instructions == nil && out.Approvals == nil && out.ResponseMode == "" && out.Tuning == nil &&
+		len(out.ProtectedUsers)+len(out.ProtectedIPs)+len(out.ProtectedUnits) == 0 && out.MaxActionsPerHour == 0 {
 		return &hubproto.Settings{}
 	}
 	b, _ := json.Marshal(out)
@@ -224,6 +316,8 @@ func settingsSchema() map[string]any {
 		"max_instructions":  hubproto.MaxInstructions,
 		"openrouter_url":    OpenRouterURL,
 		"connection_kinds":  hubproto.ConnectionKinds,
+		"tunings":           hubproto.Tunings,
+		"max_protected":     hubproto.MaxProtected,
 	}
 }
 
@@ -232,12 +326,13 @@ func (s *Server) handleAgentSettingsGet(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleAgentSettingsPut(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	var body json.RawMessage
 	var a AgentSettings
-	if err := readJSON(w, r, 128<<10, &a); err != nil {
+	if err := readJSON(w, r, 128<<10, &body); err != nil || json.Unmarshal(body, &a) != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	a = a.clean()
+	a = keepUnsent(body, a, s.st.FleetAgentSettings()).clean()
 	if err := a.Validate(s.st.Connections()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -270,7 +365,7 @@ func (s *Server) handleServerSettingsGet(w http.ResponseWriter, r *http.Request,
 		"effective":   eff,
 		"applied": map[string]any{
 			"accepts_settings": st.AcceptsSettings, "settings_version": st.SettingsVersion,
-			"models": st.Models, "actions": st.Actions, "response_mode": st.ResponseMode, "root_response_mode": st.RootMode,
+			"models": st.Models, "actions": st.Actions, "response_mode": st.ResponseMode, "root_response_mode": st.RootMode, "tuning": st.Tuning,
 			"in_sync": st.AcceptsSettings && st.SettingsVersion == eff.Version,
 		},
 		"schema": settingsSchema(),
@@ -283,12 +378,13 @@ func (s *Server) handleServerSettingsPut(w http.ResponseWriter, r *http.Request,
 		writeErr(w, http.StatusNotFound, "no such server")
 		return
 	}
+	var body json.RawMessage
 	var a AgentSettings
-	if err := readJSON(w, r, 128<<10, &a); err != nil {
+	if err := readJSON(w, r, 128<<10, &body); err != nil || json.Unmarshal(body, &a) != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	a = a.clean()
+	a = keepUnsent(body, a, s.st.ServerAgentSettings(id)).clean()
 	if err := a.Validate(s.st.Connections()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -330,6 +426,20 @@ func summarizeSettings(a AgentSettings) string {
 	}
 	if a.ResponseMode != "" {
 		parts = append(parts, "response_mode="+a.ResponseMode)
+	}
+	for _, k := range keys(a.Tuning) {
+		parts = append(parts, k+"="+a.Tuning[k])
+	}
+	for _, p := range []struct {
+		name string
+		l    []string
+	}{{"protected_users", a.ProtectedUsers}, {"protected_ips", a.ProtectedIPs}, {"protected_units", a.ProtectedUnits}} {
+		if len(p.l) > 0 {
+			parts = append(parts, p.name+"="+strings.Join(p.l, ","))
+		}
+	}
+	if a.MaxActionsPerHour > 0 {
+		parts = append(parts, fmt.Sprintf("max_actions_per_hour=%d", a.MaxActionsPerHour))
 	}
 	if len(parts) == 0 {
 		return "cleared"

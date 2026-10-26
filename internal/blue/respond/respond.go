@@ -1011,6 +1011,10 @@ func sameTarget(a, b map[string]string) bool {
 	return true
 }
 
+// ActionsLastHour counts the containment actions done in the last hour, for
+// a rate limit lower than the root helper's own (one the hub set).
+func ActionsLastHour(stateDir string) int { return countRecentIn(Load(stateDir), time.Hour) }
+
 func countRecentIn(records []Record, d time.Duration) int {
 	n := 0
 	for _, r := range records {
@@ -1089,22 +1093,56 @@ const SocketPath = "/run/kodeblue/respond.sock"
 // prefers the systemd socket (the daemon stays fully sandboxed), falls back to
 // `sudo -n` on hosts without systemd, and runs the helper directly when
 // already root (tests, containers).
+// invokeSlots bounds concurrent helper calls from one process (the socket
+// allows 4 connections).
+var invokeSlots = make(chan struct{}, 2)
+
+func invokeSocket(ctx context.Context, payload []byte) ([]byte, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", SocketPath)
+	if err != nil {
+		return nil, fmt.Errorf("respond socket: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+	if _, err := conn.Write(append(payload, '\n')); err != nil {
+		return nil, err
+	}
+	if uc, ok := conn.(*net.UnixConn); ok {
+		_ = uc.CloseWrite()
+	}
+	return io.ReadAll(io.LimitReader(conn, 1<<20))
+}
+
 func Invoke(ctx context.Context, configPath string, payload []byte) ([]byte, error) {
 	if st, err := os.Stat(SocketPath); err == nil && st.Mode()&os.ModeSocket != 0 {
-		var d net.Dialer
-		conn, err := d.DialContext(ctx, "unix", SocketPath)
-		if err != nil {
-			return nil, fmt.Errorf("respond socket: %w", err)
+		// The socket takes a few connections at once (MaxConnections in
+		// kodeblue-respond.socket); past that systemd resets them before a
+		// helper starts. Hold this process to fewer, and retry a reset or
+		// empty answer: the helper had not run, and it answers a repeated
+		// request for an action already in effect without acting again.
+		select {
+		case invokeSlots <- struct{}{}:
+			defer func() { <-invokeSlots }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
-		if _, err := conn.Write(append(payload, '\n')); err != nil {
-			return nil, err
+		var out []byte
+		var err error
+		for attempt := 0; attempt < 6; attempt++ {
+			if out, err = invokeSocket(ctx, payload); err == nil && len(bytes.TrimSpace(out)) > 0 {
+				return out, nil
+			}
+			if err == nil {
+				err = errors.New("respond socket: no answer")
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 300 * time.Millisecond):
+			}
 		}
-		if uc, ok := conn.(*net.UnixConn); ok {
-			_ = uc.CloseWrite()
-		}
-		return io.ReadAll(io.LimitReader(conn, 1<<20))
+		return nil, err
 	}
 	self, err := os.Executable()
 	if err != nil {

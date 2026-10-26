@@ -90,6 +90,21 @@ type Status struct {
 	// root policy and the hub's rules.
 	Models  map[string]string `json:"models,omitempty"`
 	Actions map[string]string `json:"actions,omitempty"`
+
+	// BaselineSweep of BaselineSweeps baseline snapshots are taken while the
+	// learning phase collects them; BaselineETA is when the last is due.
+	BaselineSweep  int    `json:"baseline_sweep,omitempty"`
+	BaselineSweeps int    `json:"baseline_sweeps,omitempty"`
+	BaselineETA    string `json:"baseline_eta,omitempty"`
+	// BaselineAt is when the last baseline was completed: while the phase is
+	// still learning after it, the learning session or assessment runs.
+	BaselineAt string `json:"baseline_at,omitempty"`
+	// SettingsSaved is a settings version received from the hub and saved,
+	// which the server applies at its next restart (as soon as no agent
+	// session runs). Empty once applied.
+	SettingsSaved string `json:"settings_saved,omitempty"`
+	// Tuning is the value of each hub-settable setting (Tunings) in effect.
+	Tuning map[string]string `json:"tuning,omitempty"`
 }
 
 // Record is one object the hub stores per server, keyed by (Kind, ID).
@@ -172,6 +187,16 @@ type Settings struct {
 	// allows: the hub can switch a server between modes but never above
 	// that ceiling.
 	ResponseMode string `json:"response_mode,omitempty"`
+	// Tuning sets server settings by key (see Tunings): cost, cadence and
+	// noise. The server checks each value again and caps the budget.
+	Tuning map[string]string `json:"tuning,omitempty"`
+	// ProtectedUsers, ProtectedIPs and ProtectedUnits are added to the
+	// server's own protected lists (never replace them), and
+	// MaxActionsPerHour can only lower its containment rate limit.
+	ProtectedUsers    []string `json:"protected_users,omitempty"`
+	ProtectedIPs      []string `json:"protected_ips,omitempty"`
+	ProtectedUnits    []string `json:"protected_units,omitempty"`
+	MaxActionsPerHour int      `json:"max_actions_per_hour,omitempty"`
 }
 
 // ResponseModes in order of what they allow.

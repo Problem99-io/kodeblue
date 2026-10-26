@@ -101,6 +101,8 @@ func (c Config) applyHubSettings(s *hubproto.Settings) Config {
 	if r := hubproto.ModeRank(s.ResponseMode); r >= 0 && r < hubproto.ModeRank(c.Response.Mode) {
 		c.Response.Mode = s.ResponseMode
 	}
+	c.applyTuning(s.Tuning)
+	c.applyProtections(s)
 	return c
 }
 

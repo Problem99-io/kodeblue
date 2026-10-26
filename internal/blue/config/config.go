@@ -121,6 +121,9 @@ type Budget struct {
 	DailyUSD float64 `toml:"daily_usd"`
 	// Token prices (USD per million) for endpoints that report no cost per
 	// call. Without them such calls count as $0 and daily_usd is not enforced.
+	// HubMaxDailyUSD caps the daily budget the hub may set (it cannot raise
+	// spend past this; the root-owned file decides).
+	HubMaxDailyUSD         float64 `toml:"hub_max_daily_usd"`
 	InputUSDPerMTok        float64 `toml:"input_usd_per_mtok"`
 	OutputUSDPerMTok       float64 `toml:"output_usd_per_mtok"`
 	MaxConcurrentIncidents int     `toml:"max_concurrent_incidents"`
@@ -205,7 +208,7 @@ func Default() Config {
 		},
 		Schedule: Schedule{SweepSeconds: 60, FastWatchSeconds: 5, TriageSeconds: 120, ReviewHours: 24, LearningMinutes: 30, LearningSweeps: 10},
 		Detect:   Detect{DebounceSweeps: 2, RealertHours: 24, BruteForceThreshold: 20, AutoAcceptConfidence: 0.85},
-		Budget:   Budget{DailyUSD: 1.0, MaxConcurrentIncidents: 2, IncidentMaxIterations: 30, MaxIncidentsPerHour: 6},
+		Budget:   Budget{DailyUSD: 1.0, HubMaxDailyUSD: 20, MaxConcurrentIncidents: 2, IncidentMaxIterations: 30, MaxIncidentsPerHour: 6},
 		Response: respond.DefaultPolicy(),
 		Notify:   Notify{SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
 		Engine:   Engine{},

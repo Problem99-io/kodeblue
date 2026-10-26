@@ -98,6 +98,8 @@ type Daemon struct {
 	// exits once no agent session runs, and systemd starts it with them.
 	restartWanted atomic.Bool
 	restartNow    chan struct{}
+	// decided signals an operator decision on a containment request.
+	decided chan struct{}
 	// learning is set while the learning phase or a learner session runs;
 	// relearnNow asks the main loop to run the learning phase again.
 	learning   atomic.Bool
@@ -131,7 +133,7 @@ var ErrRestart = errors.New("restarting to apply new settings")
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	env := &sensors.Env{Root: cfg.Server.Root, Logger: logger, State: sensors.NewCursorStore(cfg.CursorPath())}
 	env.Pkg = sensors.LoadPackageIndex(env)
-	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
+	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
 	d.newEngine = func() agentEngine { return runtime.New(cfg, logger) }
 	d.engCheckEvery, d.engMinBackoff, d.wakeGap = 30*time.Second, time.Minute, 10*time.Second
 	d.learnRetry = 10 * time.Minute
@@ -274,6 +276,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// process; open incidents for them (and for stranded criticals)
 			// here, not behind a triage run that may be waiting on the model.
 			d.resumeQueued(ctx)
+			// Decisions made on the server (kodeblue respond approve).
+			d.followUpDecisions(ctx)
+		case <-d.decided:
+			d.followUpDecisions(ctx)
 		case <-review.C:
 			d.maybeReview(ctx)
 			d.prune()
@@ -281,6 +287,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// A hub operator asked to relearn (Learn): the phase reads as
 			// learning until the sweeps and the learner are done.
 			_ = d.st.Set("learned_at", "")
+			d.st.SetBaselineProgress(0, 0, time.Time{}) // a fresh baseline, not the rest of an earlier one
 			err := d.learn(ctx)
 			d.learning.Store(false)
 			if err != nil {
@@ -835,17 +842,28 @@ func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 
 // learn runs the learning phase: repeated deterministic snapshots (to learn
 // churn), seeding known logins from history, then the learner agent session.
+// The sweeps done are recorded, so a restart (new settings from the hub,
+// which may bring the model the learner needs) resumes the baseline instead
+// of starting it over.
 func (d *Daemon) learn(ctx context.Context) error {
 	sweeps := max(d.cfg.Schedule.LearningSweeps, 1)
 	interval := time.Duration(d.cfg.Schedule.LearningMinutes) * time.Minute / time.Duration(sweeps)
-	d.log.Info("learning phase: collecting baseline", "sweeps", sweeps, "interval", interval)
-	d.expectProgress(loopGrace)
-	hist := sensors.AuthHistory(ctx, d.env)
-	if _, err := d.det.Process(sensors.Snapshot{Events: hist}, detect.ModeLearn); err != nil {
-		return err
+	start, planned, _ := d.st.BaselineProgress()
+	if planned != sweeps || start >= sweeps {
+		start = 0
 	}
-	d.log.Info("seeded login history", "events", len(hist))
-	for i := 0; i < sweeps; i++ {
+	d.expectProgress(loopGrace)
+	if start > 0 {
+		d.log.Info("learning phase: resuming baseline", "done", start, "sweeps", sweeps, "interval", interval)
+	} else {
+		d.log.Info("learning phase: collecting baseline", "sweeps", sweeps, "interval", interval)
+		hist := sensors.AuthHistory(ctx, d.env)
+		if _, err := d.det.Process(sensors.Snapshot{Events: hist}, detect.ModeLearn); err != nil {
+			return err
+		}
+		d.log.Info("seeded login history", "events", len(hist))
+	}
+	for i := start; i < sweeps; i++ {
 		d.expectProgress(interval + loopGrace)
 		d.reg.SetOff(d.sensorsOff())
 		snap := d.reg.Sweep(ctx, d.env, true)
@@ -855,15 +873,16 @@ func (d *Daemon) learn(ctx context.Context) error {
 			return err
 		}
 		_ = d.env.State.Save()
+		d.st.SetBaselineProgress(i+1, sweeps, time.Now().Add(time.Duration(sweeps-i-1)*interval))
+		d.nudgeHub()
 		d.log.Info("learning sweep", "n", i+1, "items", len(snap.Items), "absorbed", res.Absorbed, "preexisting_findings", len(res.New))
 		if i < sweeps-1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(interval):
+			if err := d.learnWait(ctx, interval); err != nil {
+				return err
 			}
 		}
 	}
+	d.st.SetBaselineProgress(0, 0, time.Time{})
 	_ = d.st.Set("baseline_at", time.Now().UTC().Format(time.RFC3339))
 
 	learned := false
@@ -915,6 +934,28 @@ func (d *Daemon) learn(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// learnWait waits between baseline sweeps. New hub settings restart the
+// daemon here rather than after the baseline: the sweeps done are recorded
+// and resume after the restart, and a model the hub sent is then in place
+// for the learner.
+func (d *Daemon) learnWait(ctx context.Context, interval time.Duration) error {
+	t := time.NewTimer(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		case <-d.restartNow:
+			if d.restartWanted.Load() && len(d.LiveSessions()) == 0 {
+				d.log.Info("new hub settings saved; restarting to apply them (the baseline resumes after the restart)")
+				return ErrRestart
+			}
+		}
+	}
 }
 
 // learnBrief is the learner's brief for a server's first learning run,

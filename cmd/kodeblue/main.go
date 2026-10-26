@@ -243,6 +243,7 @@ func main() {
 	case "relearn":
 		st := mustStore(cfg)
 		_ = st.Set("learned_at", "")
+		st.SetBaselineProgress(0, 0, time.Time{}) // a fresh baseline, not the rest of an earlier one
 		st.Journal("operator", "relearn", "")
 		fmt.Println("learning phase will run on next start (systemctl restart kodeblue)")
 	case "version":
@@ -313,6 +314,13 @@ func statusCmd(cfg config.Config) {
 	learned := st.Get("learned_at")
 	if learned == "" {
 		learned = "(still learning)"
+		if done, total, eta := st.BaselineProgress(); total > 0 {
+			learned = fmt.Sprintf("(still learning: baseline snapshot %d of %d", done, total)
+			if t, err := time.Parse(time.RFC3339, eta); err == nil && done < total {
+				learned += ", the last around " + t.Local().Format("15:04")
+			}
+			learned += ")"
+		}
 	}
 	fmt.Printf("learned at:    %s\n", learned)
 	if st.Get(store.LearnerPendingKey) != "" {

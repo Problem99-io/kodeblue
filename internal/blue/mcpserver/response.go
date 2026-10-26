@@ -95,6 +95,11 @@ func Submit(ctx context.Context, cfg config.Config, st *store.Store, slack notif
 	if err := respond.Check(pol, req); err != nil {
 		return "", err
 	}
+	// The root helper enforces its own max_actions_per_hour; a lower one the
+	// hub set is enforced here, before a request reaches it.
+	if n := respond.ActionsLastHour(pol.StateDir); pol.MaxActionsPerHour > 0 && n >= pol.MaxActionsPerHour {
+		return "", fmt.Errorf("rate limit: %d containment actions in the last hour (the limit is %d); put it in your report as a recommendation", n, pol.MaxActionsPerHour)
+	}
 	rule := cfg.ActionRule(req.Action)
 	if rule == hubproto.ActionOff {
 		return "", fmt.Errorf("the operators turned %s off for this server; put it in your report as a recommendation", req.Action)
@@ -349,4 +354,77 @@ func runHelper(ctx context.Context, cfg config.Config, req respond.Request) (*re
 // RunHelper is exported for the CLI's approve path.
 func RunHelper(ctx context.Context, cfg config.Config, req respond.Request) (*respond.Record, error) {
 	return runHelper(ctx, cfg, req)
+}
+
+// Decisions sums up the containment an incident's agent asked for: how many
+// requests still wait for an operator, and one line per settled one (ran,
+// failed or denied), oldest first. The daemon hands those lines back to the
+// agent once nothing waits, so it learns what the operators decided.
+func Decisions(cfg config.Config, incidentID int64) (pending int, settled []string) {
+	open := map[string]bool{}
+	for _, r := range LoadRequests(cfg) {
+		if r.IncidentID == incidentID {
+			pending++
+			open[r.ID] = true
+		}
+	}
+	denied := map[string]Denial{}
+	if f, err := os.Open(deniedPath(cfg)); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var d Denial
+			if json.Unmarshal(sc.Bytes(), &d) == nil && d.ID != "" {
+				denied[d.ID] = d
+			}
+		}
+		f.Close()
+	}
+	target := func(p map[string]string) string {
+		var parts []string
+		for _, k := range []string{"ip", "user", "unit", "pid", "path", "key_id"} {
+			if v := p[k]; v != "" {
+				parts = append(parts, k+"="+v)
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	ran := map[string]bool{}
+	for _, e := range respond.Load(cfg.Response.StateDir) {
+		ran[e.ID] = true
+		// Only what an operator approved: the agent saw the result of
+		// actions it ran itself.
+		by, ok := strings.CutSuffix(e.RequestedBy, "+operator")
+		if e.IncidentID != incidentID || !ok || e.Status == "pending" {
+			continue
+		}
+		who := "an operator on the server"
+		if i := strings.Index(by, "+hub:"); i >= 0 {
+			who = by[i+len("+hub:"):] + " (hub)"
+		}
+		settled = append(settled, fmt.Sprintf("%s %s: approved by %s, %s: %s", e.Action, target(e.Params), who, e.Status, clipLine(e.Result, 240)))
+	}
+	if f, err := os.Open(requestsPath(cfg)); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var r respond.Request
+			if json.Unmarshal(sc.Bytes(), &r) != nil || r.IncidentID != incidentID {
+				continue
+			}
+			if d, ok := denied[r.ID]; ok {
+				settled = append(settled, fmt.Sprintf("%s %s: denied by %s", r.Action, target(r.Params), d.DeniedBy))
+			} else if !ran[r.ID] && !open[r.ID] {
+				settled = append(settled, fmt.Sprintf("%s %s: already in effect (the same action on the same target ran for another request)", r.Action, target(r.Params)))
+			}
+		}
+		f.Close()
+	}
+	return pending, settled
+}
+
+func clipLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
