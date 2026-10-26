@@ -50,6 +50,11 @@ func (p Policy) Ceiling(hubSettings bool) string {
 	return p.Mode
 }
 
+// HubMayAutomate reports whether root let a hub turn on actions that run
+// without a person looking each time: mode or hub_max_mode is contain. A
+// hub approval of a containment rule counts only then.
+func (p Policy) HubMayAutomate() bool { return p.Ceiling(true) == "contain" }
+
 // Policy governs what the helper will do.
 type Policy struct {
 	// Mode: off | recommend | contain. recommend records the request for an
@@ -280,7 +285,11 @@ func checkQuarantinePath(p string) error {
 // cannot both slip past the rate limit or both act on one target, and so a
 // forged or tampered journal is never acted on. The returned record has
 // already been appended; callers must not append it again.
-func Execute(p Policy, r Request) Record {
+func Execute(p Policy, r Request) Record { return executeWith(p, r, nil) }
+
+// executeWith is Execute with guard, an extra check made under the journal
+// lock (a containment rule's scope and hourly limit) before acting.
+func executeWith(p Policy, r Request, guard func(*journal, []Record) error) Record {
 	rec := Record{Request: r, Status: "failed"}
 	if err := Check(p, r); err != nil {
 		rec.Status, rec.Result = "refused", err.Error()
@@ -296,6 +305,13 @@ func Execute(p Policy, r Request) Record {
 	if err != nil {
 		rec.Status, rec.Result = "refused", "journal unreadable: "+err.Error()
 		return rec
+	}
+	if guard != nil {
+		if err := guard(j, records); err != nil {
+			rec.Status, rec.Result = "refused", err.Error()
+			_ = j.append(rec)
+			return rec
+		}
 	}
 	// Concurrent incidents about the same attack often ask for the same
 	// action; answer from the journal instead of acting twice.

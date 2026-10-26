@@ -80,6 +80,10 @@ type Status struct {
 	// AcceptsApprovals: hub operators may approve or deny containment the
 	// agent asked for (hub.accept_approvals).
 	AcceptsApprovals bool `json:"accepts_approvals"`
+	// AcceptsRuleApprovals: hub operators may also approve containment
+	// rules, which act without asking (accept_approvals, and root set
+	// [response] mode or hub_max_mode to contain).
+	AcceptsRuleApprovals bool `json:"accepts_rule_approvals,omitempty"`
 	// AcceptsSettings: the server applies settings from the hub
 	// (hub.accept_settings). SettingsVersion is the version it has applied.
 	AcceptsSettings bool   `json:"accepts_settings"`
@@ -339,12 +343,17 @@ type OperatorMessage struct {
 	Decision  string `json:"decision,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	// Command (CommandLearn | CommandRelearn | CommandStop, or a
-	// vulnerability command) makes this a request to run learning, stop a
-	// session or change a vulnerability, not a message for the agent.
+	// vulnerability or containment rule command) makes this a request to
+	// run learning, stop a session or change a vulnerability or rule, not a
+	// message for the agent.
 	Command string `json:"command,omitempty"`
 	// SessionID names the running session CommandStop aborts (optional for
 	// other commands).
 	SessionID string `json:"session_id,omitempty"`
+	// RuleHash is the content of the containment rule RequestID the
+	// operator saw when approving it; the server refuses an approval of
+	// anything else.
+	RuleHash string `json:"rule_hash,omitempty"`
 }
 
 // Learning commands an operator can send from the hub.
@@ -373,6 +382,23 @@ const (
 
 // VulnCommands are the vulnerability commands.
 var VulnCommands = []string{CommandVulnAccept, CommandVulnReopen, CommandVulnRecheck}
+
+// Containment rule commands an operator can send from the hub. RequestID
+// names the rule and Body is the operator's note. Approving and deleting
+// need hub.accept_approvals on the server; the root helper checks them.
+const (
+	// CommandRuleApprove makes a proposed rule active (or renews one).
+	CommandRuleApprove = "rule_approve"
+	// CommandRuleReject turns a proposal down.
+	CommandRuleReject = "rule_reject"
+	// CommandRulePause stops an active rule; approving resumes it.
+	CommandRulePause = "rule_pause"
+	// CommandRuleDelete removes a rule for good.
+	CommandRuleDelete = "rule_delete"
+)
+
+// RuleCommands are the containment rule commands.
+var RuleCommands = []string{CommandRuleApprove, CommandRuleReject, CommandRulePause, CommandRuleDelete}
 
 type MessagesResponse struct {
 	Messages []OperatorMessage `json:"messages"`

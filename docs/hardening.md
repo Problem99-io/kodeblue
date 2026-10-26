@@ -487,7 +487,7 @@ The containment helper re-reads this file for every request and refuses to run i
 |---|---|---|
 | `accept_messages` (true) | operators can message the agents (investigate, tune monitors and allow rules, request containment) | you do not want remote instructions reaching this server |
 | `share_transcripts` (true) | the agents' reasoning and tool output are visible on the hub | tool output from this server (file contents, logs, process lists) must not be stored on the hub |
-| `accept_approvals` (true) | operators can approve or deny requested containment | approvals must happen on the server itself |
+| `accept_approvals` (true) | operators can approve or deny requested containment, and delete containment rules; with `[response]` `mode` or `hub_max_mode` = `contain` also approve containment rules, which then act without asking | approvals must happen on the server itself |
 | `accept_settings` (true) | the server applies the console's model connections, per-agent models, instructions and approval rules | the hub must not be able to change which endpoint this server's data is sent to |
 | `accept_learning` (true) | operators can run the learner or relearn the baseline (each run is announced in Slack) | a hub operator must not be able to make this server absorb its current state as normal |
 | `messages_per_hour` (20) | rate limit on operator messages | |

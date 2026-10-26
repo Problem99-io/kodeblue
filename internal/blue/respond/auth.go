@@ -107,6 +107,10 @@ func Authorize(mode string, hubApprovals bool, c Caller, req Request) error {
 	}
 	by := req.RequestedBy
 	switch {
+	case ruleByRe.MatchString(by):
+		// A containment rule a person approved: ExecuteRule checks it
+		// against the helper's own copy before anything runs.
+		return nil
 	case agentByRe.MatchString(by):
 		if mode != "contain" {
 			return fmt.Errorf("policy mode is %s: operator approval required", mode)
@@ -134,6 +138,32 @@ func VouchedByOperator(hubApprovals bool, c Caller, req Request) bool {
 		return true
 	}
 	return c.Agent() && hubApprovals && hubByRe.MatchString(req.RequestedBy)
+}
+
+// RuleApprover is who approves or changes a containment rule: root on the
+// server, or a hub operator the kodeblue user relays, accepted only where
+// the root-owned hub.accept_approvals allows hub approvals. hubBy is the
+// relayed "hub:<operator>".
+func RuleApprover(hubApprovals bool, c Caller, hubBy string) (string, error) {
+	if c.Operator() {
+		if c.UID == 0 {
+			return "root", nil
+		}
+		return fmt.Sprintf("uid-%d", c.UID), nil
+	}
+	if !c.Agent() {
+		return "", fmt.Errorf("the request came from an untrusted caller (%s)", c)
+	}
+	if hubBy == "" {
+		return "", errors.New("approving or deleting a containment rule needs root: run it with sudo")
+	}
+	if !hubApprovals {
+		return "", errors.New("this server does not take this ruling from the hub (it needs hub.accept_approvals, and for an approval [response] mode or hub_max_mode = contain): run sudo kodeblue rules on the server")
+	}
+	if !approverRe.MatchString(hubBy) || !strings.HasPrefix(hubBy, "hub:") {
+		return "", errors.New("a containment rule is approved by root or by a hub operator")
+	}
+	return hubBy, nil
 }
 
 // AuthorizeUndo: only an operator undoes containment.

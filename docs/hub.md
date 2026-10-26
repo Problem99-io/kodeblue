@@ -4,10 +4,10 @@ The hub is the central console for a fleet of kodeblue servers. Operators sign i
 
 | Tab | What it shows |
 |---|---|
-| **Board** | the server's cases as cards in three columns (Investigating, Needs human, Resolved): incidents, learning runs, reviews and operator conversations. A card opens a **case panel** with the summary, the report, the **agent's self-evaluation**, linked findings and containment actions, and the **full agent session**: its reasoning ("Thinking"), what it said, and every tool call with arguments and result. Running sessions stream live, every ~5 s. The panel's composer messages the agents (see below) |
+| **Board** | the server's cases as cards in three columns (Investigating, Needs human, Resolved): incidents, learning runs, reviews and operator conversations. A card opens a **case panel** with the summary, the report, the **agent's self-evaluation**, linked findings and containment actions, and the **full agent session**: its reasoning ("Thinking"), what it said, and every tool call with arguments and result. Running sessions stream live, every ~5 s. The panel's composer messages the agents (see below). **Filters** above the columns narrow the board by severity, type, server (on the fleet board), pinned cases or what needs you (approvals and Needs human); each browser remembers its own. **Pin** a card (its pin button, the right-click menu, or several selected cards) to keep it at the top of its column for every operator until someone unpins it |
 | **Overview** | phase (learning / watching / maintenance), response policy, models, spend vs budget, the server profile the learner wrote, open cases, agents working right now, latest activity; **Run learner** and **Relearn** buttons (see below) |
 | **Findings & triage** | what the sensors flagged, the triage model's verdict and one-line reasoning for each, evidence on click, and which ones wait for `kodeblue ack` |
-| **Monitors & rules** | the monitors the agents wrote (check, interval, ok/failing, runs, last output), the built-in sensors and their sweep counts, allow rules with hit counts |
+| **Monitors & rules** | **containment rules** (proposed by the agents for attacks that keep coming back: what each does, why, how often it fired, when it expires; Approve, Reject, Pause, Delete), the monitors the agents wrote (check, interval, ok/failing, runs, last output), the built-in sensors and their sweep counts, allow rules with hit counts |
 | **Self-evaluation** | the reviewer's periodic self-score and write-up, each case's self-evaluation and confidence, false-positive rate, and the 7-day findings-by-rule outcome table |
 | **Activity** | containment actions taken, actions waiting for approval (with the exact `kodeblue respond approve` command), and the journal of every automatic decision |
 | **Knowledge** | the reports, skills and definitions the agents wrote on the server |
@@ -56,6 +56,8 @@ Operators can also **start learning** from the server's Overview (Learning row).
 - **Run learner**: the `blue-learner` agent reviews the baseline the server already has and writes or updates the profile, definitions, monitors and skills. Detection keeps running. Use it after picking models for a server that learned without them, or to refresh what the learner left.
 - **Relearn**: the whole learning phase again (baseline sweeps over `learning_minutes`, then the learner). Everything the server runs during the sweeps is absorbed as normal, so relearn after planned changes, never while you suspect a compromise.
 
+Operators can also **rule on containment rules** (Monitors & rules). For an attack that keeps coming back, an agent proposes a rule such as "block every address that brute-forces SSH"; it does nothing until approved. Approving shows the rule in full and relays the hash of exactly what was shown; the server's root helper checks it and keeps the approved copy. An approved rule acts without asking, so the server takes an approval from the hub only where its root allowed automatic actions from the hub (`accept_approvals`, and `[response] mode` or `hub_max_mode` = `contain`); elsewhere the hub shows the `sudo kodeblue rules approve <id>` command instead. Reject, Pause (both with a reason) and Delete are relayed the same way. A tab badge counts rules waiting for approval. Details in [kodeblue.md](kodeblue.md#containment-rules).
+
 One learning run at a time per server. Every run is in the hub audit log, the server journal and Slack. On the server the same is `kodeblue relearn && systemctl restart kodeblue`.
 
 Operators can also **configure the agents** (Settings for the fleet, and a Settings tab per server that overrides single entries):
@@ -86,7 +88,7 @@ The hub **cannot** loosen a server's policy or create containment of its own. Ap
 A stolen hub session can therefore approve containment an agent asked for, point the agents at another model endpoint, give them instructions, relearn a server (announced in Slack) or mark a vulnerability as an accepted risk (journaled on the server with the operator's name and reason), but not make a server act on its own, unless that server's root set `hub_max_mode = "contain"`, which lets the hub switch it to contain. Instructions cannot widen what agents may do either: their tools, the response policy and the protected users, IPs and units stay as the server configures them. Servers where that is too much set `accept_approvals = false`, `accept_settings = false` and `accept_learning = false`.
 
 A server can opt out entirely, or limit what the hub sees, in `[hub]`:
-- `accept_approvals = false`: approve/deny only on the server
+- `accept_approvals = false`: approve/deny, and approving or deleting containment rules, only on the server
 - `accept_settings = false`: the console's model, instruction and approval settings are ignored
 - `accept_learning = false`: learning and relearning only on the server
 - `accept_messages = false`: no remote instructions, and vulnerabilities can be accepted, reopened or rechecked only by the server's agents and kodeblue itself

@@ -741,6 +741,43 @@ body.selbar-on .toast { bottom: 76px; }
   background: rgb(var(--blue)); color: rgb(var(--bg-dark)); }
 .warn-t { color: rgb(var(--yellow)); }
 
+/* ---------- board filters and pins ---------- */
+.fbar { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; margin: -4px 0 14px; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid rgb(var(--line)); background: rgb(var(--bg-dark) / .6); }
+.fbar.active { border-color: rgb(var(--blue) / .35); }
+.fgrp { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.flbl { font-size: 11px; color: rgb(var(--fg-muted)); margin-right: 2px; }
+.fsep { width: 1px; height: 18px; background: rgb(var(--line-strong)); }
+.fchip { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 6px; font-size: 12px; line-height: 1;
+  border: 1px solid rgb(var(--line-strong)); color: rgb(var(--fg-dark)); background: transparent; cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s; }
+.fchip.cap { text-transform: capitalize; }
+.fchip:hover { color: rgb(var(--fg)); background: rgb(var(--bg-hl)); }
+.fchip .fn { font-size: 10.5px; color: rgb(var(--fg-muted)); font-variant-numeric: tabular-nums; }
+.fchip.on { color: rgb(var(--blue)); border-color: rgb(var(--blue) / .6); background: rgb(var(--blue) / .12); }
+.fchip.on .fn { color: rgb(var(--blue) / .8); }
+.fchip.attn.on { color: rgb(var(--orange)); border-color: rgb(var(--orange) / .6); background: rgb(var(--orange) / .12); }
+.fchip.attn.on .fn { color: rgb(var(--orange) / .8); }
+.fchip .sdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: rgb(var(--fg-muted)); }
+.sdot.s-critical { background: rgb(var(--red)); } .sdot.s-high { background: rgb(var(--orange)); } .sdot.s-medium { background: rgb(var(--yellow)); }
+.sdot.s-low { background: rgb(var(--cyan)); }
+.fsel { height: 24px; padding: 0 6px; border-radius: 6px; font-size: 12px; border: 1px solid rgb(var(--line-strong)); background: rgb(var(--bg-light)); color: rgb(var(--fg-dark)); }
+.fsel.on { color: rgb(var(--blue)); border-color: rgb(var(--blue) / .6); }
+.fclear { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; color: rgb(var(--fg-muted)); padding: 2px 6px; border-radius: 6px; }
+.fclear:hover { color: rgb(var(--fg)); background: rgb(var(--bg-hl)); }
+.ftog { display: none; align-items: center; gap: 6px; font-size: 12.5px; color: rgb(var(--fg-dark)); }
+.ftog .fn { font-size: 10.5px; padding: 0 6px; border-radius: 8px; background: rgb(var(--blue)); color: rgb(var(--bg-dark)); font-weight: 700; }
+.pinb { display: none; flex: none; width: 20px; height: 20px; border-radius: 5px; align-items: center; justify-content: center; color: rgb(var(--fg-muted)); cursor: pointer; }
+.pinb:hover { color: rgb(var(--fg)); background: rgb(var(--bg-hl)); }
+@media (hover: hover) { .card:hover .pinb { display: inline-flex; } }
+.card.pinned .pinb { display: inline-flex; color: rgb(var(--blue)); }
+.card.pinned .pinb .ic { fill: rgb(var(--blue) / .25); }
+.card.pinned { border-color: rgb(var(--blue) / .35); }
+.card.pinned + .card:not(.pinned) { margin-top: 6px; }
+@media (hover: none) { .pinb { display: inline-flex; } }
+/* columns share the width on wide screens instead of scrolling sideways */
+@media (min-width: 761px) { .col { flex: 1 1 340px; min-width: 300px; max-width: 520px; width: auto; } }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) {
   .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -797,3 +834,16 @@ body.selbar-on .toast { bottom: 76px; }
 }
 label.chk { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
 label.chk input { margin-top: 3px; flex: none; }
+
+/* containment rules waiting for approval */
+tr.attn > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--yellow)); }
+@media (max-width: 760px) {
+  .fbar { gap: 6px; padding: 8px; margin-bottom: 12px; }
+  .ftog { display: inline-flex; }
+  .fbar.open .ftog .ic:last-child { transform: rotate(180deg); }
+  .fbar:not(.open) > :not(.ftog):not(.fclear) { display: none; }
+  .fsep { display: none; }
+  .fgrp { width: 100%; }
+  .flbl { min-width: 56px; }
+  .fclear { margin-left: 0; }
+}

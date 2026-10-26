@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
+	"github.com/Problem99-io/kodeblue/internal/blue/containment"
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/mcpserver"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
@@ -278,6 +279,11 @@ func (l *Link) syncOnce(ctx context.Context) error {
 		vulns[v.ID] = v
 	}
 	addSet("vulnerability", vulns, now)
+	crules := map[string]any{}
+	for _, v := range containment.List(l.cfg, l.st) {
+		crules[v.ID] = v
+	}
+	addSet("containment_rule", crules, now)
 
 	if l.cfg.Hub.ShareTranscripts {
 		for sid, inc := range l.agent.LiveSessions() {
@@ -359,8 +365,8 @@ func (l *Link) status() hubproto.Status {
 		SpendToday: usd, SpendByPurpose: per, Spend7d: week, DailyBudget: l.cfg.Budget.DailyUSD, TokensToday: tokens,
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
 		FindingStats7d: l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
-		AcceptsApprovals: l.cfg.Hub.AcceptApprovals,
-		AcceptsSettings:  l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
+		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
+		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
 		Models: l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
 	}
@@ -451,6 +457,8 @@ func checkSettings(s *hubproto.Settings) error {
 // commands run one at a time, in order, and a chat holds its turn until the
 // agent answers (minutes). Stop and approve/deny cannot wait behind it: they
 // are usually about that very session, so they run as soon as they arrive.
+// Containment rule rulings take no model either, and pausing a rule that
+// misfires must not wait.
 func (l *Link) messageLoop(ctx context.Context) {
 	queue := make(chan hubproto.OperatorMessage, 64)
 	go func() {
@@ -482,7 +490,7 @@ func (l *Link) messageLoop(ctx context.Context) {
 		}
 		backoff = 5 * time.Second
 		for _, m := range resp.Messages {
-			if m.Decision != "" || m.Command == hubproto.CommandStop {
+			if m.Decision != "" || m.Command == hubproto.CommandStop || slices.Contains(hubproto.RuleCommands, m.Command) {
 				go l.answer(ctx, m)
 				continue
 			}
@@ -514,6 +522,9 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		}
 		if slices.Contains(hubproto.VulnCommands, m.Command) {
 			return l.vulnCommand(ctx, m)
+		}
+		if slices.Contains(hubproto.RuleCommands, m.Command) {
+			return l.ruleCommand(ctx, m)
 		}
 		if m.Command != hubproto.CommandLearn && m.Command != hubproto.CommandRelearn {
 			return hubproto.MessageReply{Status: "refused", Text: "Unknown command " + m.Command}
@@ -577,6 +588,61 @@ func (l *Link) vulnCommand(ctx context.Context, m hubproto.OperatorMessage) hubp
 		return hubproto.MessageReply{Status: "refused", Text: err.Error()}
 	}
 	return hubproto.MessageReply{Status: "done", Text: v.ID + ": " + res + "."}
+}
+
+// ruleCommand applies an operator's ruling on a containment rule. No model
+// is involved. Approving and deleting go to the root helper, which accepts
+// them from the hub only under hub.accept_approvals and checks that the
+// approval names the content the operator saw.
+func (l *Link) ruleCommand(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply {
+	by, note, id := "hub:"+m.Author, strings.TrimSpace(m.Body), m.RequestID
+	switch m.Command {
+	case hubproto.CommandRuleApprove, hubproto.CommandRuleDelete:
+		if m.Command == hubproto.CommandRuleApprove && l.cfg.Hub.AcceptApprovals && !l.cfg.Response.HubMayAutomate() {
+			return hubproto.MessageReply{Status: "refused", Text: "An approved rule acts without asking, and this server's root has not let the hub turn that on ([response] hub_max_mode is not contain). Run on the server: sudo kodeblue rules approve " + id}
+		}
+		if !l.cfg.Hub.AcceptApprovals {
+			verb := strings.TrimPrefix(m.Command, "rule_")
+			return hubproto.MessageReply{Status: "refused", Text: "This server does not accept approvals from the hub (hub.accept_approvals = false in /etc/kodeblue/kodeblue.toml). Run on the server: sudo kodeblue rules " + verb + " " + id}
+		}
+	default:
+		if !l.cfg.Hub.AcceptMessages {
+			return hubproto.MessageReply{Status: "refused", Text: "This server does not take changes from the hub (hub.accept_messages = false in /etc/kodeblue/kodeblue.toml)."}
+		}
+	}
+	if !l.claimRequest("rule:" + id) {
+		return hubproto.MessageReply{Status: "refused", Text: "Another ruling on " + id + " is being carried out; this one was not."}
+	}
+	defer l.releaseRequest("rule:" + id)
+	if containment.Get(l.cfg, l.st, id) == nil {
+		return hubproto.MessageReply{Status: "refused", Text: "No containment rule " + id + " on this server."}
+	}
+	switch m.Command {
+	case hubproto.CommandRuleApprove:
+		r, err := containment.Approve(ctx, l.cfg, l.st, id, m.RuleHash, by)
+		if err != nil {
+			return hubproto.MessageReply{Status: "refused", Text: "Not approved: " + err.Error()}
+		}
+		l.st.Journal(by, "rule.approved", id+" until "+r.ExpiresAt.UTC().Format("2006-01-02"))
+		return hubproto.MessageReply{Status: "done", Text: fmt.Sprintf("Approved %s. It acts on matching findings until %s.", id, r.ExpiresAt.UTC().Format("2006-01-02"))}
+	case hubproto.CommandRuleReject:
+		if err := containment.Reject(l.st, id, by, note); err != nil {
+			return hubproto.MessageReply{Status: "failed", Text: err.Error()}
+		}
+		l.st.Journal(by, "rule.rejected", id+": "+note)
+		return hubproto.MessageReply{Status: "done", Text: "Rejected the proposal " + id + "."}
+	case hubproto.CommandRulePause:
+		if _, err := containment.Pause(ctx, l.cfg, l.st, id, by, note); err != nil {
+			return hubproto.MessageReply{Status: "refused", Text: "Not paused: " + err.Error()}
+		}
+		return hubproto.MessageReply{Status: "done", Text: "Paused " + id + ". Approve it again to resume."}
+	default:
+		if _, err := containment.Delete(ctx, l.cfg, l.st, id, by, note); err != nil {
+			return hubproto.MessageReply{Status: "refused", Text: "Not deleted: " + err.Error()}
+		}
+		l.st.Journal(by, "rule.deleted", id)
+		return hubproto.MessageReply{Status: "done", Text: "Deleted " + id + "."}
+	}
 }
 
 // decide applies an operator's approve/deny on a pending containment request.

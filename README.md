@@ -185,6 +185,7 @@ An agent that can touch production has to be harder to fool than the attacker is
 | Policy outside the model's reach | Actions go through a socket-activated root helper that re-reads a root-owned policy, and refuses to run if anyone but root can write it. |
 | Some detections always need a human | New SSH keys, uid 0 accounts, sudoers, privileged groups, PAM, `ld.so.preload`, SUID files, checksum mismatches and more can never be waved through on a model's word. |
 | Host data is treated as hostile | Logs, files and process names are attacker-controlled. Instructions found inside them count as signs of compromise. No agent can browse or fetch. |
+| Standing answers only with approval | For attacks that keep coming back, an agent can propose a containment rule ("block every address that brute-forces SSH"). It does nothing until a person approves it on the hub or with `sudo kodeblue rules approve`; it is limited per hour, expires, and the root helper checks every action it takes. |
 | Undo where it is possible | Each action is journaled with its undo recipe, rate-limited and posted to Slack (once a hub or Slack webhook is set up). Blocked IPs, disabled keys, quarantined files, stopped units and locked accounts can be undone; a killed process cannot, so its binary is preserved first, and the processes killed when an account is locked do not come back. |
 
 ## What it costs
@@ -231,6 +232,8 @@ sudo kodeblue incidents ; sudo kodeblue incident <id>
 sudo kodeblue findings --status needs_ack ; sudo kodeblue ack <id> [--allow]
 sudo kodeblue maintenance 2h "deploy v42"    # planned work: absorb non-critical changes
 sudo kodeblue respond list                   # then: respond approve|deny|undo <id>
+sudo kodeblue rules                          # containment rules; then: rules approve|reject|pause|delete <id>
+sudo kodeblue vulnerabilities                # every known vulnerability on this server
 sudo kodeblue inference                      # show the model endpoint (set it with --url, --model and --key-file -)
 ```
 

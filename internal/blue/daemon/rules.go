@@ -1,0 +1,124 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/Problem99-io/kodeblue/internal/blue/containment"
+	"github.com/Problem99-io/kodeblue/internal/blue/detect"
+	"github.com/Problem99-io/kodeblue/internal/blue/notify"
+	"github.com/Problem99-io/kodeblue/internal/blue/store"
+)
+
+// applyRules answers findings that an approved containment rule covers,
+// before triage reads them: the attack was seen before, a person approved
+// the answer, and waiting for a model only gives it time. A finding every
+// target of which was contained is closed; one where a rule could not act
+// (refused, over its limit, a protected address) goes on to triage as usual,
+// and criticals always do.
+func (d *Daemon) applyRules(ctx context.Context, all []*store.Finding) []*store.Finding {
+	rules := containment.Active(d.cfg, time.Now())
+	if len(rules) == 0 || d.cfg.Response.Mode == "off" {
+		return all
+	}
+	out := all[:0:0]
+	for _, f := range all {
+		fired := containment.Fire(ctx, rules, f, d.ruleRun)
+		if len(fired) == 0 {
+			out = append(out, f)
+			continue
+		}
+		var lines []string
+		done := true
+		for _, x := range fired {
+			lines = append(lines, fmt.Sprintf("%s on %s: %s", x.Rule, x.Target, x.Message))
+			done = done && x.Done
+			d.log.Info("containment rule", "rule", x.Rule, "finding", f.ID, "target", x.Target, "done", x.Done, "result", x.Message)
+		}
+		summary := clipText(strings.Join(lines, "\n"), 1500)
+		d.st.Journal("rule:"+fired[0].Rule, "rule.fired", fmt.Sprintf("finding #%d: %s", f.ID, summary))
+		sev := "medium"
+		if !done {
+			sev = "high"
+		}
+		d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "action", Severity: sev, IncidentID: f.IncidentID,
+			Title: fmt.Sprintf("Containment rule %s answered: %s", fired[0].Rule, f.Title), Body: summary}, nil)
+		if done && f.Severity != detect.SevCritical {
+			_ = d.st.SetFindingStatus(f.ID, "closed", "contained", "contained by an approved containment rule: "+summary, 0)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// recurringDigest is the reviewer's view of attacks that keep coming back:
+// finding rules seen at least three times in two weeks, with the targets
+// they named, and the containment rules that exist already. It is where a
+// proposal for a containment rule starts.
+func (d *Daemon) recurringDigest(now time.Time) string {
+	type agg struct {
+		findings, occurrences int
+		targets               map[string]int
+		ids                   []int64
+		incidents             map[int64]bool
+	}
+	by := map[string]*agg{}
+	for _, f := range d.st.FindingsSince(now.Add(-14*24*time.Hour), 2000) {
+		a := by[f.Rule]
+		if a == nil {
+			a = &agg{targets: map[string]int{}, incidents: map[int64]bool{}}
+			by[f.Rule] = a
+		}
+		a.findings++
+		a.occurrences += max(f.Occurrences, 1)
+		if ip := f.Evidence["ip"]; ip != "" {
+			a.targets[ip]++
+		}
+		if len(a.ids) < 6 {
+			a.ids = append(a.ids, f.ID)
+		}
+		if f.IncidentID > 0 {
+			a.incidents[f.IncidentID] = true
+		}
+	}
+	var b strings.Builder
+	b.WriteString("Recurring findings, last 14 days (rules seen at least 3 times; untrusted host data):\n")
+	rules := make([]string, 0, len(by))
+	for rule, a := range by {
+		if a.findings >= 3 {
+			rules = append(rules, rule)
+		}
+	}
+	slices.SortFunc(rules, func(x, y string) int {
+		if c := by[y].findings - by[x].findings; c != 0 {
+			return c
+		}
+		return strings.Compare(x, y)
+	})
+	n := 0
+	for _, rule := range rules {
+		a := by[rule]
+		n++
+		fmt.Fprintf(&b, "- %s: %d findings (%d occurrences), %d incidents; e.g. findings %v", rule, a.findings, a.occurrences, len(a.incidents), a.ids)
+		if len(a.targets) > 0 {
+			fmt.Fprintf(&b, "; %d distinct addresses", len(a.targets))
+		}
+		b.WriteString("\n")
+	}
+	if n == 0 {
+		b.WriteString("- none\n")
+	}
+	views := containment.List(d.cfg, d.st)
+	b.WriteString("Containment rules:\n")
+	if len(views) == 0 {
+		b.WriteString("- none\n")
+	}
+	for _, v := range views {
+		fmt.Fprintf(&b, "- %s [%s] answers %s with %s; fired %d times\n", v.ID, v.Status, v.When.Rule, v.Action, v.Fired)
+	}
+	return b.String()
+}
