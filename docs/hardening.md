@@ -490,9 +490,10 @@ The containment helper re-reads this file for every request and refuses to run i
 | `accept_approvals` (true) | operators can approve or deny requested containment | approvals must happen on the server itself |
 | `accept_settings` (true) | the server applies the console's model connections, per-agent models, instructions and approval rules | the hub must not be able to change which endpoint this server's data is sent to |
 | `accept_learning` (true) | operators can run the learner or relearn the baseline (each run is announced in Slack) | a hub operator must not be able to make this server absorb its current state as normal |
+| `accept_upgrades` (true) | operators can start an upgrade to the hub's version: the server downloads that release from `[upgrade] release_url` (GitHub), checks it against the release's SHA256SUMS and refuses downgrades | upgrades must be started on the server itself |
 | `messages_per_hour` (20) | rate limit on operator messages | |
 
-The safest hub-connected server sets all five to `false`. It still reports incidents, findings, reports and its other records to the hub.
+The safest hub-connected server sets all six to `false`. It still reports incidents, findings, reports and its other records to the hub.
 
 ### Slack the hub cannot suppress
 

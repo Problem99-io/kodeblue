@@ -281,6 +281,7 @@ kodeblue respond list / approve <id> / undo <id>
 kodeblue relearn && systemctl restart kodeblue  # after a big planned change (or Relearn on the hub's Overview)
 kodeblue sensors                                # what each sensor can see here, and which are off
 kodeblue sensors on outbound                    # turn a sensor back on (off <sensor> <reason> turns one off)
+sudo kodeblue upgrade v0.1.7                    # install that release (or Update on the hub's Overview); never automatic
 ```
 
 The workspace `/var/lib/kodeblue/workspace` holds everything the agents produced: `reports/` (one markdown file per incident, plus learning and review reports), `.kodeblue/skills`, and `.kodeblue/definitions`.

@@ -106,3 +106,8 @@ agent_messages_per_hour = 20     # cap on the agents' notify_slack tool
 # accept_settings = true                 # take the model endpoint, per-agent models and instructions, and approval
 #                                        # rules from the hub console; rules can only tighten [response] above
 # accept_learning = true                 # operators can run the learner or relearn the baseline from the hub
+# accept_upgrades = true                 # operators can start an upgrade to the hub's version (Update); never automatic
+
+# [upgrade] — where `kodeblue upgrade` and Update in the hub get releases from.
+# The release must match that release's SHA256SUMS; downgrades are refused.
+# release_url = "https://github.com/Problem99-io/kodeblue/releases/download"   # holds one <version>/ directory per release

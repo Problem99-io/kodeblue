@@ -83,12 +83,13 @@ The hub **cannot** loosen a server's policy or create containment of its own. Ap
 - protected users, IPs and services from the hub only add to the server's own, and the hub's containment limit only lowers the server's; agents' requests are checked against both before they reach the root helper, which applies the server's own
 - server settings cannot turn off detectors, lower the confidence that auto-accepts a finding as benign, or change the opt-outs below
 
-A stolen hub session can therefore approve containment an agent asked for, point the agents at another model endpoint, give them instructions, relearn a server (announced in Slack) or mark a vulnerability as an accepted risk (journaled on the server with the operator's name and reason), but not make a server act on its own, unless that server's root set `hub_max_mode = "contain"`, which lets the hub switch it to contain. Instructions cannot widen what agents may do either: their tools, the response policy and the protected users, IPs and units stay as the server configures them. Servers where that is too much set `accept_approvals = false`, `accept_settings = false` and `accept_learning = false`.
+A stolen hub session can therefore approve containment an agent asked for, point the agents at another model endpoint, give them instructions, relearn a server (announced in Slack), start an upgrade to the hub's version (only a newer, published release, downloaded and checked by the server itself) or mark a vulnerability as an accepted risk (journaled on the server with the operator's name and reason), but not make a server act on its own, unless that server's root set `hub_max_mode = "contain"`, which lets the hub switch it to contain. Instructions cannot widen what agents may do either: their tools, the response policy and the protected users, IPs and units stay as the server configures them. Servers where that is too much set `accept_approvals = false`, `accept_settings = false`, `accept_learning = false` and `accept_upgrades = false`.
 
 A server can opt out entirely, or limit what the hub sees, in `[hub]`:
 - `accept_approvals = false`: approve/deny only on the server
 - `accept_settings = false`: the console's model, instruction and approval settings are ignored
 - `accept_learning = false`: learning and relearning only on the server
+- `accept_upgrades = false`: upgrades only on the server (`sudo kodeblue upgrade <version>`)
 - `accept_messages = false`: no remote instructions, and vulnerabilities can be accepted, reopened or rechecked only by the server's agents and kodeblue itself
 - `share_transcripts = false`: no agent reasoning or tool output leaves the server
 - `messages_per_hour`: rate limit (default 20)
@@ -186,7 +187,7 @@ Useful flags:
 | `--no-start` | install without starting |
 | `--uninstall [--purge]` | remove kodeblue |
 
-Run the same command without `--token` to **upgrade** a server that is already enrolled; it authenticates with the server's own key (`/etc/kodeblue/hub.key`). See [deploy.md](deploy.md#upgrades). Upgrades open a journaled 10-minute maintenance window, so kodeblue swapping its own binaries is not reported as tampering.
+To **upgrade** a server from v0.1.7 on, click **Update** on its Overview, or **Update all** on the Servers page, once the hub runs the newer version. Nothing upgrades on its own: every upgrade is an operator's click (or root on the server), recorded in the audit log. See [deploy.md](deploy.md#servers). Older servers upgrade by running the same command without `--token`; it authenticates with the server's own key (`/etc/kodeblue/hub.key`). Upgrades open a journaled 10-minute maintenance window, so kodeblue swapping its own binaries is not reported as tampering.
 
 ## Hub CLI
 
