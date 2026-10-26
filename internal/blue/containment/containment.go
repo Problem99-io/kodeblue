@@ -68,6 +68,12 @@ func Propose(st *store.Store, r respond.Rule, by string) (View, error) {
 // List merges proposals with the helper's approved rules, most actionable
 // first: waiting for approval, active, paused, then the rest.
 func List(cfg config.Config, st *store.Store) []View {
+	return ListWith(cfg, st, respond.Load(cfg.Response.StateDir))
+}
+
+// ListWith is List counting fires in records, the action journal the
+// caller already loaded.
+func ListWith(cfg config.Config, st *store.Store, records []respond.Record) []View {
 	now := time.Now()
 	approved := map[string]respond.Rule{}
 	for _, r := range respond.LoadRules(cfg.Response.StateDir) {
@@ -103,7 +109,7 @@ func List(cfg config.Config, st *store.Store) []View {
 			byID[id] = &View{Rule: a, Hash: a.Hash()}
 		}
 	}
-	for _, rec := range respond.Load(cfg.Response.StateDir) {
+	for _, rec := range records {
 		id := respond.RuleOf(rec.RequestedBy)
 		v := byID[id]
 		if v == nil || rec.Status != "done" || rec.DoneAt.IsZero() {

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,9 +26,12 @@ func TestApplyRulesContainsAndRoutes(t *testing.T) {
 	if _, err := respond.ApproveRule(d.cfg.Response, r, r.Hash(), "root", time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	var mu sync.Mutex
 	var asked []respond.Request
 	d.ruleRun = func(_ context.Context, req respond.Request) (*respond.Record, error) {
+		mu.Lock()
 		asked = append(asked, req)
+		mu.Unlock()
 		if req.Params["ip"] == "192.0.2.66" {
 			return &respond.Record{Request: req, Status: "refused", Result: "192.0.2.66 is protected"}, nil
 		}
@@ -51,7 +56,9 @@ func TestApplyRulesContainsAndRoutes(t *testing.T) {
 	if len(left) != 3 || left[0] != protected || left[1] != critical || left[2] != other {
 		t.Fatalf("routed on: %v", ids)
 	}
-	if len(asked) != 3 || asked[0].RequestedBy != "rule:cr-ssh" || asked[0].Params["ip"] != "203.0.113.7" {
+	if len(asked) != 3 || !slices.ContainsFunc(asked, func(q respond.Request) bool {
+		return q.RequestedBy == "rule:cr-ssh" && q.Params["ip"] == "203.0.113.7"
+	}) {
 		t.Fatalf("asked the helper: %+v", asked)
 	}
 	if f := st.GetFinding(blocked.ID); f.Status != "closed" {
