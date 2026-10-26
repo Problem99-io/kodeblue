@@ -259,7 +259,8 @@ func (l *Link) syncOnce(ctx context.Context) error {
 	}
 	addSet("allow_rule", rules, now)
 	actions := map[string]any{}
-	for _, r := range respond.Load(l.cfg.Response.StateDir) {
+	journal := respond.Load(l.cfg.Response.StateDir)
+	for _, r := range journal {
 		actions[r.ID] = r // later records (undo) replace earlier ones
 	}
 	addSet("action", actions, now)
@@ -285,7 +286,7 @@ func (l *Link) syncOnce(ctx context.Context) error {
 	}
 	addSet("vulnerability", vulns, now)
 	crules := map[string]any{}
-	for _, v := range containment.List(l.cfg, l.st) {
+	for _, v := range containment.ListWith(l.cfg, l.st, journal) {
 		crules[v.ID] = v
 	}
 	addSet("containment_rule", crules, now)
