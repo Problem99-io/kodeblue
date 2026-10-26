@@ -32,6 +32,52 @@ fast watch (5s) ─► sensors (60s, 0 tokens) ─► deterministic filters (0 t
 
 An optional **hub** (`kodeblue-hub`) gives a fleet one console: every server's incidents, reports, the agents' reasoning and tool calls (live), monitors, findings and pending approvals, and a way to message the agents. Servers only dial out to it, always over TLS (plain HTTP is allowed only to a hub on the same machine).
 
+## Quick start
+
+Each step is one command plus your model's API key, on Linux with systemd (amd64 or arm64; see [Requirements](#requirements)). The installers download the latest [release](https://github.com/Problem99-io/kodeblue/releases) for the server's architecture and check it against the release's `SHA256SUMS` before installing. To download and check the files yourself, or to build them, see [docs/deploy.md](docs/deploy.md#install-from-the-release-files) and [Build](#build).
+
+### A. One server, no hub
+
+```bash
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
+```
+
+Use any OpenAI-compatible endpoint, with or without `/v1` at the end. The installer asks for its API key and an optional Slack webhook (input is not echoed), and starts kodeblue. kodeblue takes snapshots of the server for about 30 minutes. A learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours.
+
+Without `--inference-url`, kodeblue starts watching after the snapshots, and the learning session and assessment wait until you set a model; they then run on their own. Set or change the model, and its key, with one command (it asks for the key and restarts kodeblue):
+
+```bash
+sudo kodeblue inference --url https://openrouter.ai/api --model <model> --key-file -
+```
+
+Then review the policy (response mode, protected users, IPs and units, budget) with `sudoedit /etc/kodeblue/kodeblue.toml`, and follow along with `sudo journalctl -fu kodeblue`.
+
+### B. A hub and several servers
+
+On the hub host, here with a self-signed certificate that servers pin:
+
+```bash
+curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
+```
+
+Or run the hub image: `ghcr.io/problem99-io/kodeblue-hub:latest` (see [docs/deploy.md](docs/deploy.md#with-docker)).
+
+The installer asks for the first operator's password (twice) and starts the hub. Then:
+
+1. Sign in at the public URL. The browser warns once about the self-signed certificate.
+2. Open **Settings**, choose **Add connection** and paste your model's API key. The hub then asks which model every agent should use.
+3. Open **Servers**, choose **Add server**, and run the command it prints on the server, as root or as a user with sudo. Start the line with a space so the token stays out of your shell history (see [docs/deploy.md](docs/deploy.md#keep-the-token-out-of-your-shell-history)). The command looks like this:
+
+```bash
+ f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey 'sha256//…' -o "$f" https://hub.example.com:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://hub.example.com:8443 --pin 'sha256//…' --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
+```
+
+It saves the installer, checks its hash before running it as root, and passes the single-use token on stdin so it never appears in a process's arguments. The server takes the hub's model and key at enrollment and asks nothing. A server that has no model yet watches with its deterministic detection, and the hub shows that its learning is waiting for one.
+
+For a hub on the internet, we recommend putting it behind Cloudflare with a `cloudflared` tunnel: the hub host opens no port, servers verify Cloudflare's public certificate (no pin), and Cloudflare Access can guard the console. Cloudflare then sees the traffic between servers and the hub; see [docs/deploy.md](docs/deploy.md#behind-cloudflare) for the setup and the trade-off.
+
+To hide the console from everyone but your office or VPN, add `--console-allow 203.0.113.7,10.66.0.0/24` (servers can still enroll and sync). For a real certificate, a reverse proxy, Docker or WireGuard, see [docs/deploy.md](docs/deploy.md) and [docs/hardening.md](docs/hardening.md).
+
 ## The problem
 
 Scanning, brute forcing and exploiting used to take a person at a keyboard. Now it takes an agent loop and a list of IPs. The attacking side is automated; on most servers the defending side still waits for a human.
@@ -164,52 +210,6 @@ These are estimates at about $0.20 per million input tokens, with prompt caching
 - an OpenAI-compatible model endpoint (a hosted API, OpenRouter, or your own vLLM, Ollama or LiteLLM; for a keyless endpoint give any placeholder as the key), or none: without one, kodeblue runs sensors, detection and monitors, and its learning waits until you add one
 - to build: Go (the version in `go.mod`)
 - for the hub: a small Linux host or a Docker host that your servers can reach over HTTPS
-
-## Quick start
-
-Each step is one command plus your model's API key. The installers download the latest [release](https://github.com/Problem99-io/kodeblue/releases) for the server's architecture and check it against the release's `SHA256SUMS` before installing. To download and check the files yourself, or to build them, see [docs/deploy.md](docs/deploy.md#install-from-the-release-files) and [Build](#build).
-
-### A. One server, no hub
-
-```bash
-curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
-```
-
-Use any OpenAI-compatible endpoint, with or without `/v1` at the end. The installer asks for its API key and an optional Slack webhook (input is not echoed), and starts kodeblue. kodeblue takes snapshots of the server for about 30 minutes. A learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours.
-
-Without `--inference-url`, kodeblue starts watching after the snapshots, and the learning session and assessment wait until you set a model; they then run on their own. Set or change the model, and its key, with one command (it asks for the key and restarts kodeblue):
-
-```bash
-sudo kodeblue inference --url https://openrouter.ai/api --model <model> --key-file -
-```
-
-Then review the policy (response mode, protected users, IPs and units, budget) with `sudoedit /etc/kodeblue/kodeblue.toml`, and follow along with `sudo journalctl -fu kodeblue`.
-
-### B. A hub and several servers
-
-On the hub host, here with a self-signed certificate that servers pin:
-
-```bash
-curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install-hub.sh | sudo sh -s -- --public-url https://hub.example.com:8443 --self-signed
-```
-
-Or run the hub image: `ghcr.io/problem99-io/kodeblue-hub:latest` (see [docs/deploy.md](docs/deploy.md#with-docker)).
-
-The installer asks for the first operator's password (twice) and starts the hub. Then:
-
-1. Sign in at the public URL. The browser warns once about the self-signed certificate.
-2. Open **Settings**, choose **Add connection** and paste your model's API key. The hub then asks which model every agent should use.
-3. Open **Servers**, choose **Add server**, and run the command it prints on the server, as root or as a user with sudo. Start the line with a space so the token stays out of your shell history (see [docs/deploy.md](docs/deploy.md#keep-the-token-out-of-your-shell-history)). The command looks like this:
-
-```bash
- f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey 'sha256//…' -o "$f" https://hub.example.com:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://hub.example.com:8443 --pin 'sha256//…' --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
-```
-
-It saves the installer, checks its hash before running it as root, and passes the single-use token on stdin so it never appears in a process's arguments. The server takes the hub's model and key at enrollment and asks nothing. A server that has no model yet watches with its deterministic detection, and the hub shows that its learning is waiting for one.
-
-For a hub on the internet, we recommend putting it behind Cloudflare with a `cloudflared` tunnel: the hub host opens no port, servers verify Cloudflare's public certificate (no pin), and Cloudflare Access can guard the console. Cloudflare then sees the traffic between servers and the hub; see [docs/deploy.md](docs/deploy.md#behind-cloudflare) for the setup and the trade-off.
-
-To hide the console from everyone but your office or VPN, add `--console-allow 203.0.113.7,10.66.0.0/24` (servers can still enroll and sync). For a real certificate, a reverse proxy, Docker or WireGuard, see [docs/deploy.md](docs/deploy.md) and [docs/hardening.md](docs/hardening.md).
 
 ## Documentation
 
