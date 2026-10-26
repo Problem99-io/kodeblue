@@ -126,6 +126,33 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+// A CNA that names a package rather than a vendor and product still names
+// it: the Mautic CVE that mentions "the official Mautic Docker image" is not
+// about Docker, and a Debian package name matches the package.
+func TestPackageNameIsTheProduct(t *testing.T) {
+	const page = `{"vulnerabilities":[
+{"cve":{"id":"CVE-2026-115188","descriptions":[{"lang":"en","value":"Unrestricted upload in Mautic 7. On the default Apache setup of the official Mautic Docker image this leads to remote code execution."}],
+ "affected":[{"affectedData":[{"defaultStatus":"unaffected","collectionURL":"https://packagist.org","packageName":"mautic/core","versions":[{"version":"7.0.0","lessThan":"7.2.2","status":"affected"}]}]}]}},
+{"cve":{"id":"CVE-2026-5","descriptions":[{"lang":"en","value":"A bug."}],
+ "affected":[{"affectedData":[{"vendor":"n/a","product":"n/a","collectionURL":"https://salsa.debian.org","packageName":"openssh"}]}]}}
+]}`
+	var p nvdPage
+	if err := json.Unmarshal([]byte(page), &p); err != nil {
+		t.Fatal(err)
+	}
+	var cves []CVE
+	for _, v := range p.Vulnerabilities {
+		cves = append(cves, v.CVE.trim())
+	}
+	if ps := cves[0].Products; len(ps) != 1 || ps[0].Product != "mautic/core" || ps[0].Versions != "7.0.0 to <7.2.2" {
+		t.Errorf("package read wrong: %+v", ps)
+	}
+	got := Match(cves, nil, []Term{{Name: "docker", From: "service docker"}, {Name: "openssh", From: "package openssh-server", Package: true}}, time.Now())
+	if len(got) != 1 || got[0].ID != "CVE-2026-5" || got[0].How != "product" {
+		t.Errorf("matched %+v", got)
+	}
+}
+
 // cisa.gov refusing a server (403) falls back to CISA's GitHub copy.
 func TestExploitedFallsBackToMirror(t *testing.T) {
 	var hits []string

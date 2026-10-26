@@ -250,10 +250,13 @@ type nvdCVE struct {
 	// days or weeks before NVD adds its own configurations.
 	Affected []struct {
 		AffectedData []struct {
-			Vendor   string   `json:"vendor"`
-			Product  string   `json:"product"`
-			CPEs     []string `json:"cpes"`
-			Versions []struct {
+			Vendor  string `json:"vendor"`
+			Product string `json:"product"`
+			// A CNA may name a package instead (CVE 5): "mautic/core" from
+			// packagist, "openssh" from Debian.
+			PackageName string   `json:"packageName"`
+			CPEs        []string `json:"cpes"`
+			Versions    []struct {
 				Version         string `json:"version"`
 				Status          string `json:"status"`
 				LessThan        string `json:"lessThan"`
@@ -326,7 +329,11 @@ func (n nvdCVE) trim() CVE {
 					vs = append(vs, v.Version)
 				}
 			}
-			add(Product{Vendor: ad.Vendor, Product: ad.Product, Versions: clip(strings.Join(vs, ", "), 300)})
+			name := ad.Product
+			if !Usable(name) && ad.PackageName != "" {
+				name = ad.PackageName
+			}
+			add(Product{Vendor: ad.Vendor, Product: name, Versions: clip(strings.Join(vs, ", "), 300)})
 			for _, cpe := range ad.CPEs {
 				if v, p, ok := cpeProduct(cpe); ok {
 					add(Product{Vendor: v, Product: p})
