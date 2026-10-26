@@ -125,3 +125,26 @@ func TestMatch(t *testing.T) {
 		t.Errorf("package term matched a description: %+v", m)
 	}
 }
+
+// cisa.gov refusing a server (403) falls back to CISA's GitHub copy.
+func TestExploitedFallsBackToMirror(t *testing.T) {
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		if r.URL.Path == "/cisa" {
+			http.Error(w, "denied", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(kevCatalog))
+	}))
+	defer srv.Close()
+	c := Client{KEV: srv.URL + "/cisa", KEVMirror: srv.URL + "/github"}
+	kev, err := c.ExploitedSince(context.Background(), time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(kev) != 2 || strings.Join(hits, ",") != "/cisa,/github" {
+		t.Fatalf("kev %d err %v hits %v", len(kev), err, hits)
+	}
+	c.KEVMirror = srv.URL + "/cisa"
+	if _, err := c.ExploitedSince(context.Background(), time.Now()); err == nil {
+		t.Error("both failing must fail")
+	}
+}
