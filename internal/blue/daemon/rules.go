@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/containment"
@@ -15,6 +16,9 @@ import (
 	"github.com/Problem99-io/kodeblue/internal/blue/respond"
 	"github.com/Problem99-io/kodeblue/internal/blue/store"
 )
+
+// ruleWorkers is how many findings' rule actions run at once.
+const ruleWorkers = 4
 
 // applyRules answers findings that an approved containment rule covers,
 // before triage reads them: the attack was seen before, a person approved
@@ -27,9 +31,24 @@ func (d *Daemon) applyRules(ctx context.Context, all []*store.Finding) []*store.
 	if len(rules) == 0 || d.cfg.Response.Mode == "off" {
 		return all
 	}
+	// A flood brings many findings at once, and each action is a helper run
+	// (with DNS lookups for block_ip): run a few side by side so the sweep
+	// does not wait for them one by one. The helper serializes what must be.
+	results := make([][]containment.Fired, len(all))
+	sem := make(chan struct{}, ruleWorkers)
+	var wg sync.WaitGroup
+	for i, f := range all {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			results[i] = containment.Fire(ctx, rules, f, d.ruleCheck, d.ruleRun)
+		}()
+	}
+	wg.Wait()
 	out := all[:0:0]
-	for _, f := range all {
-		fired := containment.Fire(ctx, rules, f, d.ruleCheck, d.ruleRun)
+	for i, f := range all {
+		fired := results[i]
 		if len(fired) == 0 {
 			out = append(out, f)
 			continue
