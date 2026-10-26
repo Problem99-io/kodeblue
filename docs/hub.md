@@ -177,6 +177,11 @@ Changing settings applies to pending and future notifications; historical skippe
 completed deliveries are not replayed. Messages are one-way plain text with previews,
 links and mentions neutralized; Telegram replies cannot execute commands.
 
+The hub exposes separate save, clear, minimum-severity and test-message controls
+for Telegram. This local preview has no bot token or chat configured.
+
+![Telegram notification settings in the hub](assets/telegram-settings.jpg)
+
 ### Fleet defaults
 
 So a server can be installed with one command, the hub hands the fleet's default model, its connection and that connection's key to new servers at enrollment. The other roles' models follow on the first sync. Set them in **Settings**, or set one connection (it appears as "Default") on the hub host:
