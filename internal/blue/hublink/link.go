@@ -690,7 +690,7 @@ func (l *Link) decide(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		}
 	}
 	by := "hub:" + m.Author
-	slack := notify.New(l.cfg.Hub.Enabled(), l.st, l.cfg.Notify.SlackWebhookURL, l.cfg.Notify.SlackWebhookFile, l.cfg.Notify.Direct)
+	slack := notify.New(l.cfg.Hub.Enabled(), l.st, l.cfg.Notify.SlackWebhookURL, l.cfg.Notify.SlackWebhookFile, l.cfg.Notify.Direct, notify.TelegramFromConfig(l.cfg.Notify.TelegramBotToken, l.cfg.Notify.TelegramBotTokenFile, l.cfg.Notify.TelegramChatID, l.cfg.Notify.TelegramChatIDFile))
 	note := func(title, body string) {
 		slack.Async(notify.Message{Server: l.cfg.Server.Name, Kind: "action", Severity: "high", IncidentID: r.IncidentID,
 			Title: title, Body: body, Fields: map[string]string{"Action id": r.ID, "Operator": m.Author}}, nil)

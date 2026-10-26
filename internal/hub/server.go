@@ -652,7 +652,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, c *opCtx) 
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": c.user, "csrf": c.csrf, "pin": s.opt.Pin,
-		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured, "version": hubproto.Version})
+		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured, "telegram": s.st.TelegramSettings().Configured, "version": hubproto.Version})
 }
 
 type fleetRow struct {

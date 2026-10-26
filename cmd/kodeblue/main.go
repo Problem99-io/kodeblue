@@ -665,7 +665,7 @@ func announce(cfg config.Config, title, body, id string, incident int64) {
 		defer st.Close()
 		q = st
 	}
-	sl := notify.New(cfg.Hub.Enabled(), q, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)
+	sl := notify.New(cfg.Hub.Enabled(), q, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct, notify.TelegramFromConfig(cfg.Notify.TelegramBotToken, cfg.Notify.TelegramBotTokenFile, cfg.Notify.TelegramChatID, cfg.Notify.TelegramChatIDFile))
 	if !notify.Enabled(sl) {
 		return
 	}

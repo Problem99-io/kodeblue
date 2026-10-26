@@ -1,6 +1,6 @@
 package hub
 
-// Slack lives in the control center. Servers never hold a Slack webhook when
+// Notification delivery lives in the control center. Servers never hold a Slack webhook when
 // they report to a hub: they queue notifications (agent posts, containment
 // actions, incidents, maintenance windows…) and ship them with their sync.
 // The hub stores each one, shows it in the console, and posts it to the
@@ -36,7 +36,17 @@ CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, 
   status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '', delivered_at INTEGER NOT NULL DEFAULT 0, UNIQUE(server_id, rid));
 CREATE INDEX IF NOT EXISTS notifications_status ON notifications(status, next_try);
-CREATE INDEX IF NOT EXISTS notifications_server ON notifications(server_id, id);`); err != nil {
+CREATE INDEX IF NOT EXISTS notifications_server ON notifications(server_id, id);
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+  next_try INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', delivered_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(notification_id, provider));
+CREATE INDEX IF NOT EXISTS notification_deliveries_due ON notification_deliveries(provider,status,next_try);
+INSERT OR IGNORE INTO notification_deliveries(notification_id,provider,status,attempts,next_try,error,delivered_at)
+  SELECT id,'slack',status,attempts,next_try,error,delivered_at FROM notifications;
+INSERT OR IGNORE INTO notification_deliveries(notification_id,provider)
+  SELECT id,'telegram' FROM notifications WHERE status='pending';`); err != nil {
 		return err
 	}
 	// Earlier hubs kept a "fleet default" webhook to hand to servers; it is
@@ -77,6 +87,15 @@ ON CONFLICT(server_id,rid) DO NOTHING`, server, r.ID, r.UpdatedAt.Unix(), time.N
 		return false, err
 	}
 	added, _ := res.RowsAffected()
+	if added > 0 {
+		id, err := res.LastInsertId()
+		if err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(`INSERT INTO notification_deliveries(notification_id,provider) VALUES(?,'slack'),(?,'telegram')`, id, id); err != nil {
+			return false, err
+		}
+	}
 	return added > 0, nil
 }
 
@@ -108,9 +127,10 @@ FROM notifications n JOIN servers s ON s.id=n.server_id`
 	return s.notifications(q+` ORDER BY n.id DESC LIMIT ?`, append(args, limit)...)
 }
 
-func (s *Store) dueNotifications(limit int) []Notification {
-	return s.notifications(`SELECT n.id,n.server_id,s.name,n.at,n.kind,n.severity,n.title,n.body,n.fields,n.incident_id,n.status,n.attempts,n.error,n.delivered_at
-FROM notifications n JOIN servers s ON s.id=n.server_id WHERE n.status='pending' AND n.next_try<=? ORDER BY n.id LIMIT ?`, time.Now().Unix(), limit)
+func (s *Store) dueNotifications(provider string, limit int) []Notification {
+	return s.notifications(`SELECT n.id,n.server_id,s.name,n.at,n.kind,n.severity,n.title,n.body,n.fields,n.incident_id,d.status,d.attempts,d.error,d.delivered_at
+FROM notification_deliveries d JOIN notifications n ON n.id=d.notification_id JOIN servers s ON s.id=n.server_id
+WHERE d.provider=? AND d.status='pending' AND d.next_try<=? ORDER BY n.id LIMIT ?`, provider, time.Now().Unix(), limit)
 }
 
 func (s *Store) notifications(q string, args ...any) []Notification {
@@ -135,12 +155,29 @@ func (s *Store) notifications(q string, args ...any) []Notification {
 	return out
 }
 
-func (s *Store) markNotification(id int64, status, errText string, attempts int, next time.Time) {
+func (s *Store) markNotification(provider string, id int64, status, errText string, attempts int, next time.Time) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
 	del := int64(0)
 	if status == "delivered" {
 		del = time.Now().Unix()
 	}
-	_, _ = s.db.Exec(`UPDATE notifications SET status=?, error=?, attempts=?, next_try=?, delivered_at=? WHERE id=?`, status, trim(errText, 500), attempts, next.Unix(), del, id)
+	_, err = tx.Exec(`UPDATE notification_deliveries SET status=?,error=?,attempts=?,next_try=?,delivered_at=? WHERE notification_id=? AND provider=?`, status, trim(errText, 500), attempts, next.Unix(), del, id, provider)
+	if err != nil {
+		return
+	}
+	// Keep the notification history's summary, with independent retries per destination.
+	_, err = tx.Exec(`UPDATE notifications SET
+status=(SELECT CASE WHEN SUM(status='pending')>0 THEN 'pending' WHEN SUM(status='failed')>0 THEN 'failed' WHEN SUM(status='delivered')>0 THEN 'delivered' ELSE 'skipped' END FROM notification_deliveries WHERE notification_id=?),
+attempts=(SELECT MAX(attempts) FROM notification_deliveries WHERE notification_id=?),
+error=COALESCE((SELECT GROUP_CONCAT(provider || ': ' || error, '; ') FROM notification_deliveries WHERE notification_id=? AND error!='' AND status IN ('pending','failed')),''),
+delivered_at=(SELECT MAX(delivered_at) FROM notification_deliveries WHERE notification_id=?) WHERE id=?`, id, id, id, id, id)
+	if err == nil {
+		_ = tx.Commit()
+	}
 }
 
 // SlackSettings is what the console may see: never the webhook itself.
@@ -186,11 +223,11 @@ func (s *Server) wakeSlack() {
 	}
 }
 
-// SlackForwarder posts stored notifications to the fleet's Slack channel
+// NotificationForwarder posts stored notifications to configured destinations
 // until ctx ends: at most one in flight, retries with backoff, and a final
 // "failed" after slackMaxAttempts. The server name comes from the hub, not
 // from the server's own data, so a server cannot post as another.
-func (s *Server) SlackForwarder(ctx context.Context) {
+func (s *Server) NotificationForwarder(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
@@ -205,47 +242,52 @@ func (s *Server) SlackForwarder(ctx context.Context) {
 }
 
 func (s *Server) forwardDue(ctx context.Context) {
-	for _, n := range s.st.dueNotifications(50) {
-		if ctx.Err() != nil {
-			return
+	for _, provider := range []string{"slack", "telegram"} {
+		for _, n := range s.st.dueNotifications(provider, 50) {
+			if ctx.Err() != nil {
+				return
+			}
+			var sender notify.Sender
+			var minimum string
+			if provider == "slack" {
+				minimum = s.st.SlackSettings().MinSeverity
+				if sl := s.slackTo(s.st.Setting(settingSlackWebhook)); sl != nil {
+					sender = sl
+				}
+			} else {
+				minimum = s.st.TelegramSettings().MinSeverity
+				if tg := s.telegram(); tg != nil {
+					sender = tg
+				}
+			}
+			if sender == nil || sevRank[n.Severity] < sevRank[minimum] {
+				s.st.markNotification(provider, n.ID, "skipped", "", n.Attempts, time.Time{})
+				continue
+			}
+			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			err := sender.Send(cctx, notify.Message{Server: n.ServerName, Kind: n.Kind, Severity: n.Severity, Title: n.Title, Body: n.Body, Fields: n.Fields, IncidentID: n.IncidentID})
+			cancel()
+			if err == nil {
+				s.st.markNotification(provider, n.ID, "delivered", "", n.Attempts+1, time.Time{})
+				continue
+			}
+			attempts := n.Attempts + 1
+			if attempts >= slackMaxAttempts {
+				s.st.markNotification(provider, n.ID, "failed", err.Error(), attempts, time.Time{})
+				s.log.Error("notification delivery failed for good", "provider", provider, "notification", n.ID, "error", err)
+				continue
+			}
+			backoff := time.Duration(30<<min(attempts, 6)) * time.Second
+			s.st.markNotification(provider, n.ID, "pending", err.Error(), attempts, time.Now().Add(backoff))
+			s.log.Warn("notification delivery failed; will retry", "provider", provider, "notification", n.ID, "attempt", attempts, "error", err)
 		}
-		set := s.st.SlackSettings()
-		hook := s.st.Setting(settingSlackWebhook)
-		switch {
-		case hook == "":
-			s.st.markNotification(n.ID, "skipped", "Slack is not configured on the hub", n.Attempts, time.Time{})
-			continue
-		case sevRank[n.Severity] < sevRank[set.MinSeverity]:
-			s.st.markNotification(n.ID, "skipped", "below the hub's minimum severity ("+set.MinSeverity+")", n.Attempts, time.Time{})
-			continue
-		}
-		sl := s.slackTo(hook)
-		if sl == nil {
-			s.st.markNotification(n.ID, "failed", "invalid webhook URL", n.Attempts, time.Time{})
-			continue
-		}
-		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := sl.Send(cctx, notify.Message{Server: n.ServerName, Kind: n.Kind, Severity: n.Severity, Title: n.Title, Body: n.Body, Fields: n.Fields})
-		cancel()
-		if err == nil {
-			s.st.markNotification(n.ID, "delivered", "", n.Attempts+1, time.Time{})
-			continue
-		}
-		attempts := n.Attempts + 1
-		if attempts >= slackMaxAttempts {
-			s.st.markNotification(n.ID, "failed", err.Error(), attempts, time.Time{})
-			s.log.Error("slack delivery failed for good", "notification", n.ID, "error", err)
-			continue
-		}
-		backoff := time.Duration(30<<min(attempts, 6)) * time.Second // 1m … 32m
-		s.st.markNotification(n.ID, "pending", err.Error(), attempts, time.Now().Add(backoff))
-		s.log.Warn("slack delivery failed; will retry", "notification", n.ID, "attempt", attempts, "error", err)
 	}
 }
 
 // ---- operator API ----
 
 func (s *Server) slackRoutes() {
+	s.telegramRoutes()
 	s.mux.HandleFunc("GET /api/notifications", s.op(s.handleNotifications))
 	s.mux.HandleFunc("GET /api/settings/slack", s.op(s.handleSlackGet))
 	s.mux.HandleFunc("PUT /api/settings/slack", s.op(s.handleSlackPut))

@@ -71,8 +71,8 @@ protected_units = ["ssh", "sshd", "kodeblue", "systemd-*", "dbus", "networking",
 max_actions_per_hour = 10
 
 [notify]
-# With a kodeblue hub, Slack is configured on the hub (Settings): this server
-# queues its notifications and the hub posts them; the webhook below is ignored
+# With a kodeblue hub, Slack and Telegram are configured on the hub (Settings): this server
+# queues its notifications and the hub posts them; local destinations are ignored
 # unless direct = true (an extra, independent channel the hub cannot suppress).
 # direct = false
 #
@@ -80,6 +80,10 @@ max_actions_per_hour = 10
 # Put the webhook URL in this file (root:kodeblue 0640) — it is a credential.
 slack_webhook_file = "/etc/kodeblue/slack.webhook"
 # slack_webhook_url = "https://hooks.slack.com/services/…"   # inline alternative
+# Telegram can be used alone or alongside Slack. Create a bot with @BotFather.
+telegram_bot_token_file = "/etc/kodeblue/telegram.token"
+telegram_chat_id_file = "/etc/kodeblue/telegram.chat"
+# telegram_chat_id = "-1001234567890"  # numeric ID or @channelusername
 min_severity = "high"            # automatic incident-opened/outcome notices at or above this
                                  # (agents still post anything suspicious themselves)
 agent_messages_per_hour = 20     # cap on the agents' notify_slack tool

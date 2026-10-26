@@ -165,6 +165,11 @@ type Budget struct {
 }
 
 type Notify struct {
+	// Telegram bot token is a credential; prefer a root-owned file.
+	TelegramBotToken     string `toml:"telegram_bot_token"`
+	TelegramBotTokenFile string `toml:"telegram_bot_token_file"`
+	TelegramChatID       string `toml:"telegram_chat_id"`
+	TelegramChatIDFile   string `toml:"telegram_chat_id_file"`
 	// Slack incoming webhook (one-way updates to a channel). Prefer the file:
 	// the URL is a credential.
 	SlackWebhookURL  string `toml:"slack_webhook_url"`
@@ -174,8 +179,8 @@ type Notify struct {
 	MinSeverity string `toml:"min_severity"`
 	// AgentMessagesPerHour caps the notify_slack tool.
 	AgentMessagesPerHour int `toml:"agent_messages_per_hour"`
-	// With a hub, Slack belongs to the hub: notifications are queued for it
-	// and the local webhook is ignored. Direct = true also posts straight
+	// With a hub, notification delivery belongs to the hub: notifications are queued for it
+	// and local destinations are ignored. Direct = true also posts straight
 	// from this server — an independent channel a compromised hub cannot
 	// suppress.
 	Direct bool `toml:"direct"`
@@ -256,7 +261,7 @@ func Default() Config {
 		Detect:   Detect{DebounceSweeps: 2, RealertHours: 24, BruteForceThreshold: 20, AutoAcceptConfidence: 0.85},
 		Budget:   Budget{DailyUSD: 1.0, HubMaxDailyUSD: 20, MaxConcurrentIncidents: 2, IncidentMaxIterations: 30, MaxIncidentsPerHour: 6},
 		Response: respond.DefaultPolicy(),
-		Notify:   Notify{SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
+		Notify:   Notify{TelegramBotTokenFile: "/etc/kodeblue/telegram.token", TelegramChatIDFile: "/etc/kodeblue/telegram.chat", SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
 		Engine:   Engine{},
 		CVEFeed:  CVEFeed{Enabled: true, NVD: true, KEV: true},
 		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true, AcceptUpgrades: true},

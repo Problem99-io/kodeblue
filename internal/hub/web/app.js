@@ -554,9 +554,9 @@ async function openBell(anchor) {
         n.status !== "delivered" ? h("span", { class: n.status === "failed" ? "c-red" : "" }, n.status) : null, h("span", null, ago(n.at)))));
   menu(anchor, [
     h("div", { class: "np-hd" }, h("span", { class: "np-t" }, "Notifications"), fresh ? h("span", { class: "badge b-accent" }, fresh + " new") : null,
-      h("div", { class: "sp" }), h("a", { class: "ibtn", href: "#/settings", title: "Slack settings", "aria-label": "Slack settings" }, ic("sliders", 13))),
+      h("div", { class: "sp" }), h("a", { class: "ibtn", href: "#/settings", title: "Notification settings", "aria-label": "Notification settings" }, ic("sliders", 13))),
     BELL.off ? h("div", { class: "np-empty" }, "This hub does not send notifications yet.")
-      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, "You're all caught up."), h("span", { class: "faint small" }, "Alerts kodeblue sends to Slack show up here."))
+      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, "You're all caught up."), h("span", { class: "faint small" }, "Alerts kodeblue sends to configured destinations show up here."))
       : h("div", { class: "np-list" }, list.slice(0, 15).map(item)),
     h("a", { class: "np-all", href: "#/notifications" }, "View all notifications", ic("chevRight", 12)),
   ], "npop");
@@ -1745,7 +1745,7 @@ function learningControls(srv, cmds, after) {
       : await ask("Relearn " + srv.name + "?", [
         h("p", null, "kodeblue collects the baseline again and treats everything the server runs during that window as normal, then runs the learner (if models are on)."),
         h("p", null, h("b", null, "Do this after planned changes, not while you suspect a compromise:"), " anything malicious running now would be learned as normal."),
-        h("p", { class: "muted small" }, "The run is announced in Slack.")], "Relearn", true);
+        h("p", { class: "muted small" }, "The run is announced through configured notification destinations.")], "Relearn", true);
     if (!ok) return;
     btn.disabled = true;
     try {
@@ -1940,7 +1940,7 @@ function paintApprovals() {
 function noteEvent(n) {
   const bad = n.status === "failed";
   return h("div", { class: "turn" }, h("div", { class: "sysev" + (bad ? " bad" : "") }, ic("bell", 12),
-    h("span", null, n.status === "skipped" ? "Not posted to Slack (skipped)" : n.status === "pending" ? "Posting to Slack…" : bad ? "Slack post failed" : "Posted to Slack"),
+    h("span", null, n.status === "skipped" ? "Not posted (skipped)" : n.status === "pending" ? "Delivering notification…" : bad ? "Notification delivery failed" : "Notification delivered"),
     h("span", { class: "sep" }, "·"), h("span", { class: "sev-" + (SEV.includes(n.severity) ? n.severity : "info") }, n.severity || "info"),
     h("span", { class: "sep" }, "·"), h("span", { class: "sev-title" }, n.title || n.kind || "notification"),
     bad && n.error ? h("span", { class: "err" }, "(" + n.error + ")") : null,
@@ -2891,21 +2891,21 @@ async function vNotifications(srv, main) {
   const body = h("div", { class: "stack" }, h("div", { class: "empty" }, "Loading…"));
   status.addEventListener("change", () => { S.cache.noteStatus = status.value; body.dataset.sig = ""; draw(); });
   main.append(h("div", { class: "toolbar" }, srv ? null : h("h1", null, "Notifications"),
-    h("span", { class: "muted small" }, "What kodeblue sent to Slack" + (srv ? " from " + srv.name : " across the fleet") + ", newest first."),
-    h("div", { class: "sp" }), status, h("a", { class: "btn small", href: "#/settings" }, ic("sliders", 12), "Slack settings")), body);
+    h("span", { class: "muted small" }, "What kodeblue sent to notification destinations" + (srv ? " from " + srv.name : " across the fleet") + ", newest first."),
+    h("div", { class: "sp" }), status, h("a", { class: "btn small", href: "#/settings" }, ic("sliders", 12), "Notification settings")), body);
   const draw = async () => {
     let list;
     try { list = await api("GET", "/api/notifications?limit=200" + (srv ? "&server_id=" + enc(srv.id) : "")); }
     catch (e) {
       if (e.status === 401) return;
       if (unchanged(body, "err", e.message)) return;
-      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, e.status === 404 ? "This hub does not deliver Slack notifications yet." : "Could not load notifications: " + e.message)));
+      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, e.status === 404 ? "This hub does not deliver notifications yet." : "Could not load notifications: " + e.message)));
       return;
     }
     list = (list || []).filter((n) => !S.cache.noteStatus || n.status === S.cache.noteStatus);
     if (unchanged(body, "notes", list)) return;
     if (!list.length) {
-      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : "Nothing sent to Slack yet.")));
+      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : "No notifications sent yet.")));
       return;
     }
     sync(body, h("div", { class: "panel" }, h("div", { class: "nlist" }, list.map((n) => {
@@ -2983,6 +2983,7 @@ async function vSettings(main) {
     if (r && r.ok) say("Test message delivered to Slack."); else say("Test failed: " + ((r && r.error) || "unknown error"), true);
   }));
   const agents = h("div", { class: "stack" });
+  const telegram = h("div");
   body.append(agents,
     panel("Slack", h("div", { class: "bd stack" },
       h("div", { class: "setrow" }, h("span", { class: "fg" }, "Incoming webhook"), status),
@@ -2993,10 +2994,12 @@ async function vSettings(main) {
         h("span", { class: "note" }, "Notifications below this severity are listed on the hub but not posted.")),
       h("div", { class: "btns" }, test, h("a", { class: "small", href: "#/notifications" }, "Notification history")),
       msg), null, "purple"),
+    telegram,
     panel("Hub", h("div", { class: "bd" }, h("dl", { class: "kv" },
       h("dt", null, "Signed in as"), h("dd", null, S.me ? S.me.name : "—"),
       h("dt", null, "Operators"), h("dd", null, h("code", null, "kodeblue-hub user add <name>")),
       h("dt", null, "Audit"), h("dd", null, h("a", { href: "#/audit" }, "Audit log"))))));
+  vTelegramSettings(telegram);
   fleetAgents(agents);
   try { paint(await api("GET", "/api/settings/slack")); }
   catch (e) {
@@ -3006,6 +3009,73 @@ async function vSettings(main) {
     say(e.status === 404 ? "This hub does not support Slack settings yet." : "Could not load Slack settings: " + e.message, true);
   }
 }
+
+async function vTelegramSettings(main) {
+  const body = h("div", { class: "stack narrow" });
+  main.append(body);
+  const status = h("span", { class: "badge" }, "…");
+  const url = h("input", { type: "password", class: "full", autocomplete: "off", spellcheck: "false", placeholder: "BotFather token", "aria-label": "Telegram bot token" });
+  const chat = h("input", { class: "full", autocomplete: "off", spellcheck: "false", placeholder: "-1001234567890 or @channelusername", "aria-label": "Telegram chat ID" });
+  const save = h("button", { class: "btn primary", type: "button" }, "Save Telegram");
+  const clr = h("button", { class: "btn danger", type: "button" }, "Clear");
+  const sev = h("select", { class: "sel", "aria-label": "Minimum severity" }, ["info", "low", "medium", "high", "critical"].map((s) => h("option", { value: s }, s)));
+  const test = h("button", { class: "btn", type: "button" }, ic("send", 12), "Send test message");
+  const msg = h("div", { class: "smsg", role: "status" });
+  const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  let cur = null;
+  const paint = (s) => {
+    cur = s;
+    chat.value = s.chat_id || "";
+    status.className = "badge " + (s.configured ? "b-ok" : "");
+    status.textContent = s.configured ? "configured" : "not configured";
+    test.disabled = !s.configured;
+    test.title = s.configured ? "" : "Save a bot token and chat ID first";
+    if (s.min_severity) sev.value = s.min_severity;
+    url.placeholder = s.configured ? "Leave blank to keep the stored token" : "BotFather token";
+  };
+  const busy = async (btn, fn) => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { if (e.status !== 401) say(e.status === 0 ? "Can't reach the hub." : e.message, true); }
+    finally { btn.disabled = false; if (cur) paint(cur); }
+  };
+  save.addEventListener("click", () => busy(save, async () => {
+    const v = url.value.trim();
+    if (!chat.value.trim() || (!v && !(cur && cur.configured))) { say("Enter a bot token and chat ID first.", true); url.focus(); return; }
+    paint(await api("PUT", "/api/settings/telegram", { ...(v ? { bot_token: v } : {}), chat_id: chat.value.trim() }));
+    url.value = "";
+    say("Telegram saved. Use “Send test message” to check it.");
+  }));
+  url.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
+  clr.addEventListener("click", async () => {
+    if (!(await ask("Clear Telegram bot token", "Remove the stored bot token? kodeblue stops posting to Telegram until a new one is saved; notifications are still listed on the hub.", "Clear", true))) return;
+    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); say("Telegram cleared."); });
+  });
+  sev.addEventListener("change", () => busy(sev, async () => { paint(await api("PUT", "/api/settings/telegram", { min_severity: sev.value })); say("Minimum severity set to " + sev.value + "."); }));
+  test.addEventListener("click", () => busy(test, async () => {
+    say("Sending…");
+    const r = await api("POST", "/api/settings/telegram/test", {});
+    if (r && r.ok) say("Test message delivered to Telegram."); else say("Test failed: " + ((r && r.error) || "unknown error"), true);
+  }));
+  body.append(
+    panel("Telegram", h("div", { class: "bd stack" },
+      h("div", { class: "setrow" }, h("span", { class: "fg" }, "Bot notifications"), status),
+      h("div", { class: "note" }, "Create a bot with @BotFather. Start it privately, or add it to your group or channel with permission to send messages. Enter the destination chat ID or public channel username. The bot token is secret and never shown again. Notifications are one-way; replies do not run commands."),
+      h("label", { class: "field" }, "Bot token", url),
+      h("label", { class: "field" }, "Chat ID", chat),
+      h("div", { class: "btns" }, save, clr),
+      h("div", { class: "setrow" }, h("label", { class: "field inline" }, "Minimum severity", sev),
+        h("span", { class: "note" }, "Notifications below this severity are listed on the hub but not posted.")),
+      h("div", { class: "btns" }, test, h("a", { class: "small", href: "#/notifications" }, "Notification history")),
+      msg), null, "purple"));
+  try { paint(await api("GET", "/api/settings/telegram")); }
+  catch (e) {
+    if (e.status === 401) return;
+    status.textContent = "unavailable";
+    [url, chat, save, clr, sev, test].forEach((x) => { x.disabled = true; });
+    say(e.status === 404 ? "This hub does not support Telegram settings yet." : "Could not load Telegram settings: " + e.message, true);
+  }
+}
+
 
 // ---------- agent settings (fleet and per server) ----------
 // Operators pick the model endpoint, a model per agent role, extra
@@ -3599,7 +3669,7 @@ async function vServerSettings(srv, body) {
           : h("div", { class: "faint small" }, "No fleet instructions for this agent.")))), null, "green"),
       panel("Response mode", h("div", { class: "bd stack" },
         h("div", { class: "note" }, "What kodeblue does when it finds an attack on this server. Off: agents only recommend actions in their reports. Recommend: every action waits for an operator's approval. Contain: actions run at once, including monitor reflexes that kill a payload or quarantine a dropped file seconds after it appears. The hub can switch up to what the server's root-owned ",
-          h("code", null, "/etc/kodeblue/kodeblue.toml"), " allows (its mode, or hub_max_mode), never above it. Every change is announced in Slack."),
+          h("code", null, "/etc/kodeblue/kodeblue.toml"), " allows (its mode, or hub_max_mode), never above it. Every change is announced through configured notification destinations."),
         h("div", { class: "frows" }, h("div", { class: "frow c3" }, h("span", { class: "frow-l" }, "Mode"), modeSel, modeNow)),
         modeCap), null, "red"),
       panel("Containment approvals", h("div", { class: "bd stack" },

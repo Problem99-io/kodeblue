@@ -6,7 +6,7 @@ import (
 )
 
 // Sender delivers notifications. With a hub, kodeblue queues them for the hub
-// (the control center owns Slack); without one it posts to Slack directly.
+// (the control center owns delivery); without one it posts directly.
 type Sender interface {
 	Send(ctx context.Context, m Message) error
 	Async(m Message, onErr func(error))
@@ -54,27 +54,39 @@ func (ms multi) Async(m Message, onErr func(error)) {
 	}
 }
 
-// New picks the delivery path. hub: queue for the hub (and, when direct is
-// set and a local webhook exists, also post straight to Slack — an
-// independent channel the hub cannot suppress). No hub: the local webhook, or
-// nil when none is configured.
-func New(hub bool, q Queue, webhookURL, webhookFile string, direct bool) Sender {
-	local := FromConfig(webhookURL, webhookFile)
-	if !hub {
-		if local == nil {
-			return disabled{}
+// New queues for the hub when enrolled. Without a hub, or with direct=true,
+// it also delivers to local Slack and additional notification destinations.
+func New(hub bool, q Queue, webhookURL, webhookFile string, direct bool, additional ...Sender) Sender {
+	var senders multi
+	if hub {
+		senders = append(senders, &Outbox{Q: q})
+	}
+	if !hub || direct {
+		if slack := FromConfig(webhookURL, webhookFile); slack != nil {
+			senders = append(senders, slack)
 		}
-		return local
+		for _, sender := range additional {
+			// A missing Telegram configuration is a typed nil.
+			if telegram, ok := sender.(*Telegram); ok && telegram == nil {
+				continue
+			}
+			if sender != nil {
+				senders = append(senders, sender)
+			}
+		}
 	}
-	out := &Outbox{Q: q}
-	if direct && local != nil {
-		return multi{out, local}
+	switch len(senders) {
+	case 0:
+		return disabled{}
+	case 1:
+		return senders[0]
+	default:
+		return senders
 	}
-	return out
 }
 
-// ErrDisabled: no hub and no webhook configured.
-var ErrDisabled = errors.New("notifications are not configured (no hub, no Slack webhook)")
+// ErrDisabled: no hub and no local notification destination configured.
+var ErrDisabled = errors.New("notifications are not configured (no hub, no notification destination)")
 
 type disabled struct{}
 

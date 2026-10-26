@@ -42,7 +42,7 @@ type tool struct {
 
 func New(cfg config.Config, st *store.Store) *Server {
 	s := &Server{cfg: cfg, st: st, env: &sensors.Env{Root: cfg.Server.Root, State: sensors.NewCursorStore(filepath.Join(cfg.Server.StateDir, "mcp-cursors.json"))}}
-	s.slack = notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)
+	s.slack = notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct, notify.TelegramFromConfig(cfg.Notify.TelegramBotToken, cfg.Notify.TelegramBotTokenFile, cfg.Notify.TelegramChatID, cfg.Notify.TelegramChatIDFile))
 	s.register()
 	return s
 }
@@ -230,7 +230,7 @@ func (s *Server) register() {
 		},
 		{
 			Name: "notify_slack",
-			Description: "Post a one-way update to the team's Slack channel (no replies come back). USE IT when you find something suspicious or confirmed, when you take or request a containment action, and when an investigation concludes something a human must do. " +
+			Description: "Post a one-way update to the team's configured notification destinations (Slack and/or Telegram; no replies come back). The tool name is retained for compatibility. USE IT when you find something suspicious or confirmed, when you take or request a containment action, and when an investigation concludes something a human must do. " +
 				"Do not use it for routine benign results. Write for a busy on-call engineer: what happened, the evidence in one line, what you did, and what they should do. Never paste secrets or long raw logs.",
 			Schema: obj(map[string]any{
 				"severity":    str("info|low|medium|high|critical"),

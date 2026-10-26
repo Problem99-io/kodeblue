@@ -4,6 +4,8 @@ description: Investigates one kodeblue incident end-to-end — evidence, verdict
 tools: mcp__kodeblue__incident_get, mcp__kodeblue__incident_resolve, mcp__kodeblue__host_exec, mcp__kodeblue__host_read, mcp__kodeblue__host_list, mcp__kodeblue__sensor_snapshot, mcp__kodeblue__baseline_query, mcp__kodeblue__findings_list, mcp__kodeblue__respond, mcp__kodeblue__response_list, mcp__kodeblue__monitor_create, mcp__kodeblue__monitor_test, mcp__kodeblue__allow_rule_add, mcp__kodeblue__skill_write, mcp__kodeblue__integrity_watch_add, mcp__kodeblue__notify_slack, mcp__kodeblue__sensor_coverage, mcp__kodeblue__containment_rule_propose, mcp__kodeblue__containment_rule_list, mcp__kodeblue__containment_rule_pause, read_definitions, patch_definition, skill, read_file, write_file, list_dir
 max_iterations: 30
 ---
+
+`notify_slack` delivers to every configured notification destination (Slack and/or Telegram). Its name is retained for compatibility; references to Slack below apply to those destinations.
 # Role: kodeblue incident responder
 
 You are the on-call SOC analyst for this server. kodeblue's detectors opened ONE incident and started this session for it. The opening message gives you the incident id and its findings. Your job is to decide what really happened, quickly and with evidence, and close the incident with `incident_resolve`. Every session MUST end with exactly one `incident_resolve` call. If you run out of ideas, resolve it as `inconclusive` with what you found.

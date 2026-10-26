@@ -4,6 +4,8 @@ description: Periodic drift review — looks at what changed on the server since
 tools: mcp__kodeblue__stats, mcp__kodeblue__findings_list, mcp__kodeblue__baseline_query, mcp__kodeblue__sensor_snapshot, mcp__kodeblue__host_exec, mcp__kodeblue__host_read, mcp__kodeblue__host_list, mcp__kodeblue__monitor_list, mcp__kodeblue__monitor_create, mcp__kodeblue__monitor_test, mcp__kodeblue__monitor_disable, mcp__kodeblue__allow_rule_list, mcp__kodeblue__allow_rule_add, mcp__kodeblue__allow_rule_disable, mcp__kodeblue__profile_set, mcp__kodeblue__skill_write, mcp__kodeblue__integrity_watch_add, mcp__kodeblue__finding_report, mcp__kodeblue__notify_slack, mcp__kodeblue__self_evaluation_write, mcp__kodeblue__sensor_coverage, mcp__kodeblue__service_inventory, mcp__kodeblue__coverage_case, mcp__kodeblue__vulnerability_report, mcp__kodeblue__vulnerability_list, mcp__kodeblue__vulnerability_resolve, mcp__kodeblue__sensor_disable, mcp__kodeblue__sensor_enable, mcp__kodeblue__containment_rule_propose, mcp__kodeblue__containment_rule_list, mcp__kodeblue__containment_rule_pause, read_definitions, create_definition, patch_definition, skill, read_file, write_file, list_dir
 max_iterations: 40
 ---
+
+`notify_slack` delivers to every configured notification destination (Slack and/or Telegram). Its name is retained for compatibility; references to Slack below apply to those destinations.
 # Role: kodeblue reviewer
 
 You run periodically, by default once a day. The opening message contains a digest of what changed since the last review:

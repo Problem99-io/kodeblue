@@ -361,6 +361,8 @@ sudo -u kodeblue-hub kodeblue-hub server add web-1 --public-url https://hub.exam
 | `--inference-url URL`, `--model M` | the server's own model endpoint and model |
 | `--inference-key-file F` | file holding the endpoint's API key |
 | `--slack-webhook-file F` | Slack incoming webhook, only for servers without a hub |
+| `--telegram-bot-token-file F` | Telegram bot token, only for servers without a hub |
+| `--telegram-chat-id-file F` | Telegram numeric chat ID or public channel username |
 | `--no-start` | install and enroll, but do not start the services |
 | `--uninstall [--purge]` | remove kodeblue |
 
@@ -401,12 +403,24 @@ sudo ./kodeblue/deploy/install.sh --inference-url https://api.example.com --mode
 
 Without `--inference-key-file` and `--slack-webhook-file`, the installer asks for both on the terminal. Then review `/etc/kodeblue/kodeblue.toml` (see `deploy/kodeblue.toml.example`) and restart: `sudo systemctl restart kodeblue`.
 
+For Telegram, create a bot with @BotFather and start it privately or add it to your
+group/channel with permission to send messages (see [Telegram setup](hub.md#telegram)).
+The standalone installer asks for an optional bot token and chat ID, or accepts
+`--telegram-bot-token-file token.txt --telegram-chat-id-file chat.txt` for unattended
+setup. It stores them in `/etc/kodeblue/telegram.token` and `telegram.chat`
+(root:kodeblue 0640). `[notify] telegram_bot_token_file` and
+`telegram_chat_id_file` default to these paths, including when upgrading an older
+config. Inline `telegram_chat_id` and `telegram_bot_token` are supported too;
+prefer the token file. Slack and Telegram can both be enabled. With a hub, configure
+both destinations in its Settings; local destinations are ignored unless
+`[notify] direct = true`.
+
 What gets installed:
 
 | Path | What |
 |---|---|
 | `/usr/local/bin/kodeblue`, `/usr/local/lib/kodeblue/engine` | binaries |
-| `/etc/kodeblue/` (root:kodeblue 0750) | `kodeblue.toml`, `inference.key`, `hub.key`, `slack.webhook` (all root:kodeblue 0640) |
+| `/etc/kodeblue/` (root:kodeblue 0750) | `kodeblue.toml`, `inference.key`, `hub.key`, `slack.webhook`, `telegram.token`, `telegram.chat` (all root:kodeblue 0640) |
 | `/var/lib/kodeblue/` (kodeblue 0750) | database, agent workspace, `response/` (root:kodeblue 0750) |
 | `kodeblue.service` | the daemon, as non-root user `kodeblue` with capabilities to read the whole host (see [kodeblue.md](kodeblue.md#running-as-its-own-user)) |
 | `kodeblue-respond.socket`, `kodeblue-respond@.service` | the root containment helper, one process per request, on `/run/kodeblue/respond.sock` |
@@ -469,10 +483,10 @@ Servers never upgrade themselves. The hub shows each server's version, and marks
 
 | Where | What | Notes |
 |---|---|---|
-| Hub: `/var/lib/kodeblue-hub/` | `hub.db` (+ `-wal`, `-shm`), `tls/` | Operators, servers, records, settings, model connection keys, Slack webhook, audit log. `tls/key.pem` is what servers pin. `dist/` can be rebuilt. |
+| Hub: `/var/lib/kodeblue-hub/` | `hub.db` (+ `-wal`, `-shm`), `tls/` | Operators, servers, records, settings, model connection keys, Slack webhook, Telegram bot token, audit log. `tls/key.pem` is what servers pin. `dist/` can be rebuilt. |
 | Hub: `/etc/kodeblue-hub/` | `env`, `tls.crt`, `tls.key` | systemd installs only |
 | Hub (Docker): the `/data` volume | same as `/var/lib/kodeblue-hub` | |
-| Server: `/etc/kodeblue/` | `kodeblue.toml`, `inference.key`, `hub.key`, `slack.webhook` | the policy and the credentials |
+| Server: `/etc/kodeblue/` | `kodeblue.toml`, `inference.key`, `hub.key`, `slack.webhook`, `telegram.token`, `telegram.chat` | the policy and the credentials |
 | Server: `/var/lib/kodeblue/` | `kodeblue.db` (baseline, findings, incidents, spend), `workspace/` (reports, skills, definitions), `response/` (action records, quarantined files, backups of disabled SSH key files in `response/ssh-keys/`), `hub-settings.json` | |
 
 The hub database uses SQLite in WAL mode. For a consistent copy, stop the hub briefly:

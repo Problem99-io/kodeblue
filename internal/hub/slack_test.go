@@ -89,7 +89,7 @@ func TestSlackLivesInTheHub(t *testing.T) {
 		t.Fatalf("want pending retry, got %+v", n)
 	}
 	mock.fail = false
-	_, _ = st.db.Exec(`UPDATE notifications SET next_try=0`)
+	_, _ = st.db.Exec(`UPDATE notification_deliveries SET next_try=0`)
 	srv.forwardDue(context.Background())
 	if n := st.Notifications(host.ID, 1)[0]; n.Status != "delivered" {
 		t.Fatalf("retry did not deliver: %+v", n)

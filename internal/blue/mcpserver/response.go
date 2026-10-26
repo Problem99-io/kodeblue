@@ -163,7 +163,7 @@ func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string,
 		return "", err
 	}
 	if !notify.Enabled(s.slack) {
-		return "", errors.New("Slack is not configured for this server (no kodeblue hub and no notify.slack_webhook_file); put the update in your report instead")
+		return "", errors.New("Notifications are not configured for this server (no hub, Slack webhook or Telegram bot); put the update in your report instead")
 	}
 	switch a.Severity {
 	case "info", "low", "medium", "high", "critical":
@@ -195,9 +195,9 @@ func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string,
 	}
 	s.st.Journal("agent", "slack.agent", fmt.Sprintf("incident=%d %s: %s", a.IncidentID, a.Severity, a.Title))
 	if notify.ViaHub(s.slack) {
-		return "sent: the kodeblue hub posts it to the team's Slack channel", nil
+		return "sent: the kodeblue hub delivers it to the configured notification destinations", nil
 	}
-	return "posted to Slack", nil
+	return "posted to the configured notification destinations", nil
 }
 
 // announceAction posts every containment action to Slack, whatever the agent
