@@ -52,7 +52,7 @@ func TestSoftwareCheckFeedsReview(t *testing.T) {
 	fail.Store(true)
 	d.maybeSoftwareCheck(context.Background())
 	d.wg.Wait()
-	if st.Get(softwareCheckedKey) != "" || st.Get(versionsKey) == "" {
+	if st.Get(cveCheckedKey) != "" || st.Get(versionsKey) == "" {
 		t.Fatal("a failed pull must not count as checked, but the versions are recorded")
 	}
 	fail.Store(false)
@@ -61,11 +61,11 @@ func TestSoftwareCheckFeedsReview(t *testing.T) {
 	if nvdHits.Load() != 0 {
 		t.Fatal("retried before the hour was up")
 	}
-	_ = st.Set(softwareTriedKey, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339))
+	_ = st.Set(cveTriedKey, time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339))
 	d.maybeSoftwareCheck(context.Background())
 	d.wg.Wait()
-	if st.Get(softwareCheckedKey) == "" || nvdHits.Load() != 1 {
-		t.Fatalf("not pulled: checked=%q hits=%d", st.Get(softwareCheckedKey), nvdHits.Load())
+	if st.Get(cveCheckedKey) == "" || nvdHits.Load() != 1 {
+		t.Fatalf("not pulled: checked=%q hits=%d", st.Get(cveCheckedKey), nvdHits.Load())
 	}
 	c := d.cveCandidates()
 	if len(c) != 1 || c[0].ID != "CVE-2026-1111" || !c[0].KEV || c[0].From != "image traefik:v3.7.15" {
@@ -88,6 +88,26 @@ func TestSoftwareCheckFeedsReview(t *testing.T) {
 	// The same CVE seen again tomorrow is not new, and Slack hears once.
 	if fresh := d.keepCandidates(c, time.Now()); len(fresh) != 0 {
 		t.Errorf("repeat counted as new: %+v", fresh)
+	}
+	// A product match that CISA lists as exploited later is raised again.
+	plain := cvefeed.Candidate{CVE: cvefeed.CVE{ID: "CVE-2026-3333", Score: 7}, Term: "sudo", How: "product"}
+	d.keepCandidates([]cvefeed.Candidate{plain}, time.Now())
+	exploited := plain
+	exploited.KEV, exploited.How = true, "kev"
+	if fresh := d.keepCandidates([]cvefeed.Candidate{exploited}, time.Now()); len(fresh) != 1 || !fresh[0].KEV {
+		t.Errorf("newly exploited not raised: %+v", fresh)
+	}
+	n := 0
+	for _, x := range d.cveCandidates() {
+		if x.ID == "CVE-2026-3333" {
+			n++
+			if !x.KEV {
+				t.Error("stored entry not updated to exploited")
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("CVE-2026-3333 stored %d times", n)
 	}
 	// A review due while the check runs waits for it.
 	d.software.Store(true)
@@ -116,5 +136,68 @@ func TestImageNameAndTerms(t *testing.T) {
 	}
 	if !names["postgres"] || !names["postgresql"] {
 		t.Errorf("image and its product name: %v", names)
+	}
+}
+
+// Debian names libraries by soname and version; CVEs name the project.
+func TestProductNames(t *testing.T) {
+	for _, c := range []struct{ pkg, src, want string }{
+		{"libc6", "glibc", "glibc"}, {"zlib1g", "zlib", "zlib"}, {"libexpat1", "expat", "libexpat"}, {"libexpat1", "expat", "expat"},
+		{"postgresql-16", "postgresql-16", "postgresql"}, {"php8.3-fpm", "php8.3", "php"}, {"nodejs", "nodejs", "node.js"},
+		{"sqlite3", "sqlite3", "sqlite"}, {"libgnutls30t64", "gnutls28", "gnutls"}, {"python3-urllib3", "python-urllib3", "urllib3"},
+		{"openjdk-17-jre-headless", "openjdk-17", "openjdk"}, {"bind9", "bind9", "bind"}, {"libssh-4", "libssh", "libssh"},
+		{"openssh-server", "openssh", "openssh"},
+	} {
+		got := productNames(c.pkg, c.src)
+		found := false
+		for _, n := range got {
+			found = found || n == c.want
+		}
+		if !found {
+			t.Errorf("productNames(%s, %s) = %v, want %s among them", c.pkg, c.src, got, c.want)
+		}
+	}
+}
+
+// A pull whose exploited list failed keeps its NVD matches but not the
+// window, so the next pull asks for the same days; failures back off.
+func TestCVEFeedKEVFailureAndBackoff(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	_ = st.UpsertBaseline([]store.BaselineItem{{Collector: "container", Key: "traefik:v3.7.15#proxy"}}, "learned")
+	var nvd atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/kev") {
+			http.Error(w, "gone", http.StatusNotFound)
+			return
+		}
+		nvd.Add(1)
+		_, _ = w.Write([]byte(`{"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2026-4444","published":"2026-10-26T01:00:00.000","descriptions":[{"lang":"en","value":"x"}],"affected":[{"affectedData":[{"vendor":"Traefik Labs","product":"Traefik"}]}]}}]}`))
+	}))
+	defer srv.Close()
+	d.cveClient = cvefeed.Client{NVD: srv.URL + "/nvd", KEV: srv.URL + "/kev"}
+	start := time.Now().UTC()
+	if d.cveFeed(context.Background(), start) {
+		t.Fatal("a failed KEV pull reported success")
+	}
+	if st.Get(cveUntilKey) != "" {
+		t.Error("window advanced past a failed KEV pull")
+	}
+	if c := d.cveCandidates(); len(c) != 1 || c[0].ID != "CVE-2026-4444" {
+		t.Errorf("NVD matches lost: %+v", c)
+	}
+	// Two failures in a row: the next try waits two hours, not one.
+	_ = st.Set(cveFailuresKey, "2")
+	_ = st.Set(versionsAtKey, start.Format(time.RFC3339))
+	_ = st.Set(cveTriedKey, start.Add(-90*time.Minute).Format(time.RFC3339))
+	d.maybeSoftwareCheck(context.Background())
+	d.wg.Wait()
+	if nvd.Load() != 1 {
+		t.Errorf("retried after 90 minutes despite two failures (hits %d)", nvd.Load())
+	}
+	_ = st.Set(cveTriedKey, start.Add(-150*time.Minute).Format(time.RFC3339))
+	d.maybeSoftwareCheck(context.Background())
+	d.wg.Wait()
+	if nvd.Load() != 2 || st.Get(cveFailuresKey) != "3" {
+		t.Errorf("hits %d failures %s", nvd.Load(), st.Get(cveFailuresKey))
 	}
 }

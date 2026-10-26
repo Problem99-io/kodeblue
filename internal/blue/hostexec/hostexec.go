@@ -75,7 +75,7 @@ var allow = map[string]policy{
 
 // aptSimulate are apt-get's flags here; the first five make it simulate,
 // and one of them is required.
-var aptSimulate = []string{"-s", "--simulate", "--just-print", "--dry-run", "--no-act", "-q", "-qq", "-V"}
+var aptSimulate = []string{"-s", "--simulate", "--just-print", "--dry-run", "--no-act", "-q", "-V"}
 
 func hasAny(args, flags []string) bool {
 	for _, a := range args {
@@ -215,9 +215,27 @@ func Validate(argv []string) error {
 	// Process and service environments carry credentials (API keys,
 	// database passwords), and kodeblue may read every process's.
 	switch bin {
-	case "apt-get":
-		if !hasAny(args, aptSimulate[:5]) {
-			return fmt.Errorf("apt-get only simulates here: add -s (it prints what an upgrade would install and changes nothing)")
+	case "apt", "apt-cache", "apt-get":
+		// apt reads "-s=no", "--simulate=false" and a bare "no" after -s
+		// as switching an option back off, and later options win: no
+		// value forms, and apt-get takes nothing but flags and its verb (a
+		// path would be a local .deb to install).
+		var words []string
+		for _, a := range args {
+			if strings.HasPrefix(a, "-") && strings.Contains(a, "=") {
+				return fmt.Errorf("%q: %s options take no values here", a, bin)
+			}
+			if !strings.HasPrefix(a, "-") {
+				words = append(words, a)
+			}
+		}
+		if bin == "apt-get" {
+			if !hasAny(args, aptSimulate[:5]) {
+				return fmt.Errorf("apt-get only simulates here: add -s (it prints what an upgrade would install and changes nothing)")
+			}
+			if len(words) != 1 {
+				return fmt.Errorf("apt-get takes only its flags and one of upgrade, dist-upgrade or full-upgrade here")
+			}
 		}
 	case "ps":
 		if err := checkPS(args); err != nil {

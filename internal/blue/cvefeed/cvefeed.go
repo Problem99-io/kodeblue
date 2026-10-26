@@ -414,7 +414,7 @@ func Match(cves []CVE, kev []KEV, terms []Term, now time.Time) []Candidate {
 	}
 	out := map[string]*Candidate{}
 	put := func(c Candidate) {
-		if old, ok := out[c.ID]; ok && rank(*old) >= rank(c) {
+		if old, ok := out[c.ID]; ok && Rank(*old) >= Rank(c) {
 			return
 		}
 		c.FoundAt = now
@@ -481,7 +481,8 @@ func named(ps []Product) bool {
 	return false
 }
 
-func rank(c Candidate) int {
+// Rank orders candidates: exploited (3), product match (2), description (1).
+func Rank(c Candidate) int {
 	switch {
 	case c.KEV:
 		return 3
@@ -494,7 +495,7 @@ func rank(c Candidate) int {
 // Sort puts exploited ones first, then product matches, then by score.
 func Sort(l []Candidate) {
 	sort.SliceStable(l, func(i, j int) bool {
-		if ri, rj := rank(l[i]), rank(l[j]); ri != rj {
+		if ri, rj := Rank(l[i]), Rank(l[j]); ri != rj {
 			return ri > rj
 		}
 		if l[i].Score != l[j].Score {
