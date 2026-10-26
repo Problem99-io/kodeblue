@@ -281,6 +281,12 @@ func Execute(p Policy, r Request) Record {
 	// Concurrent incidents about the same attack often ask for the same
 	// action; answer from the journal instead of acting twice.
 	for _, prev := range records {
+		if prev.Status == "done" && prev.ID == r.ID && !prev.DoneAt.IsZero() {
+			// The same request, carried out already (a retried call whose
+			// answer was lost): its record untouched, so its undo recipe and
+			// its place in the rate count stay.
+			return prev
+		}
 		if prev.Status != "done" || prev.Action != r.Action || !sameTarget(prev.Params, r.Params) {
 			continue
 		}
@@ -1119,8 +1125,17 @@ func Invoke(ctx context.Context, configPath string, payload []byte) ([]byte, err
 		// The socket takes a few connections at once (MaxConnections in
 		// kodeblue-respond.socket); past that systemd resets them before a
 		// helper starts. Hold this process to fewer, and retry a reset or
-		// empty answer: the helper had not run, and it answers a repeated
-		// request for an action already in effect without acting again.
+		// empty answer of an execute: the helper answers a request it already
+		// carried out from its journal. An undo is not retried, since its
+		// helper may have run before the answer was lost.
+		var env struct {
+			Op string `json:"op"`
+		}
+		_ = json.Unmarshal(payload, &env)
+		tries := 1
+		if env.Op == "execute" {
+			tries = 6
+		}
 		select {
 		case invokeSlots <- struct{}{}:
 			defer func() { <-invokeSlots }()
@@ -1129,12 +1144,15 @@ func Invoke(ctx context.Context, configPath string, payload []byte) ([]byte, err
 		}
 		var out []byte
 		var err error
-		for attempt := 0; attempt < 6; attempt++ {
+		for attempt := 0; attempt < tries; attempt++ {
 			if out, err = invokeSocket(ctx, payload); err == nil && len(bytes.TrimSpace(out)) > 0 {
 				return out, nil
 			}
 			if err == nil {
 				err = errors.New("respond socket: no answer")
+			}
+			if attempt == tries-1 {
+				break
 			}
 			select {
 			case <-ctx.Done():

@@ -1222,6 +1222,7 @@ function syncPanel(r) {
 function closePanel() {
   if (P.timer) clearInterval(P.timer);
   P.timer = null;
+  if (P.st && P.st.fast) clearTimeout(P.st.fast);
   if (P.el) P.el.remove();
   P.el = null; P.key = ""; P.st = {};
   document.body.classList.remove("tp-open");
@@ -1423,7 +1424,9 @@ async function panelRefresh(first, force) {
     if (P.key !== key) return;
     st.decs = st.msgs.filter((m) => m.decision && String(m.incident_id) === String(inc.id)).sort((a, b) => a.id - b.id);
     if (pend) st.pend = pend.map(parse).filter((a) => String(a.incident_id) === String(inc.id));
-    st.decOpen = st.decs.some(decOpen);
+    // Follow a fresh ruling closely; one the server has not answered in
+    // 30 s (offline, busy) goes back to the 5 s poll.
+    st.decOpen = st.decs.some((m) => decOpen(m) && Date.now() - (validTime(m.created_at) || 0) < 30000);
     paintApprovals();
     paintChat(inc, st.sess, st.own, notes, st.decs, st.srv);
     paintExt();
@@ -1434,7 +1437,7 @@ async function panelRefresh(first, force) {
     if (st.again && P.key === key) { st.again = false; setTimeout(() => panelRefresh(false, true)); }
     // A ruling takes the server about a second: follow it closely rather
     // than on the 5 s poll.
-    else if (st.decOpen && P.key === key && !st.fast) st.fast = setTimeout(() => { st.fast = null; panelRefresh(false, true); }, 1000);
+    else if (st.decOpen && P.key === key && !st.fast && !document.hidden) st.fast = setTimeout(() => { st.fast = null; if (P.key === key) panelRefresh(false, true); }, 1000);
   }
 }
 function notFound(text) {
@@ -1590,7 +1593,7 @@ function paintChat(inc, sess, own, notes, decs, srvId) {
   st.first = false;
 }
 function decisionEvent(m) {
-  const open = m.status === "queued" || m.status === "delivered";
+  const open = decOpen(m);
   const bad = m.status === "failed" || m.status === "refused";
   const verb = m.decision === "approve" ? "approved" : "denied";
   return h("div", { class: "turn" }, h("div", { class: "sysev dec" + (bad ? " bad" : m.decision === "approve" ? " ok" : "") }, ic("shield", 12),
@@ -1657,7 +1660,7 @@ const actTarget = (a) => Object.entries(a.params || {}).map(([k, v]) => k + "=" 
 // approvalControls: Approve/Deny for one pending request, its in-flight
 // ruling, or (for servers that keep approval local) the CLI commands.
 function approvalControls(srvId, a, decs, after) {
-  const open = (decs || []).find((m) => m.request_id === a.id && (m.status === "queued" || m.status === "delivered"));
+  const open = (decs || []).find((m) => m.request_id === a.id && decOpen(m));
   if (open) return h("div", { class: "appr-st" }, h("span", { class: "pulse" }), `${open.author} sent ${open.decision}; ${open.status === "queued" ? "waiting for the server…" : "the server is handling it…"}`);
   const last = (decs || []).filter((m) => m.request_id === a.id).pop();
   const lastNote = last && (last.status === "failed" || last.status === "refused") ? h("div", { class: "small c-red" }, `${last.decision} ${last.status}: ${last.reply || ""}`) : null;
@@ -1691,10 +1694,16 @@ function approvalControls(srvId, a, decs, after) {
 }
 // Rulings on their way to the server, and rulings it carried out (the
 // request leaves the pending list on the server's next sync; it is settled now).
-const decOpen = (m) => m.status === "queued" || m.status === "delivered";
+// A ruling delivered 5 minutes ago without a reply is lost (the hub takes a
+// new one then, see DecisionReplyWait).
+const decOpen = (m) => m.status === "queued" || (m.status === "delivered" && Date.now() - (validTime(m.delivered_at) || 0) < 300000);
 const decidedDone = (m) => !!m && m.decision && m.status === "done";
-async function approveAll(srvId, list, after) {
+async function approveAll(srvId, list, after, btn) {
   const name = serverName(srvId);
+  btn.disabled = true;
+  try { await approveAllRun(srvId, list, after, name); } finally { btn.disabled = false; }
+}
+async function approveAllRun(srvId, list, after, name) {
   const ok = await ask(`Approve all ${list.length} containment actions?`,
     [h("p", null, `kodeblue on ${name} will run these through its root helper, under the server's own response policy:`),
       h("ul", { class: "appr-list" }, list.map((a) => h("li", null, h("b", null, a.action), actTarget(a) ? [" ", h("code", null, actTarget(a))] : null)))],
@@ -1725,11 +1734,11 @@ function paintApprovals() {
   const toggle = () => { store(foldKey, fold ? "" : list.map((a) => a.id).join(",")); st.apprSig = ""; paintApprovals(); };
   const open = list.filter((a) => !decs.some((m) => m.request_id === a.id && decOpen(m)));
   const all = acceptsApprovals(st.srv) && open.length > 1
-    ? h("button", { class: "btn small primary", type: "button", on: { click: (e) => { e.stopPropagation(); approveAll(st.srv, open, after); } } }, ic("check", 12), `Approve all (${open.length})`)
+    ? h("button", { class: "btn small primary", type: "button", on: { click: (e) => { e.stopPropagation(); approveAll(st.srv, open, after, e.currentTarget); } } }, ic("check", 12), `Approve all (${open.length})`)
     : null;
   const sent = list.length - open.length;
   add(P.appr, [h("div", { class: "appr-hd", role: "button", tabindex: "0", "aria-expanded": String(!fold), title: fold ? "Show the requests" : "Hide the requests",
-    on: { click: toggle, keydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } } } },
+    on: { click: toggle, keydown: (e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(); } } } },
     ic(fold ? "chevRight" : "chevDown", 13), ic("shield", 13), h("span", null, `Waiting for your approval (${list.length})`),
     sent ? h("span", { class: "appr-st" }, h("span", { class: "pulse" }), `${sent} on the way to the server`) : null,
     h("div", { class: "sp" }),
@@ -2363,7 +2372,7 @@ async function vActivity(srv, body) {
   const decs = (msgs || []).filter((m) => m.decision).sort((a, b) => a.id - b.id);
   const again = () => { if (body.isConnected) vActivity(srv, body); };
   // Follow an in-flight ruling until the server answers.
-  if (decs.some((m) => m.status === "queued" || m.status === "delivered")) {
+  if (decs.some(decOpen)) {
     const follow = () => { if (!body.isConnected) return; if (document.activeElement && document.activeElement.tagName === "INPUT" && body.contains(document.activeElement)) setTimeout(follow, 3000); else again(); };
     setTimeout(follow, 3000);
   }
@@ -2960,6 +2969,11 @@ async function fleetAgents(box) {
 // schema lists them with their bounds), grouped as on the server. An empty
 // field inherits; hint(t) says what from. fmtTuning shows a value.
 const fmtTuning = (t, v) => v === undefined || v === "" ? "" : t.kind === "usd" ? "$" + v : t.kind === "bool" ? (v === "true" ? "yes" : "no") : String(v);
+// Settings a hub may only tighten (hubproto.Tuning.Only).
+const TUNE_ONLY = {
+  lower: "Only tightens: a server keeps its own value when it is lower (or off).",
+  raise: "Only tightens: a server keeps its own value when it is higher.",
+};
 function tuningForm(defs, vals) {
   const fields = (defs || []).map((t) => {
     let el;
@@ -2974,8 +2988,11 @@ function tuningForm(defs, vals) {
   const groups = [...new Set(fields.map((f) => f.t.group))];
   return {
     el: h("div", { class: "stack" }, groups.map((g) => h("div", { class: "fblock" }, h("div", { class: "fhd strong" }, g),
-      h("div", { class: "frows" }, fields.filter((f) => f.t.group === g).map((f) => h("div", { class: "frow c3", title: f.t.help || null },
-        h("span", { class: "frow-l" }, f.t.label, f.t.help ? h("span", { class: "faint small block" }, f.t.help) : null), f.el, f.now)))))),
+      h("div", { class: "frows" }, fields.filter((f) => f.t.group === g).map((f) => {
+        const help = [f.t.help, TUNE_ONLY[f.t.only]].filter(Boolean).join(" ");
+        return h("div", { class: "frow c3", title: help || null },
+          h("span", { class: "frow-l" }, f.t.label, help ? h("span", { class: "faint small block" }, help) : null), f.el, f.now);
+      }))))),
     // hint(t) is what an empty field means; reported is what the server runs.
     paint(hint, reported) {
       for (const f of fields) {

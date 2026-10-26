@@ -2,8 +2,10 @@ package hubproto
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -12,8 +14,9 @@ import (
 // how often it does things and how noisy it is, never what its agents may
 // do. Settings carry values as strings by key; the hub checks them against
 // Kind and the bounds here, and the server checks them again before use.
-// The bounds keep a hub from blinding a server (a brute-force threshold of
-// a million, retention of an hour) through settings meant for tuning.
+// Settings that decide what a server sees, reports or keeps only tighten
+// (Only): the server takes the hub's value only when it is stricter than
+// its own, so a hub cannot blind it, silence it or make it forget.
 type Tuning struct {
 	Key   string  `json:"key"` // the server's config key, e.g. budget.daily_usd
 	Group string  `json:"group"`
@@ -22,15 +25,19 @@ type Tuning struct {
 	Kind  string  `json:"kind"` // int | usd | bool | severity
 	Min   float64 `json:"min,omitempty"`
 	Max   float64 `json:"max,omitempty"`
+	// Only is "lower" or "raise" when the hub may only move the server's
+	// own value that way (bools: lower turns true off; severity: lower
+	// notifies about more).
+	Only string `json:"only,omitempty"`
 }
 
 // Tunings lists every setting the hub may set, in display order.
 var Tunings = []Tuning{
 	{Key: "budget.daily_usd", Group: "Budget", Label: "Daily model budget (USD)", Kind: "usd", Min: 0.1, Max: 1000,
 		Help: "Model spend per UTC day. Past it only critical findings reach a model (hard stop at twice the budget). The server caps it at its own [budget] hub_max_daily_usd."},
-	{Key: "budget.input_usd_per_mtok", Group: "Budget", Label: "Input price (USD per million tokens)", Kind: "usd", Min: 0, Max: 1000,
+	{Key: "budget.input_usd_per_mtok", Group: "Budget", Label: "Input price (USD per million tokens)", Kind: "usd", Min: 0, Max: 1000, Only: "raise",
 		Help: "Only for endpoints that report no cost per call: without prices such calls count as $0 and the budget is not enforced."},
-	{Key: "budget.output_usd_per_mtok", Group: "Budget", Label: "Output price (USD per million tokens)", Kind: "usd", Min: 0, Max: 1000,
+	{Key: "budget.output_usd_per_mtok", Group: "Budget", Label: "Output price (USD per million tokens)", Kind: "usd", Min: 0, Max: 1000, Only: "raise",
 		Help: "Only for endpoints that report no cost per call."},
 	{Key: "budget.max_concurrent_incidents", Group: "Budget", Label: "Incidents investigated at once", Kind: "int", Min: 1, Max: 20},
 	{Key: "budget.max_incidents_per_hour", Group: "Budget", Label: "New investigations per hour", Kind: "int", Min: 1, Max: 100},
@@ -41,18 +48,16 @@ var Tunings = []Tuning{
 		Help: "How long learning collects the baseline. Applies to the next learning run."},
 	{Key: "schedule.learning_sweeps", Group: "Schedule", Label: "Baseline snapshots", Kind: "int", Min: 2, Max: 100,
 		Help: "Snapshots taken over the baseline. Applies to the next learning run."},
-	{Key: "schedule.retention_days", Group: "Schedule", Label: "Keep settled findings and the journal (days)", Kind: "int", Min: 7, Max: 3650},
-	{Key: "detect.realert_hours", Group: "Detection", Label: "Re-alert an unchanged finding after (hours)", Kind: "int", Min: 1, Max: 168},
-	{Key: "detect.bruteforce_threshold", Group: "Detection", Label: "Failed logins from one address that count as brute force", Kind: "int", Min: 3, Max: 50},
-	{Key: "detect.debounce_sweeps", Group: "Detection", Label: "Sweeps a change must persist before it is a finding", Kind: "int", Min: 1, Max: 5},
-	{Key: "notify.min_severity", Group: "Notifications", Label: "Lowest severity that notifies about an incident", Kind: "severity"},
+	{Key: "schedule.retention_days", Group: "Schedule", Label: "Keep settled findings and the journal (days)", Kind: "int", Min: 7, Max: 3650, Only: "raise"},
+	{Key: "detect.realert_hours", Group: "Detection", Label: "Re-alert an unchanged finding after (hours)", Kind: "int", Min: 1, Max: 168, Only: "lower"},
+	{Key: "detect.bruteforce_threshold", Group: "Detection", Label: "Failed logins from one address that count as brute force", Kind: "int", Min: 3, Max: 50, Only: "lower"},
+	{Key: "detect.debounce_sweeps", Group: "Detection", Label: "Sweeps a change must persist before it is a finding", Kind: "int", Min: 1, Max: 5, Only: "lower"},
+	{Key: "notify.min_severity", Group: "Notifications", Label: "Lowest severity that notifies about an incident", Kind: "severity", Only: "lower"},
 	{Key: "notify.agent_messages_per_hour", Group: "Notifications", Label: "Agent messages per hour", Kind: "int", Min: 1, Max: 120,
 		Help: "Messages agents may post (progress, questions) per hour."},
 	{Key: "hub.sync_seconds", Group: "Hub link", Label: "Sync with the hub every (seconds)", Kind: "int", Min: 5, Max: 300},
-	{Key: "hub.messages_per_hour", Group: "Hub link", Label: "Operator chat messages per hour", Kind: "int", Min: 1, Max: 240},
-	{Key: "hub.share_transcripts", Group: "Hub link", Label: "Share agent transcripts with the hub", Kind: "bool"},
-	{Key: "requests.disabled", Group: "Web requests", Label: "Turn off the web request recorder", Kind: "bool",
-		Help: "The recorder notes the request lines of web services so agents can see attacks against them."},
+	{Key: "hub.messages_per_hour", Group: "Hub link", Label: "Operator chat messages per hour", Kind: "int", Min: 1, Max: 240, Only: "lower"},
+	{Key: "hub.share_transcripts", Group: "Hub link", Label: "Share agent transcripts with the hub", Kind: "bool", Only: "lower"},
 }
 
 // TuningFor returns the tuning setting for key.
@@ -67,6 +72,9 @@ func TuningFor(key string) (Tuning, bool) {
 
 var severities = []string{"info", "low", "medium", "high", "critical"}
 
+// SeverityRank orders severities (info 0 … critical 4; unknown -1).
+func SeverityRank(s string) int { return slices.Index(severities, s) }
+
 // Check validates a value for the setting.
 func (t Tuning) Check(v string) error {
 	v = strings.TrimSpace(v)
@@ -78,7 +86,7 @@ func (t Tuning) Check(v string) error {
 			n, err = strconv.Atoi(v)
 			f = float64(n)
 		}
-		if err != nil {
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 			return fmt.Errorf("%s: %q is not a number", t.Label, v)
 		}
 		if f < t.Min || f > t.Max {

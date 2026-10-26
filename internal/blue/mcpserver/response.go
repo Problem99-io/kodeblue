@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,18 @@ func (s *Server) respond(ctx context.Context, args json.RawMessage) (string, err
 	return Submit(ctx, s.cfg, s.st, s.slack, req)
 }
 
+// RateLimited enforces the containment rate limit in effect before an
+// action runs. The root helper enforces its own max_actions_per_hour; a
+// lower one the hub set exists only here, so every path to the helper (an
+// automatic action, an operator's approval) checks it.
+func RateLimited(cfg config.Config) error {
+	limit := cfg.Response.MaxActionsPerHour
+	if n := respond.ActionsLastHour(cfg.Response.StateDir); limit > 0 && n >= limit {
+		return fmt.Errorf("rate limit: %d containment actions in the last hour (the limit is %d)", n, limit)
+	}
+	return nil
+}
+
 // Submit puts a containment request through policy: refused when response is
 // off or the action is turned off, recorded for an operator's approval when
 // the action needs one, otherwise run by the root helper. The responder's
@@ -94,11 +107,6 @@ func Submit(ctx context.Context, cfg config.Config, st *store.Store, slack notif
 	}
 	if err := respond.Check(pol, req); err != nil {
 		return "", err
-	}
-	// The root helper enforces its own max_actions_per_hour; a lower one the
-	// hub set is enforced here, before a request reaches it.
-	if n := respond.ActionsLastHour(pol.StateDir); pol.MaxActionsPerHour > 0 && n >= pol.MaxActionsPerHour {
-		return "", fmt.Errorf("rate limit: %d containment actions in the last hour (the limit is %d); put it in your report as a recommendation", n, pol.MaxActionsPerHour)
 	}
 	rule := cfg.ActionRule(req.Action)
 	if rule == hubproto.ActionOff {
@@ -127,6 +135,9 @@ func Submit(ctx context.Context, cfg config.Config, st *store.Store, slack notif
 		st.Journal(actor, "respond.request", fmt.Sprintf("%s %s %v (incident #%d)", req.ID, req.Action, req.Params, req.IncidentID))
 		announceAction(cfg, slack, req, "awaiting approval", "Run on the server: kodeblue respond approve "+req.ID, nil)
 		return fmt.Sprintf("Recorded as %s, awaiting operator approval (%s needs approval on this server). An operator approves it in the hub or runs: kodeblue respond approve %s. Mention it in your report.", req.ID, req.Action, req.ID), nil
+	}
+	if err := RateLimited(cfg); err != nil {
+		return "", fmt.Errorf("%w; put it in your report as a recommendation", err)
 	}
 	rec, err := runHelper(ctx, cfg, req)
 	if err != nil {
@@ -356,17 +367,30 @@ func RunHelper(ctx context.Context, cfg config.Config, req respond.Request) (*re
 	return runHelper(ctx, cfg, req)
 }
 
-// Decisions sums up the containment an incident's agent asked for: how many
-// requests still wait for an operator, and one line per settled one (ran,
-// failed or denied), oldest first. The daemon hands those lines back to the
-// agent once nothing waits, so it learns what the operators decided.
-func Decisions(cfg config.Config, incidentID int64) (pending int, settled []string) {
+// IncidentDecisions sums up the containment an incident's agent asked for:
+// how many requests still wait for an operator, and one line per settled
+// one (ran, failed, denied), oldest first. Targets, results and names come
+// from the host and the hub: they are quoted, never trusted.
+type IncidentDecisions struct {
+	Pending int
+	Settled []string
+}
+
+// Decisions returns IncidentDecisions for every incident with containment
+// requests, reading the request, denial and action files once. The daemon
+// hands the settled lines back to an agent once nothing of its waits.
+func Decisions(cfg config.Config) map[int64]*IncidentDecisions {
+	out := map[int64]*IncidentDecisions{}
+	get := func(id int64) *IncidentDecisions {
+		if out[id] == nil {
+			out[id] = &IncidentDecisions{}
+		}
+		return out[id]
+	}
 	open := map[string]bool{}
 	for _, r := range LoadRequests(cfg) {
-		if r.IncidentID == incidentID {
-			pending++
-			open[r.ID] = true
-		}
+		get(r.IncidentID).Pending++
+		open[r.ID] = true
 	}
 	denied := map[string]Denial{}
 	if f, err := os.Open(deniedPath(cfg)); err == nil {
@@ -383,7 +407,7 @@ func Decisions(cfg config.Config, incidentID int64) (pending int, settled []stri
 		var parts []string
 		for _, k := range []string{"ip", "user", "unit", "pid", "path", "key_id"} {
 			if v := p[k]; v != "" {
-				parts = append(parts, k+"="+v)
+				parts = append(parts, k+"="+strconv.Quote(v))
 			}
 		}
 		return strings.Join(parts, " ")
@@ -394,31 +418,33 @@ func Decisions(cfg config.Config, incidentID int64) (pending int, settled []stri
 		// Only what an operator approved: the agent saw the result of
 		// actions it ran itself.
 		by, ok := strings.CutSuffix(e.RequestedBy, "+operator")
-		if e.IncidentID != incidentID || !ok || e.Status == "pending" {
+		if !ok || e.Status == "pending" || denied[e.ID].ID != "" {
 			continue
 		}
 		who := "an operator on the server"
 		if i := strings.Index(by, "+hub:"); i >= 0 {
-			who = by[i+len("+hub:"):] + " (hub)"
+			who = strconv.Quote(clipLine(by[i+len("+hub:"):], 80)) + " on the hub"
 		}
-		settled = append(settled, fmt.Sprintf("%s %s: approved by %s, %s: %s", e.Action, target(e.Params), who, e.Status, clipLine(e.Result, 240)))
+		d := get(e.IncidentID)
+		d.Settled = append(d.Settled, fmt.Sprintf("%s %s: approved by %s; helper status %s; result %s", e.Action, target(e.Params), who, e.Status, strconv.Quote(clipLine(e.Result, 240))))
 	}
 	if f, err := os.Open(requestsPath(cfg)); err == nil {
 		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1<<20), 1<<20)
 		for sc.Scan() {
 			var r respond.Request
-			if json.Unmarshal(sc.Bytes(), &r) != nil || r.IncidentID != incidentID {
+			if json.Unmarshal(sc.Bytes(), &r) != nil || open[r.ID] {
 				continue
 			}
 			if d, ok := denied[r.ID]; ok {
-				settled = append(settled, fmt.Sprintf("%s %s: denied by %s", r.Action, target(r.Params), d.DeniedBy))
-			} else if !ran[r.ID] && !open[r.ID] {
-				settled = append(settled, fmt.Sprintf("%s %s: already in effect (the same action on the same target ran for another request)", r.Action, target(r.Params)))
+				get(r.IncidentID).Settled = append(get(r.IncidentID).Settled, fmt.Sprintf("%s %s: denied by %s", r.Action, target(r.Params), strconv.Quote(clipLine(d.DeniedBy, 80))))
+			} else if !ran[r.ID] {
+				get(r.IncidentID).Settled = append(get(r.IncidentID).Settled, fmt.Sprintf("%s %s: already in effect (the same action on the same target ran for another request)", r.Action, target(r.Params)))
 			}
 		}
 		f.Close()
 	}
-	return pending, settled
+	return out
 }
 
 func clipLine(s string, n int) string {

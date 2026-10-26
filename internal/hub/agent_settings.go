@@ -207,6 +207,25 @@ func keepUnsent(body []byte, a, stored AgentSettings) AgentSettings {
 	return a
 }
 
+// unionList adds b's entries missing from a, keeping a's order.
+func unionList(a, b []string) []string {
+	out := slices.Clone(a)
+	for _, v := range b {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// protectedFit checks that fleet and server protected lists, merged as a
+// server receives them, stay within the server's bounds: a server refuses a
+// settings bundle whose lists are too long as a whole, tightenings included.
+func protectedFit(fleet, own AgentSettings) error {
+	return hubproto.CheckProtected(unionList(fleet.ProtectedUsers, own.ProtectedUsers),
+		unionList(fleet.ProtectedIPs, own.ProtectedIPs), unionList(fleet.ProtectedUnits, own.ProtectedUnits))
+}
+
 func validModel(m string) error {
 	if len(m) > 200 || strings.ContainsAny(m, " \t\r\n") {
 		return errors.New("a model id is one word of at most 200 characters")
@@ -251,21 +270,13 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 		out.ResponseMode = own.ResponseMode
 	}
 	out.Tuning = merge(fleet.Tuning, own.Tuning)
-	union := func(a, b []string) []string {
-		out := slices.Clone(a)
-		for _, v := range b {
-			if !slices.Contains(out, v) {
-				out = append(out, v)
-			}
-		}
-		return out
-	}
-	out.ProtectedUsers = union(fleet.ProtectedUsers, own.ProtectedUsers)
-	out.ProtectedIPs = union(fleet.ProtectedIPs, own.ProtectedIPs)
-	out.ProtectedUnits = union(fleet.ProtectedUnits, own.ProtectedUnits)
+	out.ProtectedUsers = unionList(fleet.ProtectedUsers, own.ProtectedUsers)
+	out.ProtectedIPs = unionList(fleet.ProtectedIPs, own.ProtectedIPs)
+	out.ProtectedUnits = unionList(fleet.ProtectedUnits, own.ProtectedUnits)
+	// A limit only tightens: the lower of the two that are set.
 	out.MaxActionsPerHour = fleet.MaxActionsPerHour
-	if own.MaxActionsPerHour > 0 {
-		out.MaxActionsPerHour = own.MaxActionsPerHour
+	if n := own.MaxActionsPerHour; n > 0 && (out.MaxActionsPerHour <= 0 || n < out.MaxActionsPerHour) {
+		out.MaxActionsPerHour = n
 	}
 	conns := s.Connections()
 	used := map[string]bool{}
@@ -337,6 +348,12 @@ func (s *Server) handleAgentSettingsPut(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	for _, h := range s.st.Servers() {
+		if err := protectedFit(a, s.st.ServerAgentSettings(h.ID)); err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("with %s's own protected entries: %v", h.Name, err))
+			return
+		}
+	}
 	if err := s.st.SetFleetAgentSettings(a); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store failed")
 		return
@@ -387,6 +404,10 @@ func (s *Server) handleServerSettingsPut(w http.ResponseWriter, r *http.Request,
 	a = keepUnsent(body, a, s.st.ServerAgentSettings(id)).clean()
 	if err := a.Validate(s.st.Connections()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := protectedFit(s.st.FleetAgentSettings(), a); err != nil {
+		writeErr(w, http.StatusBadRequest, "with the fleet's protected entries: "+err.Error())
 		return
 	}
 	if err := s.st.SetServerAgentSettings(id, a); err != nil {

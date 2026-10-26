@@ -80,6 +80,8 @@ type Server struct {
 	distMu   sync.Mutex
 	distSnap *distSnapshot
 
+	decideMu sync.Mutex // handleDecision: check for an open ruling and queue one
+
 	deviceOnce sync.Once
 	devKey     []byte
 }
@@ -886,6 +888,10 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request, c *opCtx
 		writeErr(w, http.StatusConflict, "this server does not take approvals from the hub (update kodeblue, or hub.accept_approvals is false): run kodeblue respond "+req.Decision+" "+rid+" on the server")
 		return
 	}
+	// Check and queue as one step: two rulings sent at once (Approve all in
+	// one tab, a click in another) must not both be queued.
+	s.decideMu.Lock()
+	defer s.decideMu.Unlock()
 	if m := s.st.OpenDecision(srv.ID, rid); m != nil {
 		writeErr(w, http.StatusConflict, m.Author+" already sent "+m.Decision+" for "+rid)
 		return

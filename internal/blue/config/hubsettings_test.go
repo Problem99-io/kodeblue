@@ -227,6 +227,55 @@ func TestHubTuningAndProtections(t *testing.T) {
 	}
 }
 
+// The hub tightens what a server sees, reports and keeps, never loosens it,
+// and a value that is not a number never reaches the config.
+func TestHubTuningOnlyTightens(t *testing.T) {
+	c := Default()
+	c.Budget.DailyUSD, c.Budget.HubMaxDailyUSD = 3, 0
+	c.Budget.InputUSDPerMTok = 2
+	c.Hub.ShareTranscripts = false
+	c.Schedule.RetentionDays = 0 // 90 days
+	c.Detect.BruteForceThreshold = 5
+	c.Notify.MinSeverity = "medium"
+	loosen := map[string]string{
+		"budget.daily_usd":            "500", // no hub ceiling: the hub may only lower it
+		"budget.input_usd_per_mtok":   "0",
+		"hub.share_transcripts":       "true",
+		"schedule.retention_days":     "7",
+		"detect.bruteforce_threshold": "50",
+		"notify.min_severity":         "critical",
+	}
+	got := c.applyHubSettings(&hubproto.Settings{Version: "v1", Tuning: loosen})
+	if got.Budget.DailyUSD != 3 || got.Budget.InputUSDPerMTok != 2 || got.Hub.ShareTranscripts || got.Schedule.RetentionDays != 0 ||
+		got.Detect.BruteForceThreshold != 5 || got.Notify.MinSeverity != "medium" {
+		t.Errorf("hub loosened the server: %+v %+v %+v %+v %+v", got.Budget, got.Hub.ShareTranscripts, got.Schedule.RetentionDays, got.Detect.BruteForceThreshold, got.Notify.MinSeverity)
+	}
+	tighten := map[string]string{
+		"budget.daily_usd":            "1",
+		"budget.input_usd_per_mtok":   "3",
+		"schedule.retention_days":     "365",
+		"detect.bruteforce_threshold": "3",
+		"notify.min_severity":         "low",
+	}
+	got = c.applyHubSettings(&hubproto.Settings{Version: "v2", Tuning: tighten})
+	if got.Budget.DailyUSD != 1 || got.Budget.InputUSDPerMTok != 3 || got.Schedule.RetentionDays != 365 ||
+		got.Detect.BruteForceThreshold != 3 || got.Notify.MinSeverity != "low" {
+		t.Errorf("tightening not applied: %+v %v %v %v", got.Budget, got.Schedule.RetentionDays, got.Detect.BruteForceThreshold, got.Notify.MinSeverity)
+	}
+	c.Schedule.RetentionDays = -1 // keep everything
+	if got := c.applyHubSettings(&hubproto.Settings{Version: "v3", Tuning: tighten}); got.Schedule.RetentionDays != -1 {
+		t.Errorf("retention %d, want the server's keep-everything", got.Schedule.RetentionDays)
+	}
+	for _, v := range []string{"NaN", "nan", "Inf", "-Inf", "1e309"} {
+		if hubproto.CheckTuning(map[string]string{"budget.daily_usd": v}) == nil {
+			t.Errorf("daily budget %q accepted", v)
+		}
+		if got := c.applyHubSettings(&hubproto.Settings{Version: "v4", Tuning: map[string]string{"budget.daily_usd": v}}); got.Budget.DailyUSD != 3 {
+			t.Errorf("daily budget %q applied: %v", v, got.Budget.DailyUSD)
+		}
+	}
+}
+
 func contains(l []string, s string) bool {
 	for _, x := range l {
 		if x == s {

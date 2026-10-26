@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheck(t *testing.T) {
@@ -140,5 +141,24 @@ func TestLockUserRestoresExpiry(t *testing.T) {
 		if got := strings.Join(unlockArgs(c.undo), "|"); got != c.want {
 			t.Errorf("%s: usermod %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A retried execute of a request the helper already carried out answers with
+// that record and appends nothing, so the undo recipe is not overwritten.
+func TestExecuteRetryKeepsRecord(t *testing.T) {
+	p := DefaultPolicy()
+	p.StateDir = t.TempDir()
+	done := Record{Request: Request{ID: "act_r1", Action: "block_ip", Params: map[string]string{"ip": "203.0.113.5"}, Justification: "evidence: 400 failed ssh logins from this address"}, Status: "done",
+		Result: "blocked", Undo: map[string]string{"rule": "x"}, DoneAt: time.Now()}
+	if err := Append(p.StateDir, done); err != nil {
+		t.Fatal(err)
+	}
+	rec := Execute(p, done.Request)
+	if rec.Result != "blocked" || rec.Undo["rule"] != "x" {
+		t.Fatalf("retry answered %q %v", rec.Result, rec.Undo)
+	}
+	if all := Load(p.StateDir); len(all) != 1 || all[0].Undo["rule"] != "x" {
+		t.Fatalf("journal after retry: %+v", all)
 	}
 }

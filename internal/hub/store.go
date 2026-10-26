@@ -717,8 +717,17 @@ func (s *Store) OpenCommand(server string) *Message {
 }
 
 // OpenDecision is the queued or delivered decision on a request, if any.
+// DecisionReplyWait is how long a delivered ruling waits for the server's
+// reply before the request can be ruled on again (the helper's own deadline
+// is 2 minutes).
+const DecisionReplyWait = 5 * time.Minute
+
 func (s *Store) OpenDecision(server, request string) *Message {
-	list := s.messages(`WHERE server_id=? AND request_id=? AND decision<>'' AND status IN ('queued','delivered') ORDER BY id DESC LIMIT 1`, server, request)
+	// A ruling delivered long ago whose reply never came (the server
+	// restarted mid-run, the reply was lost) no longer blocks a new one: the
+	// server answers a ruling on a settled request with "no pending request".
+	list := s.messages(`WHERE server_id=? AND request_id=? AND decision<>'' AND (status='queued' OR (status='delivered' AND delivered_at>?)) ORDER BY id DESC LIMIT 1`,
+		server, request, time.Now().Add(-DecisionReplyWait).Unix())
 	if len(list) == 0 {
 		return nil
 	}

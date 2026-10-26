@@ -244,6 +244,7 @@ func main() {
 		st := mustStore(cfg)
 		_ = st.Set("learned_at", "")
 		st.SetBaselineProgress(0, 0, time.Time{}) // a fresh baseline, not the rest of an earlier one
+		_ = st.Set("baseline_at", "")
 		st.Journal("operator", "relearn", "")
 		fmt.Println("learning phase will run on next start (systemctl restart kodeblue)")
 	case "version":
@@ -282,12 +283,13 @@ func runDaemon(cfg config.Config, logger *slog.Logger) {
 		}
 	}()
 	// SIGHUP (kodeblue inference, systemctl reload): restart with the new
-	// config once no agent session or learning run is in progress.
+	// config once no agent session runs (between baseline sweeps too; the
+	// baseline resumes after it).
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
 		for range hup {
-			logger.Info("SIGHUP: restarting with the new config once no agent session or learning runs")
+			logger.Info("SIGHUP: restarting with the new config once no agent session runs")
 			d.ApplySettings()
 		}
 	}()
