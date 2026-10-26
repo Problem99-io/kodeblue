@@ -155,6 +155,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/servers/{id}/upgrade", s.op(s.handleUpgrade))
 	m.HandleFunc("POST /api/servers/{id}/stop-session", s.op(s.handleStop))
 	m.HandleFunc("POST /api/servers/{id}/vulnerabilities/{rid}", s.op(s.handleVuln))
+	m.HandleFunc("POST /api/servers/{id}/rules/{rid}", s.op(s.handleRule))
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
@@ -341,7 +342,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, id string) {
 			out := hubproto.MessagesResponse{}
 			for _, m := range msgs {
 				out.Messages = append(out.Messages, hubproto.OperatorMessage{ID: m.ID, Author: m.Author, Body: m.Body, IncidentID: m.IncidentID,
-					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID})
+					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash})
 			}
 			writeJSON(w, http.StatusOK, out)
 			return
@@ -1114,6 +1115,58 @@ func (s *Server) handleVuln(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	writeJSON(w, http.StatusOK, m)
 }
 
+// handleRule relays an operator's ruling on a containment rule: approve,
+// reject, pause or delete. The server's root helper checks an approval
+// against the rule content the operator saw (hash).
+func (s *Server) handleRule(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	srv := s.serverOr404(w, r)
+	if srv == nil {
+		return
+	}
+	var req struct {
+		Command string `json:"command"`
+		Hash    string `json:"hash"`
+		Note    string `json:"note"`
+	}
+	if err := readJSON(w, r, 8<<10, &req); err != nil || !slices.Contains(hubproto.RuleCommands, req.Command) {
+		writeErr(w, http.StatusBadRequest, "command must be one of "+strings.Join(hubproto.RuleCommands, ", "))
+		return
+	}
+	req.Note = strings.TrimSpace(req.Note)
+	rid := r.PathValue("rid")
+	rec := s.st.Record(srv.ID, "containment_rule", rid)
+	if rec == nil {
+		writeErr(w, http.StatusNotFound, "no such containment rule")
+		return
+	}
+	if req.Command == hubproto.CommandRuleApprove {
+		var v struct {
+			Hash string `json:"hash"`
+		}
+		_ = json.Unmarshal(rec.Data, &v)
+		if req.Hash == "" || req.Hash != v.Hash {
+			writeErr(w, http.StatusConflict, "the rule changed since you opened it; look at it again")
+			return
+		}
+	}
+	if (req.Command == hubproto.CommandRulePause || req.Command == hubproto.CommandRuleReject) && req.Note == "" {
+		writeErr(w, http.StatusBadRequest, "say why")
+		return
+	}
+	if !srv.Enrolled || srv.Revoked {
+		writeErr(w, http.StatusConflict, "server is not connected to the hub")
+		return
+	}
+	m := &Message{ServerID: srv.ID, Author: c.user.Name, Command: req.Command, RequestID: rid, Body: req.Note, RuleHash: req.Hash}
+	if err := s.st.AddMessage(m); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.st.Audit(c.user.Name, "containment_rule."+strings.TrimPrefix(req.Command, "rule_"), srv.ID, strings.TrimSpace(rid+" "+req.Hash+" "+req.Note), c.ip)
+	s.wake(srv.ID)
+	writeJSON(w, http.StatusOK, m)
+}
+
 // handleCaseState moves a case to a board column or (un)archives it. This is
 // hub-only board state; the agent's own incident status is untouched.
 func (s *Server) handleCaseState(w http.ResponseWriter, r *http.Request, c *opCtx) {
@@ -1122,8 +1175,9 @@ func (s *Server) handleCaseState(w http.ResponseWriter, r *http.Request, c *opCt
 		IncidentID int64   `json:"incident_id"`
 		Column     *string `json:"column"`
 		Archived   *bool   `json:"archived"`
+		Pinned     *bool   `json:"pinned"`
 	}
-	if err := readJSON(w, r, 4<<10, &req); err != nil || req.IncidentID <= 0 || (req.Column == nil && req.Archived == nil) {
+	if err := readJSON(w, r, 4<<10, &req); err != nil || req.IncidentID <= 0 || (req.Column == nil && req.Archived == nil && req.Pinned == nil) {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
 	}
@@ -1135,12 +1189,25 @@ func (s *Server) handleCaseState(w http.ResponseWriter, r *http.Request, c *opCt
 		writeErr(w, http.StatusNotFound, "case not found")
 		return
 	}
+	detail := fmt.Sprintf("case #%d", req.IncidentID)
+	if req.Pinned != nil {
+		pin, err := s.st.SetCasePin(req.ServerID, req.IncidentID, *req.Pinned, c.user.Name)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if req.Column == nil && req.Archived == nil {
+			s.st.Audit(c.user.Name, "case.update", req.ServerID, fmt.Sprintf("%s pinned=%v", detail, *req.Pinned), c.ip)
+			writeJSON(w, http.StatusOK, map[string]any{"pin": pin})
+			return
+		}
+		detail += fmt.Sprintf(" pinned=%v", *req.Pinned)
+	}
 	st, err := s.st.SetCaseState(req.ServerID, req.IncidentID, req.Column, req.Archived, c.user.Name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	detail := fmt.Sprintf("case #%d", req.IncidentID)
 	if req.Column != nil {
 		detail += " column=" + map[string]string{"": "auto"}[*req.Column] + *req.Column
 	}

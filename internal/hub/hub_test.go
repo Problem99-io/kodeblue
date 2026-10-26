@@ -578,6 +578,54 @@ func TestServicesAndVulnerabilities(t *testing.T) {
 	}
 }
 
+// A containment rule ruling is relayed with the content the operator saw; an
+// approval of a rule that changed since is refused on the hub already.
+func TestContainmentRuleCommands(t *testing.T) {
+	_, st, ts := newHub(t)
+	_ = st.AddUser("alice", "correct horse battery")
+	jar, _ := cookiejar.New(nil)
+	c := ts.Client()
+	c.Jar = jar
+	_, b := do(t, c, "POST", ts.URL+"/api/login", "", "", map[string]string{"name": "alice", "password": "correct horse battery"})
+	var me struct {
+		CSRF string `json:"csrf"`
+	}
+	_ = json.Unmarshal(b, &me)
+	_, tok, _ := st.CreateServer("web-1", "test", time.Hour)
+	srv, _, _ := st.Enroll(tok, "web-1", "")
+	if err := st.ApplySync(srv.ID, &hubproto.SyncRequest{Replace: []string{"containment_rule"}, Records: []hubproto.Record{
+		{Kind: "containment_rule", ID: "cr-ssh", UpdatedAt: time.Now(), Data: json.RawMessage(`{"id":"cr-ssh","status":"proposed","hash":"abc123"}`)},
+		{Kind: "containment_rule", ID: "cr-web", UpdatedAt: time.Now(), Data: json.RawMessage(`{"id":"cr-web","status":"active","hash":"def456"}`)},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.Counts(srv.ID).RulesWaiting; n != 1 {
+		t.Fatalf("rules waiting: %d", n)
+	}
+	rule := func(id string, body any) (int, []byte) {
+		return do(t, c, "POST", ts.URL+"/api/servers/"+srv.ID+"/rules/"+id, "", me.CSRF, body)
+	}
+	if code, _ := rule("cr-ssh", map[string]string{"command": "rule_edit"}); code != 400 {
+		t.Fatalf("unknown command: %d", code)
+	}
+	if code, _ := rule("cr-nope", map[string]string{"command": "rule_pause", "note": "x"}); code != 404 {
+		t.Fatalf("unknown rule: %d", code)
+	}
+	if code, _ := rule("cr-ssh", map[string]string{"command": "rule_approve", "hash": "old"}); code != 409 {
+		t.Fatalf("approval of changed content: %d", code)
+	}
+	if code, _ := rule("cr-web", map[string]string{"command": "rule_pause"}); code != 400 {
+		t.Fatalf("pause needs a reason: %d", code)
+	}
+	if code, b := rule("cr-ssh", map[string]string{"command": "rule_approve", "hash": "abc123"}); code != 200 {
+		t.Fatalf("approve: %d %s", code, b)
+	}
+	msgs := st.TakeQueued(srv.ID)
+	if len(msgs) != 1 || msgs[0].Command != hubproto.CommandRuleApprove || msgs[0].RequestID != "cr-ssh" || msgs[0].RuleHash != "abc123" {
+		t.Fatalf("queued: %+v", msgs)
+	}
+}
+
 // Update in the console asks one server to upgrade to the hub's version. The
 // hub names nothing else, and refuses what the server would refuse.
 func TestUpgradeCommand(t *testing.T) {

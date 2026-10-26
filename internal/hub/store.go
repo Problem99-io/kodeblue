@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 		{"messages", "decision", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "request_id", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "command", "TEXT NOT NULL DEFAULT ''"},
+		{"messages", "rule_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"case_state", "pinned_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"case_state", "pinned_by", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumn(c.table, c.col, c.def); err != nil {
 			return err
@@ -350,7 +353,7 @@ func (s *Store) servers(where string, args ...any) []Host {
 
 var syncKinds = map[string]bool{"incident": true, "finding": true, "monitor": true, "allow_rule": true, "journal": true,
 	"action": true, "pending_action": true, "session": true, "report": true, "skill": true, "definition": true,
-	"service": true, "vulnerability": true}
+	"service": true, "vulnerability": true, "containment_rule": true}
 
 const maxRecordBytes = 2 << 20
 
@@ -482,6 +485,15 @@ type TaskRow struct {
 	UpdatedAt  time.Time       `json:"updated_at"`
 	Data       json.RawMessage `json:"data"`
 	Board      *CaseState      `json:"board,omitempty"`
+	// Pin: an operator pinned the case to the top of its column. Unlike
+	// Board it holds whatever the agent does, until someone unpins it.
+	Pin *Pin `json:"pin,omitempty"`
+}
+
+// Pin records who pinned a case and when.
+type Pin struct {
+	By string    `json:"by"`
+	At time.Time `json:"at"`
 }
 
 // CaseState is the hub's own board state for a case: where an operator
@@ -510,6 +522,20 @@ func (s *Store) SetCaseState(server string, incident int64, col *string, archive
 ON CONFLICT(server_id,incident_id) DO UPDATE SET col=excluded.col, archived=excluded.archived, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
 		server, incident, cur.Column, cur.Archived, cur.UpdatedAt.Unix(), by)
 	return cur, err
+}
+
+// SetCasePin pins or unpins a case for everyone. It leaves the board state
+// (column, archived, updated_at) alone: a pin is not a move.
+func (s *Store) SetCasePin(server string, incident int64, on bool, by string) (*Pin, error) {
+	at, who := int64(0), ""
+	var pin *Pin
+	if on {
+		now := time.Now().UTC().Truncate(time.Second)
+		at, who, pin = now.Unix(), by, &Pin{By: by, At: now}
+	}
+	_, err := s.db.Exec(`INSERT INTO case_state(server_id,incident_id,updated_at,updated_by,pinned_at,pinned_by) VALUES(?,?,0,'',?,?)
+ON CONFLICT(server_id,incident_id) DO UPDATE SET pinned_at=excluded.pinned_at, pinned_by=excluded.pinned_by`, server, incident, at, who)
+	return pin, err
 }
 
 func (s *Store) caseState(server string, incident int64) *CaseState {
@@ -558,7 +584,7 @@ var taskFields = []string{"id", "kind", "title", "severity", "status", "verdict"
 
 // Tasks lists incident records newest first, across all servers or one.
 func (s *Store) Tasks(server string, limit int) []TaskRow {
-	query := `SELECT r.server_id, s.name, r.updated_at, r.data, c.col, c.archived, c.updated_at, c.updated_by FROM records r JOIN servers s ON s.id=r.server_id
+	query := `SELECT r.server_id, s.name, r.updated_at, r.data, c.col, c.archived, c.updated_at, c.updated_by, c.pinned_at, c.pinned_by FROM records r JOIN servers s ON s.id=r.server_id
 LEFT JOIN case_state c ON c.server_id=r.server_id AND c.incident_id=CAST(r.rid AS INTEGER) WHERE r.kind='incident'`
 	args := []any{}
 	if server != "" {
@@ -575,11 +601,14 @@ LEFT JOIN case_state c ON c.server_id=r.server_id AND c.incident_id=CAST(r.rid A
 		var t TaskRow
 		var at int64
 		var data string
-		var col, by sql.NullString
-		var arch, cat sql.NullInt64
-		_ = rows.Scan(&t.ServerID, &t.ServerName, &at, &data, &col, &arch, &cat, &by)
-		if cat.Valid {
+		var col, by, pby sql.NullString
+		var arch, cat, pat sql.NullInt64
+		_ = rows.Scan(&t.ServerID, &t.ServerName, &at, &data, &col, &arch, &cat, &by, &pat, &pby)
+		if cat.Int64 > 0 {
 			t.Board = &CaseState{Column: col.String, Archived: arch.Int64 != 0, UpdatedAt: time.Unix(cat.Int64, 0).UTC(), UpdatedBy: by.String}
+		}
+		if pat.Int64 > 0 {
+			t.Pin = &Pin{By: pby.String, At: time.Unix(pat.Int64, 0).UTC()}
 		}
 		var full map[string]json.RawMessage
 		if json.Unmarshal([]byte(data), &full) != nil {
@@ -616,6 +645,7 @@ type Counts struct {
 	Incidents24h   int            `json:"incidents_24h"`
 	Services       int            `json:"services"`
 	OpenVulns      map[string]int `json:"open_vulnerabilities"` // severity -> n
+	RulesWaiting   int            `json:"rules_waiting"`        // containment rules waiting for approval
 }
 
 func (s *Store) Counts(server string) Counts {
@@ -658,6 +688,8 @@ func (s *Store) Counts(server string) Counts {
 	_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN json_extract(data,'$.last_ok') THEN 0 ELSE 1 END),0) FROM records
   WHERE server_id=? AND kind='monitor' AND NOT json_extract(data,'$.disabled')`, server).Scan(&c.Monitors, &c.FailingMonitor)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM records WHERE server_id=? AND kind='service'`, server).Scan(&c.Services)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM records WHERE server_id=? AND kind='containment_rule'
+  AND (json_extract(data,'$.status')='proposed' OR json_extract(data,'$.pending_change'))`, server).Scan(&c.RulesWaiting)
 	if rows, err := s.db.Query(`SELECT json_extract(data,'$.severity'), COUNT(*) FROM records WHERE server_id=? AND kind='vulnerability'
   AND json_extract(data,'$.status')='open' GROUP BY 1`, server); err == nil {
 		for rows.Next() {
@@ -704,6 +736,8 @@ type Message struct {
 	// Command: a learning command (hubproto.Command*), also handled
 	// without a model.
 	Command string `json:"command,omitempty"`
+	// RuleHash: the containment rule content an approval names.
+	RuleHash string `json:"rule_hash,omitempty"`
 }
 
 // OpenCommand is the queued or delivered learning command for server, if any.
@@ -747,8 +781,8 @@ func (s *Store) AddMessage(m *Message) error {
 	if m.ConversationID == "" {
 		m.ConversationID = "c_" + NewToken("")[:12]
 	}
-	res, err := s.db.Exec(`INSERT INTO messages(server_id,author,body,incident_id,conversation_id,created_at,decision,request_id,command,session_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		m.ServerID, m.Author, m.Body, m.IncidentID, m.ConversationID, time.Now().Unix(), m.Decision, m.RequestID, m.Command, m.SessionID)
+	res, err := s.db.Exec(`INSERT INTO messages(server_id,author,body,incident_id,conversation_id,created_at,decision,request_id,command,session_id,rule_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		m.ServerID, m.Author, m.Body, m.IncidentID, m.ConversationID, time.Now().Unix(), m.Decision, m.RequestID, m.Command, m.SessionID, m.RuleHash)
 	if err != nil {
 		return err
 	}
@@ -800,7 +834,7 @@ func (s *Store) AllMessages(limit int) []Message {
 }
 
 func (s *Store) messages(where string, args ...any) []Message {
-	rows, err := s.db.Query(`SELECT id,server_id,author,body,incident_id,conversation_id,status,created_at,delivered_at,replied_at,reply,session_id,cost_usd,decision,request_id,command FROM messages `+where, args...)
+	rows, err := s.db.Query(`SELECT id,server_id,author,body,incident_id,conversation_id,status,created_at,delivered_at,replied_at,reply,session_id,cost_usd,decision,request_id,command,rule_hash FROM messages `+where, args...)
 	if err != nil {
 		return nil
 	}
@@ -809,7 +843,7 @@ func (s *Store) messages(where string, args ...any) []Message {
 	for rows.Next() {
 		var m Message
 		var c, d, r int64
-		_ = rows.Scan(&m.ID, &m.ServerID, &m.Author, &m.Body, &m.IncidentID, &m.ConversationID, &m.Status, &c, &d, &r, &m.Reply, &m.SessionID, &m.CostUSD, &m.Decision, &m.RequestID, &m.Command)
+		_ = rows.Scan(&m.ID, &m.ServerID, &m.Author, &m.Body, &m.IncidentID, &m.ConversationID, &m.Status, &c, &d, &r, &m.Reply, &m.SessionID, &m.CostUSD, &m.Decision, &m.RequestID, &m.Command, &m.RuleHash)
 		m.CreatedAt = time.Unix(c, 0)
 		if d > 0 {
 			m.DeliveredAt = time.Unix(d, 0)

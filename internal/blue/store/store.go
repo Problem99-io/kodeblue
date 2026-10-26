@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY AUTOINCREMENT, at INT
 	if _, err := s.db.Exec(vulnSchema); err != nil {
 		return err
 	}
+	if _, err := s.db.Exec(ruleSchema); err != nil {
+		return err
+	}
 	// Columns added after the first release.
 	for _, col := range []string{
 		`ALTER TABLE incidents ADD COLUMN self_eval TEXT NOT NULL DEFAULT ''`,

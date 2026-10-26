@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
+	"github.com/Problem99-io/kodeblue/internal/blue/containment"
 	"github.com/Problem99-io/kodeblue/internal/blue/cvefeed"
 	"github.com/Problem99-io/kodeblue/internal/blue/detect"
 	"github.com/Problem99-io/kodeblue/internal/blue/hublink"
@@ -58,6 +59,9 @@ type Daemon struct {
 	// software is set while the daily software check runs (software.go);
 	// cveClient fetches its feeds (tests point it at a fake).
 	software atomic.Bool
+	// ruleRun carries out what an approved containment rule asks for (the
+	// root helper; tests replace it).
+	ruleRun containment.Invoker
 	// upgradeMu serializes reads and writes of the upgrade status file
 	// (upgrade.go): the main loop and the hub link both settle it.
 	upgradeMu sync.Mutex
@@ -176,6 +180,7 @@ func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	d.det = detect.New(st, env, opts)
 	d.mon = monitor.NewRunner(st, env)
 	d.mon.OnReflex(d.reflex)
+	d.ruleRun = containment.HelperInvoker(cfg)
 	n := cfg.Budget.MaxConcurrentIncidents
 	if n <= 0 {
 		n = 1
@@ -413,6 +418,7 @@ func (d *Daemon) sweepOnce(ctx context.Context, why string) {
 	_ = d.st.Set("heartbeat", time.Now().UTC().Format(time.RFC3339))
 	all := append(append(res.New, monFindings...), stuck...)
 	d.handleFindings(ctx, all)
+	d.writeVulnRegister()
 	if len(all) > 0 || why != "schedule" {
 		d.log.Info("sweep", "trigger", why, "items", len(snap.Items), "events", len(snap.Events), "new_findings", len(all),
 			"absorbed", res.Absorbed, "allowed", res.Allowed, "repeats", res.Bumped, "debouncing", res.Pending, "took", time.Since(start).Round(time.Millisecond))
@@ -509,6 +515,7 @@ func (d *Daemon) handleFindings(ctx context.Context, all []*store.Finding) {
 	d.routeMu.Lock()
 	defer d.routeMu.Unlock()
 	all = d.unclaimed(all)
+	all = d.applyRules(ctx, all)
 	all = d.joinLiveIncident(ctx, all)
 	var critical []store.Finding
 	for _, f := range all {
@@ -1337,6 +1344,7 @@ func (d *Daemon) reviewDigest(since time.Time) string {
 		}
 		fmt.Fprintf(&b, "- %s %s %s: %s\n", j.At.UTC().Format("01-02 15:04"), j.Actor, j.Action, j.Detail)
 	}
+	b.WriteString("\n" + d.recurringDigest(time.Now()))
 	b.WriteString("\nIncidents in period:\n")
 	for _, in := range d.st.Incidents(`WHERE created_at>=? AND kind='incident' ORDER BY id`, since.Unix()) {
 		fmt.Fprintf(&b, "- #%d [%s] %s → %s %s\n", in.ID, in.Severity, in.Title, in.Status, in.Verdict)
