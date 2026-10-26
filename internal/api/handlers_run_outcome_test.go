@@ -72,15 +72,19 @@ func TestRunOutcomeSaysWhyARunFailed(t *testing.T) {
 	if deps.Sessions.Create(session) != nil || deps.Runs.Create(run) != nil {
 		t.Fatal("setup")
 	}
-	payload, _ := json.Marshal(map[string]any{"reason": "Rate limit exceeded: free-models-per-day.", "http_status": 429, "failure_class": "rate_limited"})
+	payload, _ := json.Marshal(map[string]any{"reason": "Rate limit exceeded: free-models-per-day.", "http_status": 429, "failure_class": "rate_limit", "resets_at": "2026-10-27T00:00:00Z"})
 	if err := deps.Events.Append(&internal.Event{SessionID: session.ID, RunID: run.ID, Type: internal.EventRunFailed, Payload: payload, Timestamp: now}); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
 	NewRouter(deps).ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/"+string(session.ID)+"/runs/"+string(run.ID)+"/outcome", nil))
-	var out struct{ Status, Error string }
+	var out struct {
+		Status, Error string
+		Class         string `json:"error_class"`
+		ResetsAt      string `json:"resets_at"`
+	}
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	if out.Status != "failed" || out.Error != "Rate limit exceeded: free-models-per-day. (HTTP 429)" {
+	if out.Status != "failed" || out.Error != "Rate limit exceeded: free-models-per-day. (HTTP 429)" || out.Class != "rate_limit" || out.ResetsAt != "2026-10-27T00:00:00Z" {
 		t.Fatalf("outcome: %s", w.Body.String())
 	}
 }

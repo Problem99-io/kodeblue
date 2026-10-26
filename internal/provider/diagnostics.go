@@ -32,6 +32,9 @@ type FailureDiagnostic struct {
 	MaxAttempts     int    `json:"max_attempts"`
 	RetryElapsedMS  int64  `json:"retry_elapsed_ms"`
 	RecoveryOutcome string `json:"recovery_outcome,omitempty"`
+	// ResetsAt is when a spending limit the provider reported lifts
+	// (RFC 3339), when it said.
+	ResetsAt string `json:"resets_at,omitempty"`
 }
 
 func (d FailureDiagnostic) Fields() map[string]any {
@@ -40,7 +43,7 @@ func (d FailureDiagnostic) Fields() map[string]any {
 	if d.HTTPStatus != 0 {
 		fields["http_status"] = d.HTTPStatus
 	}
-	for key, value := range map[string]string{"upstream_code": d.UpstreamCode, "endpoint_host": d.EndpointHost, "request_id": d.RequestID, "recovery_outcome": d.RecoveryOutcome} {
+	for key, value := range map[string]string{"upstream_code": d.UpstreamCode, "endpoint_host": d.EndpointHost, "request_id": d.RequestID, "recovery_outcome": d.RecoveryOutcome, "resets_at": d.ResetsAt} {
 		if value != "" {
 			fields[key] = value
 		}
@@ -219,6 +222,13 @@ func DiagnoseFailure(err error) FailureDiagnostic {
 		set("quota_exceeded", "The model provider rejected the request: monthly spend limit reached.")
 	case has("quota exceeded", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit") || code == "insufficient_quota" || code == "insufficient_credits" || code == "quota_exceeded":
 		set("quota_exceeded", "The model provider's quota or credit balance is exhausted.")
+	case has("key limit exceeded", "limit exceeded (daily", "limit exceeded (weekly", "limit exceeded (monthly", "spending limit reached", "spend limit exceeded"):
+		// OpenRouter answers a key past its own spending cap with 403: not a
+		// model the key may not use, and not fixed by retrying before the cap
+		// resets.
+		set("spend_limit", "The API key's spending limit at the model provider is reached.")
+	case status == 402 || has("requires more credits", "can only afford"):
+		set("quota_exceeded", "The model provider's credit balance is too low for this request.")
 	case status == 401 || code == "authentication_error":
 		set("authentication", "The model provider rejected the credentials.")
 	case status == 403 || code == "permission_error" || has("not authorized", "is disabled", "provider not available"):
@@ -260,12 +270,24 @@ func DiagnoseFailure(err error) FailureDiagnostic {
 	case errors.As(err, &netErr):
 		set("connection", "The connection to the model provider failed.")
 	}
+	if d.Class == "spend_limit" || d.Class == "quota_exceeded" {
+		if m := resetsRe.FindStringSubmatch(text); m != nil {
+			if t, e := time.Parse(time.RFC3339Nano, m[1]); e == nil {
+				d.ResetsAt = t.UTC().Format(time.RFC3339)
+				d.Cause = strings.TrimSuffix(d.Cause, ".") + ". It resets at " + t.UTC().Format("2006-01-02 15:04") + " UTC."
+			}
+		}
+	}
 	if d.HTTPStatus >= 400 && !strings.Contains(d.Cause, "HTTP") {
 		d.Cause = strings.TrimSuffix(d.Cause, ".") + fmt.Sprintf(" (HTTP %d).", d.HTTPStatus)
 	}
 	d.EndpointHost = safeEndpointHost(d.EndpointHost)
 	return d
 }
+
+// resetsRe finds when a provider says a limit lifts ("resets
+// 2026-10-27T00:00:00.000Z"): only the timestamp is kept, never the message.
+var resetsRe = regexp.MustCompile(`(?i)\bresets?(?: at)?:? (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)`)
 
 // RecoveryStoppedError includes the retry outcome without masking the cause.
 type RecoveryStoppedError struct {

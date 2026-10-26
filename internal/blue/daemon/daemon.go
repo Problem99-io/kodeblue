@@ -125,6 +125,9 @@ type Daemon struct {
 	// learnRetry is its first delay after a failed run.
 	learnWaiting atomic.Bool
 	learnRetry   time.Duration
+	// limitReset (time.Time) is when the provider's spending limit that
+	// ended the last learning run lifts (finishLearning).
+	limitReset atomic.Value
 	// Systemd, when kodeblue runs under it, receives the watchdog pings;
 	// progressBy (unix nanoseconds) is when the main loop promised to be
 	// back (expectProgress).
@@ -1037,7 +1040,7 @@ func learnerRan(status string) bool { return status == "completed" || status == 
 // baseline. A run that fails is retried with a growing delay. The models
 // only change with a restart, so without them there is nothing to wait for.
 func (d *Daemon) learnWhenModelReady(ctx context.Context) {
-	if !d.modelsOn || d.st.Get(store.LearnerPendingKey) == "" || !d.learnWaiting.CompareAndSwap(false, true) {
+	if !d.modelsOn || !d.learnPending() || !d.learnWaiting.CompareAndSwap(false, true) {
 		return
 	}
 	d.wg.Add(1)
@@ -1055,27 +1058,48 @@ func (d *Daemon) learnWhenModelReady(ctx context.Context) {
 			if ok || ctx.Err() != nil {
 				return
 			}
+			wait := retry
+			// A provider's spending limit that said when it resets: trying
+			// before then only fails again.
+			if at := d.limitResetsAt(); time.Until(at) > wait {
+				wait = min(time.Until(at)+time.Minute, 24*time.Hour)
+				d.log.Info("learning waits for the model provider's spending limit to reset", "resets_at", at.Format(time.RFC3339))
+			} else {
+				// A rate limit or dropped connection usually clears within
+				// the hour: do not leave a server unlearned longer than that.
+				retry = min(retry*2, time.Hour)
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(retry):
+			case <-time.After(wait):
 			}
-			// A provider's rate limit or spend cap usually lifts within the
-			// hour: do not leave a server unlearned for longer than that.
-			retry = min(retry*2, time.Hour)
 		}
 	}()
+}
+
+// learnPending reports whether the learner, or the assessment after it, is
+// still to run.
+func (d *Daemon) learnPending() bool {
+	return d.st.Get(store.LearnerPendingKey) != "" || d.st.Get(store.AssessmentPendingKey) != ""
+}
+
+// limitResetsAt is when the model provider's spending limit that ended the
+// last learning run lifts, or zero.
+func (d *Daemon) limitResetsAt() time.Time {
+	t, _ := d.limitReset.Load().(time.Time)
+	return t
 }
 
 // claimPendingLearner waits until the engine is up and no other learning
 // runs, and takes the learning flag; false when there is nothing left to do.
 func (d *Daemon) claimPendingLearner(ctx context.Context) bool {
 	for {
-		if d.st.Get(store.LearnerPendingKey) == "" {
+		if !d.learnPending() {
 			return false // a learner the hub asked for did it
 		}
 		if d.engine() != nil && d.learning.CompareAndSwap(false, true) {
-			if d.st.Get(store.LearnerPendingKey) != "" {
+			if d.learnPending() {
 				return true
 			}
 			d.learning.Store(false) // done while we waited for the flag
@@ -1089,11 +1113,15 @@ func (d *Daemon) claimPendingLearner(ctx context.Context) bool {
 	}
 }
 
-// runPendingLearner runs the waiting learner and assessment; true when the
-// learner did its work, which clears the waiting state.
+// runPendingLearner runs the waiting learner and assessment, or only the
+// assessment when the learner already ran; true when both are done.
 func (d *Daemon) runPendingLearner(ctx context.Context) bool {
 	d.nudgeHub()
 	since := d.st.Get(store.LearnerPendingKey)
+	if since == "" {
+		// The learner ran; only its assessment is still to do.
+		return d.assess(ctx)
+	}
 	brief := fmt.Sprintf("Learning run for server %q. kodeblue collected the baseline earlier (learning finished %s) and detection has watched the server since; this run waited for a model.", d.cfg.Server.Name, since)
 	in, sess, err := d.startLearner(ctx, d.learnBrief(brief))
 	if err != nil {
@@ -1102,7 +1130,7 @@ func (d *Daemon) runPendingLearner(ctx context.Context) bool {
 	if !learnerRan(d.finishLearner(ctx, in, sess)) || ctx.Err() != nil {
 		return false
 	}
-	d.assess(ctx)
+	assessed := d.assess(ctx)
 	coverage := d.checkServiceCoverage("learning")
 	if ctx.Err() != nil {
 		return false
@@ -1111,7 +1139,7 @@ func (d *Daemon) runPendingLearner(ctx context.Context) bool {
 	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "learning", Severity: "info",
 		Title: "kodeblue has learned this server",
 		Body:  fmt.Sprintf("The learning session that waited for a model is done: %d monitors; %s.", len(d.mon.Specs()), coverage)}, nil)
-	return true
+	return assessed // a failed assessment is retried on its own
 }
 
 // rootKeysNote lists root's authorized SSH keys that learning took into the
@@ -1194,6 +1222,11 @@ func (d *Daemon) finishLearning(ctx context.Context, in *store.Incident, sess *r
 	usd = d.st.Spend("learning", d.cfg.ModelFor(hubproto.RoleLearner), tin, tout, cached, usd)
 	in.Status, in.Report, in.CostUSD = "resolved", out.Text, usd
 	in.Summary = "learning " + out.Status
+	if out.Status == "completed" {
+		d.limitReset.Store(time.Time{})
+	} else if out.ErrorClass == "spend_limit" || out.ErrorClass == "quota_exceeded" {
+		d.limitReset.Store(out.ResetsAt)
+	}
 	if out.Error != "" {
 		// The hub shows the summary: say why (a provider's rate limit or
 		// spend cap), not only that it failed.
