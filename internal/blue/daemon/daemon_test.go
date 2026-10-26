@@ -100,6 +100,7 @@ func newTestDaemon(t *testing.T) (*Daemon, *store.Store, *logRecorder, *sent) {
 	t.Cleanup(func() { st.Close() })
 	rec := &logRecorder{}
 	d := New(cfg, st, slog.New(rec))
+	d.restartGap = 0 // tests restart at once
 	out := &sent{}
 	d.slack = out
 	t.Cleanup(d.wg.Wait) // investigations opened by a test finish before the store closes
@@ -998,13 +999,26 @@ func TestSettingsRestartBetweenBaselineSweepsAndResume(t *testing.T) {
 		t.Fatalf("progress after the restart: %d/%d %q", done, total, eta)
 	}
 
-	// After the restart: two sweeps to go, the first at once. Pretend the
-	// second is the last by recording 2 of 3 done.
+	// After the restart the next sweep keeps its interval: 2 of 3 done, the
+	// last one 2 minutes ago, so it waits.
 	d2, _, _, _ := newTestDaemon(t)
 	d2.st = st
 	d2.cfg.Schedule.LearningSweeps = 3
 	d2.cfg.Schedule.LearningMinutes = 60
-	st.SetBaselineProgress(2, 3, time.Now().Add(20*time.Minute))
+	st.SetBaselineProgress(2, 3, time.Now().Add(18*time.Minute))
+	ctx2, cancel2 := context.WithCancel(ctx)
+	early := make(chan error, 1)
+	go func() { early <- d2.learn(ctx2) }()
+	select {
+	case <-early:
+		t.Fatal("the resumed baseline swept before its interval was up")
+	case <-time.After(500 * time.Millisecond):
+	}
+	cancel2()
+	<-early
+
+	// The last sweep 25 minutes ago: its interval is up, so it sweeps at once.
+	st.SetBaselineProgress(2, 3, time.Now().Add(-5*time.Minute))
 	done := make(chan error, 1)
 	go func() { done <- d2.learn(ctx) }()
 	select {
@@ -1019,4 +1033,25 @@ func TestSettingsRestartBetweenBaselineSweepsAndResume(t *testing.T) {
 		t.Fatalf("after the baseline: progress total %d, learned_at %q", total, st.Get("learned_at"))
 	}
 
+}
+
+// Saved settings restart the daemon only once it has run for restartGap, so
+// a hub saving settings every sync cannot keep findings from forming.
+func TestSettingsRestartWaitsForGap(t *testing.T) {
+	d, _, _, _ := newTestDaemon(t)
+	d.restartGap = time.Hour
+	d.ApplySettings()
+	if d.restartDue() {
+		t.Fatal("restart due within the gap")
+	}
+	d.started = time.Now().Add(-2 * time.Hour)
+	if !d.restartDue() {
+		t.Fatal("restart not due after the gap")
+	}
+	d.mu.Lock()
+	d.following[7] = true
+	d.mu.Unlock()
+	if d.restartDue() {
+		t.Fatal("restart due while a decision follow-up runs")
+	}
 }

@@ -38,14 +38,16 @@ func (c *Config) tuningFields() map[string]tuningField {
 		"hub.sync_seconds":                {i: &c.Hub.SyncSeconds},
 		"hub.messages_per_hour":           {i: &c.Hub.MessagesPerHour},
 		"hub.share_transcripts":           {b: &c.Hub.ShareTranscripts},
-		"requests.disabled":               {b: &c.Requests.Disabled},
 	}
 }
 
-// applyTuning sets the hub's tuning values that pass their checks, and caps
-// the daily budget at the root-owned hub_max_daily_usd.
+// applyTuning sets the hub's tuning values that pass their checks. A value
+// whose setting only tightens (Tuning.Only) applies only when it is stricter
+// than the server's own. The daily budget is capped at the root-owned
+// hub_max_daily_usd; with none (0 or less) the hub may only lower it.
 func (c *Config) applyTuning(m map[string]string) {
 	fields := c.tuningFields()
+	rootDaily := c.Budget.DailyUSD
 	for k, v := range m {
 		t, ok := hubproto.TuningFor(k)
 		fd, known := fields[k]
@@ -55,18 +57,63 @@ func (c *Config) applyTuning(m map[string]string) {
 		v = strings.TrimSpace(v)
 		switch {
 		case fd.i != nil:
-			*fd.i, _ = strconv.Atoi(v)
+			n, _ := strconv.Atoi(v)
+			own := *fd.i
+			if k == "schedule.retention_days" {
+				if own < 0 {
+					continue // the server keeps everything
+				}
+				if own == 0 {
+					own = 90
+				}
+			}
+			if tightens(t.Only, float64(own), float64(n)) {
+				*fd.i = n
+			}
 		case fd.f != nil:
-			*fd.f, _ = strconv.ParseFloat(v, 64)
+			f, _ := strconv.ParseFloat(v, 64)
+			if tightens(t.Only, *fd.f, f) {
+				*fd.f = f
+			}
 		case fd.b != nil:
-			*fd.b = v == "true"
+			b := v == "true"
+			if tightens(t.Only, boolNum(*fd.b), boolNum(b)) {
+				*fd.b = b
+			}
 		case fd.s != nil:
+			if t.Kind == "severity" && !tightens(t.Only, float64(hubproto.SeverityRank(*fd.s)), float64(hubproto.SeverityRank(v))) {
+				continue
+			}
 			*fd.s = v
 		}
 	}
-	if _, set := m["budget.daily_usd"]; set && c.Budget.HubMaxDailyUSD > 0 {
-		c.Budget.DailyUSD = math.Min(c.Budget.DailyUSD, c.Budget.HubMaxDailyUSD)
+	if _, set := m["budget.daily_usd"]; set {
+		limit := c.Budget.HubMaxDailyUSD
+		if limit <= 0 {
+			limit = rootDaily // 0 or less in the root config: unlimited
+		}
+		if limit > 0 {
+			c.Budget.DailyUSD = math.Min(c.Budget.DailyUSD, limit)
+		}
 	}
+}
+
+// tightens reports whether a setting may move from own to v.
+func tightens(only string, own, v float64) bool {
+	switch only {
+	case "lower":
+		return v <= own
+	case "raise":
+		return v >= own
+	}
+	return true
+}
+
+func boolNum(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // applyProtections adds the hub's protected users, IPs and units to the

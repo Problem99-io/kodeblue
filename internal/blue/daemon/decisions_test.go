@@ -87,7 +87,7 @@ func TestDecisionsResumeIncidentAgent(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("want one follow-up, got %d", len(got))
 	}
-	for _, want := range []string{"incident #", "block_ip ip=203.0.113.7: approved by admin (hub), done: blocked 203.0.113.7", "block_ip ip=203.0.113.8: denied by hub:admin", "incident_resolve"} {
+	for _, want := range []string{"incident #", `block_ip ip="203.0.113.7": approved by "admin" on the hub; helper status done; result "blocked 203.0.113.7"`, `block_ip ip="203.0.113.8": denied by "hub:admin"`, "untrusted data", "incident_resolve"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("follow-up lacks %q:\n%s", want, got[0])
 		}
@@ -96,5 +96,19 @@ func TestDecisionsResumeIncidentAgent(t *testing.T) {
 	d.wg.Wait()
 	if n := len(eng.sent()); n != 1 {
 		t.Fatalf("decisions handed back again: %d follow-ups", n)
+	}
+
+	// A resolved case is left alone, whatever was decided on it.
+	closed := &store.Incident{Title: "closed case", Severity: "high", Kind: "incident"}
+	_ = st.CreateIncident(closed)
+	closed.Status, closed.SessionID = "resolved", "sess-2"
+	_ = st.UpdateIncident(closed)
+	reqC := respond.Request{ID: "c3", IncidentID: closed.ID, Action: "block_ip", Params: map[string]string{"ip": "203.0.113.9"}, RequestedBy: "agent"}
+	writeLines(filepath.Join(d.cfg.Server.StateDir, "response-requests.jsonl"), reqC)
+	_ = mcpserver.DenyRequest(d.cfg, "c3", "hub:admin")
+	d.followUpDecisions(context.Background())
+	d.wg.Wait()
+	if n := len(eng.sent()); n != 1 {
+		t.Fatalf("resolved incident followed up: %d follow-ups", n)
 	}
 }

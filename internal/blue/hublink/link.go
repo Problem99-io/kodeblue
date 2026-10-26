@@ -75,6 +75,8 @@ type Link struct {
 	hashes map[string]string // record kind/id -> content hash last accepted by the hub
 	nudge  chan struct{}
 	recent []time.Time // operator messages handled in the last hour
+	// deciding holds containment requests a ruling is being carried out on.
+	deciding map[string]bool
 	// savedSettings is the settings version saved and waiting for the
 	// restart that applies it.
 	savedSettings *string
@@ -582,6 +584,12 @@ func (l *Link) decide(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	if !l.cfg.Hub.AcceptApprovals {
 		return hubproto.MessageReply{Status: "refused", Text: "This server does not accept approvals from the hub (hub.accept_approvals = false in /etc/kodeblue/kodeblue.toml). Run on the server: kodeblue respond " + m.Decision + " " + m.RequestID}
 	}
+	// Rulings run concurrently (one goroutine per message): two on the same
+	// request must not both find it pending.
+	if !l.claimRequest(m.RequestID) {
+		return hubproto.MessageReply{Status: "refused", Text: "Another ruling on " + m.RequestID + " is being carried out; this one was not."}
+	}
+	defer l.releaseRequest(m.RequestID)
 	r := mcpserver.FindRequest(l.cfg, m.RequestID)
 	if r == nil {
 		return hubproto.MessageReply{Status: "refused", Text: "No pending containment request " + m.RequestID + " on this server (already approved, denied or settled)."}
@@ -589,11 +597,14 @@ func (l *Link) decide(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	if m.Decision == "approve" && l.cfg.ActionRule(r.Action) == hubproto.ActionOff {
 		return hubproto.MessageReply{Status: "refused", Text: r.Action + " is turned off on this server, so it cannot be approved. Deny the request instead."}
 	}
-	// Protections the hub added since the request (the root helper only
-	// knows the server's own).
+	// Protections and the rate limit the hub added since the request (the
+	// root helper only knows the server's own).
 	if m.Decision == "approve" {
 		if err := respond.Check(l.cfg.Response, *r); err != nil {
 			return hubproto.MessageReply{Status: "refused", Text: "This request cannot be approved: " + err.Error() + ". Deny it instead."}
+		}
+		if err := mcpserver.RateLimited(l.cfg); err != nil {
+			return hubproto.MessageReply{Status: "refused", Text: "Not run now: " + err.Error() + ". Approve it again later, or deny it."}
 		}
 	}
 	by := "hub:" + m.Author
@@ -623,6 +634,25 @@ func (l *Link) decide(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		return hubproto.MessageReply{Status: st, Text: fmt.Sprintf("%s %s: %s. %s", r.ID, r.Action, rec.Status, rec.Result)}
 	}
 	return hubproto.MessageReply{Status: "refused", Text: "Unknown decision " + m.Decision}
+}
+
+func (l *Link) claimRequest(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.deciding[id] {
+		return false
+	}
+	if l.deciding == nil {
+		l.deciding = map[string]bool{}
+	}
+	l.deciding[id] = true
+	return true
+}
+
+func (l *Link) releaseRequest(id string) {
+	l.mu.Lock()
+	delete(l.deciding, id)
+	l.mu.Unlock()
 }
 
 func (l *Link) sendReply(ctx context.Context, id int64, r hubproto.MessageReply) {

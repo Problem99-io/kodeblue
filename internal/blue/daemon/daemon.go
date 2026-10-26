@@ -98,8 +98,17 @@ type Daemon struct {
 	// exits once no agent session runs, and systemd starts it with them.
 	restartWanted atomic.Bool
 	restartNow    chan struct{}
-	// decided signals an operator decision on a containment request.
-	decided chan struct{}
+	// decided signals an operator decision on a containment request;
+	// following and followRetry track decision follow-ups (mu).
+	decided     chan struct{}
+	following   map[int64]bool
+	followRetry map[int64]time.Time
+	// started and restartGap space settings restarts: detection state that
+	// builds over sweeps (debounce, brute-force windows) lives in memory, so
+	// a hub changing settings every sync must not restart the server faster
+	// than findings can form.
+	started    time.Time
+	restartGap time.Duration
 	// learning is set while the learning phase or a learner session runs;
 	// relearnNow asks the main loop to run the learning phase again.
 	learning   atomic.Bool
@@ -133,7 +142,7 @@ var ErrRestart = errors.New("restarting to apply new settings")
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	env := &sensors.Env{Root: cfg.Server.Root, Logger: logger, State: sensors.NewCursorStore(cfg.CursorPath())}
 	env.Pkg = sensors.LoadPackageIndex(env)
-	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
+	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), following: map[int64]bool{}, followRetry: map[int64]time.Time{}, started: time.Now(), restartGap: 5 * time.Minute, relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
 	d.newEngine = func() agentEngine { return runtime.New(cfg, logger) }
 	d.engCheckEvery, d.engMinBackoff, d.wakeGap = 30*time.Second, time.Minute, 10*time.Second
 	d.learnRetry = 10 * time.Minute
@@ -288,6 +297,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// learning until the sweeps and the learner are done.
 			_ = d.st.Set("learned_at", "")
 			d.st.SetBaselineProgress(0, 0, time.Time{}) // a fresh baseline, not the rest of an earlier one
+			_ = d.st.Set("baseline_at", "")
 			err := d.learn(ctx)
 			d.learning.Store(false)
 			if err != nil {
@@ -296,11 +306,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.learnWhenModelReady(ctx)
 		case <-d.restartNow:
 		}
-		if d.restartWanted.Load() && len(d.LiveSessions()) == 0 && !d.learning.Load() {
+		if d.restartDue() && !d.learning.Load() {
 			d.log.Info("new hub settings saved; restarting to apply them")
 			return ErrRestart
 		}
 	}
+}
+
+// restartDue reports whether saved hub settings should restart the daemon
+// now: no agent session runs and it has run for at least restartGap.
+func (d *Daemon) restartDue() bool {
+	return d.restartWanted.Load() && len(d.LiveSessions()) == 0 && d.followUpsRunning() == 0 && time.Since(d.started) >= d.restartGap
 }
 
 // ApplySettings restarts the daemon once no agent session is running, so
@@ -848,13 +864,34 @@ func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 func (d *Daemon) learn(ctx context.Context) error {
 	sweeps := max(d.cfg.Schedule.LearningSweeps, 1)
 	interval := time.Duration(d.cfg.Schedule.LearningMinutes) * time.Minute / time.Duration(sweeps)
-	start, planned, _ := d.st.BaselineProgress()
+	start, planned, etaS := d.st.BaselineProgress()
 	if planned != sweeps || start >= sweeps {
+		start = 0
+	}
+	// The stored ETA dates the last sweep. A baseline left for longer than
+	// twice its length is stale (the server changed meanwhile): start over.
+	var next time.Time
+	if eta, err := time.Parse(time.RFC3339, etaS); start > 0 && err == nil {
+		last := eta.Add(-time.Duration(sweeps-start) * interval)
+		if time.Since(last) > 2*time.Duration(sweeps)*interval {
+			start = 0
+		} else {
+			next = last.Add(interval)
+		}
+	} else if start > 0 {
 		start = 0
 	}
 	d.expectProgress(loopGrace)
 	if start > 0 {
-		d.log.Info("learning phase: resuming baseline", "done", start, "sweeps", sweeps, "interval", interval)
+		d.log.Info("learning phase: resuming baseline", "done", start, "sweeps", sweeps, "interval", interval, "next", next.Format(time.RFC3339))
+		// Keep the interval between sweeps across the restart, so restarts
+		// do not squeeze the baseline into back-to-back sweeps.
+		if wait := time.Until(next); wait > 0 {
+			d.expectProgress(wait + loopGrace)
+			if err := d.learnWait(ctx, wait); err != nil {
+				return err
+			}
+		}
 	} else {
 		d.log.Info("learning phase: collecting baseline", "sweeps", sweeps, "interval", interval)
 		hist := sensors.AuthHistory(ctx, d.env)
@@ -943,6 +980,9 @@ func (d *Daemon) learn(ctx context.Context) error {
 func (d *Daemon) learnWait(ctx context.Context, interval time.Duration) error {
 	t := time.NewTimer(interval)
 	defer t.Stop()
+	// Settings saved during the restart gap apply once it has passed.
+	check := time.NewTicker(min(interval, 30*time.Second))
+	defer check.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -950,10 +990,11 @@ func (d *Daemon) learnWait(ctx context.Context, interval time.Duration) error {
 		case <-t.C:
 			return nil
 		case <-d.restartNow:
-			if d.restartWanted.Load() && len(d.LiveSessions()) == 0 {
-				d.log.Info("new hub settings saved; restarting to apply them (the baseline resumes after the restart)")
-				return ErrRestart
-			}
+		case <-check.C:
+		}
+		if d.restartDue() {
+			d.log.Info("new hub settings saved; restarting to apply them (the baseline resumes after the restart)")
+			return ErrRestart
 		}
 	}
 }
