@@ -9,7 +9,10 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/containment"
 	"github.com/Problem99-io/kodeblue/internal/blue/detect"
+	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
+	"github.com/Problem99-io/kodeblue/internal/blue/mcpserver"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
+	"github.com/Problem99-io/kodeblue/internal/blue/respond"
 	"github.com/Problem99-io/kodeblue/internal/blue/store"
 )
 
@@ -26,26 +29,29 @@ func (d *Daemon) applyRules(ctx context.Context, all []*store.Finding) []*store.
 	}
 	out := all[:0:0]
 	for _, f := range all {
-		fired := containment.Fire(ctx, rules, f, d.ruleRun)
+		fired := containment.Fire(ctx, rules, f, d.ruleCheck, d.ruleRun)
 		if len(fired) == 0 {
 			out = append(out, f)
 			continue
 		}
 		var lines []string
-		done := true
+		done, acted := true, false
 		for _, x := range fired {
 			lines = append(lines, fmt.Sprintf("%s on %s: %s", x.Rule, x.Target, x.Message))
 			done = done && x.Done
+			acted = acted || x.Done
 			d.log.Info("containment rule", "rule", x.Rule, "finding", f.ID, "target", x.Target, "done", x.Done, "result", x.Message)
 		}
 		summary := clipText(strings.Join(lines, "\n"), 1500)
 		d.st.Journal("rule:"+fired[0].Rule, "rule.fired", fmt.Sprintf("finding #%d: %s", f.ID, summary))
-		sev := "medium"
-		if !done {
-			sev = "high"
+		// Slack hears about what was done. What a rule could not do (over
+		// its limit, refused) goes on to triage like any finding, which
+		// notifies as usual: one alert per finding of a flood is the noise
+		// the rule exists to remove.
+		if acted {
+			d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "action", Severity: "medium", IncidentID: f.IncidentID,
+				Title: fmt.Sprintf("Containment rule %s answered: %s", fired[0].Rule, f.Title), Body: summary}, nil)
 		}
-		d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "action", Severity: sev, IncidentID: f.IncidentID,
-			Title: fmt.Sprintf("Containment rule %s answered: %s", fired[0].Rule, f.Title), Body: summary}, nil)
 		if done && f.Severity != detect.SevCritical {
 			_ = d.st.SetFindingStatus(f.ID, "closed", "contained", "contained by an approved containment rule: "+summary, 0)
 			continue
@@ -53,6 +59,19 @@ func (d *Daemon) applyRules(ctx context.Context, all []*store.Finding) []*store.
 		out = append(out, f)
 	}
 	return out
+}
+
+// ruleCheck refuses a rule's request on what only this side knows, as
+// mcpserver.Submit does for an agent's: an action the hub turned off,
+// protected targets the hub added, and the hub's lower rate limit.
+func (d *Daemon) ruleCheck(req respond.Request) error {
+	if d.cfg.ActionRule(req.Action) == hubproto.ActionOff {
+		return fmt.Errorf("the operators turned %s off for this server on the hub", req.Action)
+	}
+	if err := respond.Check(d.cfg.Response, req); err != nil {
+		return err
+	}
+	return mcpserver.RateLimited(d.cfg)
 }
 
 // recurringDigest is the reviewer's view of attacks that keep coming back:

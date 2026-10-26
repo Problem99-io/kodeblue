@@ -51,6 +51,15 @@ func TestContainmentRuleProposal(t *testing.T) {
 	if _, err := propose(ids[0], other.ID); err == nil || !strings.Contains(err.Error(), "not auth.bruteforce") {
 		t.Fatalf("finding of another rule: %v", err)
 	}
+	unrelated := &store.Incident{Title: "Daily review", Severity: "info", Kind: "review"}
+	if err := st.CreateIncident(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(map[string]any{"id": "cr-ssh", "title": "Block SSH brute force", "why": "The same password spraying from new addresses every day.",
+		"trigger_rule": "auth.bruteforce", "target_field": "ip", "action": "block_ip", "findings": []int64{ids[0]}, "incidents": []int64{unrelated.ID}})
+	if _, err := s.containmentRulePropose(context.Background(), b); err == nil || !strings.Contains(err.Error(), "has no auth.bruteforce finding") {
+		t.Fatalf("unrelated incident as evidence: %v", err)
+	}
 	if out, err := propose(ids...); err != nil || !strings.Contains(out, "does nothing until a person approves") {
 		t.Fatalf("proposal: %q %v", out, err)
 	}

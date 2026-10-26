@@ -297,7 +297,7 @@ func (s *Server) register() {
 				"Once a person approves it, kodeblue answers each new finding of that rule on its own, at once and without asking again: block_ip on the address the finding names, or quarantine_file on a file under a directory you scope it to. " +
 				"Nothing happens until it is approved; it expires after `days` and needs approval again. Name at least two incidents or findings that show the pattern. " +
 				"trigger_rule is the finding's rule as findings_list shows it (auth.bruteforce, monitor.<monitor id>); target_field is the evidence field holding the target (ip for SSH findings; output for a monitor, with extract, a regex whose first group is the address or path, e.g. client=([0-9a-f.:]+)). " +
-				"Keep it narrow: never propose one for a finding that could name your own team, the hub, a model endpoint or a service the server depends on. Check containment_rule_list first and update a rule by its id instead of adding another.",
+				"Keep it narrow: never propose one for a finding that could name your own team, the hub, a model endpoint or a service the server depends on. A target extracted from log text is whatever the client wrote there (an X-Forwarded-For header, a user agent): extract only fields the server itself records, such as the connecting address, and give block_ip a cidr scope when you can. Check containment_rule_list first and update a rule by its id instead of adding another.",
 			Schema: obj(map[string]any{
 				"id":           str("cr- followed by a short slug, e.g. cr-ssh-bruteforce"),
 				"title":        str("what it does, in one line, e.g. Block addresses brute-forcing SSH"),
