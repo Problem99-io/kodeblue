@@ -23,6 +23,10 @@ import (
 const (
 	NVDURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 	KEVURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+	// KEVMirror is CISA's own copy of the catalog on GitHub, for when
+	// cisa.gov refuses a server (its bot protection answers 403 to some
+	// hosting networks).
+	KEVMirror = "https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json"
 	// MaxWindow bounds one pull; NVD refuses ranges over 120 days, and a
 	// server that was off for weeks should not flood its reviewer.
 	MaxWindow = 7 * 24 * time.Hour
@@ -85,10 +89,13 @@ type Candidate struct {
 
 // Client fetches the feeds. Zero values use the public URLs.
 type Client struct {
-	HTTP   *http.Client
-	NVD    string
-	KEV    string
-	APIKey string // optional NVD API key: a higher rate limit
+	HTTP *http.Client
+	NVD  string
+	KEV  string
+	// KEVMirror is tried when KEV fails; with KEV unset it defaults to
+	// CISA's GitHub copy.
+	KEVMirror string
+	APIKey    string // optional NVD API key: a higher rate limit
 }
 
 func (c Client) http() *http.Client {
@@ -136,14 +143,26 @@ func (c Client) Published(ctx context.Context, from, to time.Time) ([]CVE, error
 
 // ExploitedSince returns the KEV entries CISA added on or after since's date.
 func (c Client) ExploitedSince(ctx context.Context, since time.Time) ([]KEV, error) {
-	u := c.KEV
-	if u == "" {
-		u = KEVURL
+	urls := []string{c.KEV, c.KEVMirror}
+	if c.KEV == "" {
+		urls[0] = KEVURL
+		if c.KEVMirror == "" {
+			urls[1] = KEVMirror
+		}
 	}
 	var cat struct {
 		Vulnerabilities []KEV `json:"vulnerabilities"`
 	}
-	if err := c.get(ctx, u, false, &cat); err != nil {
+	var err error
+	for _, u := range urls {
+		if u == "" {
+			continue
+		}
+		if err = c.get(ctx, u, false, &cat); err == nil {
+			break
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	day := since.UTC().Format("2006-01-02")
