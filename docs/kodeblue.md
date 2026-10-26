@@ -29,8 +29,8 @@ The agents run in a small agent engine that kodeblue starts as a child process: 
      │          read-only host tools → verdict → containment via policy → report →
      │          a monitor/skill/allow rule so next time is cheaper → incident_resolve
      ▼
- L5 review   ── daily session (blue-reviewer): what's new on the server, FP tuning,
-                blind spots, refresh profile/definitions/skills
+ L5 review   ── daily session (blue-reviewer): what's new on the server, out-of-date software,
+                the day's CVEs, FP tuning, blind spots, refresh profile/definitions/skills
 ```
 
 **Learning phase** (once, before detection): repeated snapshots over `learning_minutes` (so churn is learned, not alerted on), login history seeded from the auth log, then a `blue-learner` session that explores the server and writes:
@@ -58,6 +58,13 @@ Where no monitor can cover a check (kodeblue cannot see the process or its files
 - A vulnerability without a check stays open until an agent confirms the fix with `vulnerability_resolve`, saying how. The reviewer goes over the open ones at every review and looks at services and packages that changed.
 - Accepting a risk is the team's decision: on the hub's **Services** tab an operator accepts a vulnerability with a reason, reopens one, or reruns its check. The server applies these without a model, and only with `hub.accept_messages`.
 - `kodeblue status` lists the open vulnerabilities; the "now watching" message and the review say how many are open by severity.
+
+**Software versions and new CVEs.** Once a day, off the main loop, kodeblue takes stock of the server's software for the reviewer:
+- **Versions.** The distribution and its end of support (from `distro-info-data`), the running kernel and a pending reboot, the package updates apt already knows about with the security ones listed (`apt-get -s dist-upgrade` as the kodeblue user; the system's apt timer refreshes the lists, and lists older than 3 days are flagged), and the container images that run.
+- **New CVEs.** It downloads the CVEs NIST's National Vulnerability Database published since the last pull (at most 7 days back) and the entries CISA added to its Known Exploited Vulnerabilities list, and keeps those whose affected product is a package installed here, or whose product or description names a running image or service. Download only: nothing about the server is sent. A failed pull is retried within the hour. A match that attackers exploit (CISA KEV) or that scores 9 or more goes to Slack at once.
+- The review that follows reads both in its digest (a review due while the check runs waits for it). The reviewer confirms each CVE against the installed version before recording it with `vulnerability_report` and its CVE id. It also records an operating system past or near its end of support, pending security updates (with a check that passes once they are installed), a pending reboot, and software behind a security release. It explains in one line each CVE it ruled out.
+- `[cve_feed] disabled = true` turns the download off; `nvd_api_key` raises NVD's rate limit. The versions check always runs.
+- Agents may run `apt list`, `apt policy`, `apt-cache policy` and `apt-get -s` (simulate only; `apt-get` without `-s` is refused) to check versions.
 
 To check a key file's permissions without reading it, `ls`, `stat`, `lsattr`, `getcap`, `readlink` and `realpath` may name a secret path in `host_exec` and command monitors: they read a file's mode, owner and size, never its content. Every command that reads content is still refused on a secret path.
 

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
+	"github.com/Problem99-io/kodeblue/internal/blue/cvefeed"
 	"github.com/Problem99-io/kodeblue/internal/blue/detect"
 	"github.com/Problem99-io/kodeblue/internal/blue/hublink"
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
@@ -54,8 +55,12 @@ type Daemon struct {
 	slack    notify.Sender
 	modelsOn bool
 	incSem   chan struct{}
-	wg       sync.WaitGroup
-	mu       sync.Mutex
+	// software is set while the daily software check runs (software.go);
+	// cveClient fetches its feeds (tests point it at a fake).
+	software  atomic.Bool
+	cveClient cvefeed.Client
+	wg        sync.WaitGroup
+	mu        sync.Mutex
 	// eng is the running agent engine (nil: none). The engine supervisor
 	// replaces it while sessions and hub handlers use it: read it with
 	// engine or engineFor, never directly.
@@ -291,6 +296,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.decided:
 			d.followUpDecisions(ctx)
 		case <-review.C:
+			d.maybeSoftwareCheck(ctx)
 			d.maybeReview(ctx)
 			d.prune()
 		case <-d.relearnNow:
@@ -1188,6 +1194,9 @@ func (d *Daemon) maybeReview(ctx context.Context) {
 	if time.Since(last) < time.Duration(max(d.cfg.Schedule.ReviewHours, 1))*time.Hour {
 		return
 	}
+	if d.software.Load() {
+		return // the daily software check is running: review with its results at the next tick
+	}
 	_ = d.st.Set("last_review_at", time.Now().UTC().Format(time.RFC3339))
 	kc := d.engine()
 	if kc == nil || d.overBudget(0.8) {
@@ -1233,7 +1242,9 @@ func (d *Daemon) reviewDigest(since time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Periodic review for server %q. Covering %s → now.\n\n", d.cfg.Server.Name, since.UTC().Format(time.RFC3339))
 	usd, per, tokens := d.st.SpentSince(since)
-	fmt.Fprintf(&b, "Model spend in period: $%.4f (%d tokens) %v; daily budget $%.2f.\n\n", usd, tokens, per, d.cfg.Budget.DailyUSD)
+	fmt.Fprintf(&b, "Model spend in period: $%.4f (%d tokens) %v; daily budget $%.2f.\n", usd, tokens, per, d.cfg.Budget.DailyUSD)
+	b.WriteString(d.softwareDigest(since, time.Now().UTC()))
+	b.WriteString("\n")
 
 	byStatus := map[string][]store.Finding{}
 	for _, f := range d.st.FindingsSince(since, 300) {
@@ -1279,7 +1290,7 @@ func (d *Daemon) reviewDigest(since time.Time) string {
 	for _, in := range d.st.Incidents(`WHERE created_at>=? AND kind='incident' ORDER BY id`, since.Unix()) {
 		fmt.Fprintf(&b, "- #%d [%s] %s → %s %s\n", in.ID, in.Severity, in.Title, in.Status, in.Verdict)
 	}
-	return runtime.TrimForPrompt(b.String(), 14000)
+	return runtime.TrimForPrompt(b.String(), 20000)
 }
 
 // sensorsOff is the set of sensors agents turned off (see sensor_disable),

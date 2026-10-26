@@ -42,16 +42,22 @@ var allow = map[string]policy{
 	"sha256sum": {}, "sha1sum": {}, "md5sum": {}, "readlink": {metadata: true}, "realpath": {metadata: true}, "strings": {}, "uname": {}, "hostname": {allowOnlyFlags: []string{"-f", "-I", "-s"}},
 	"getent": {verbs: getentDatabases, allowOnlyFlags: []string{"-i", "--no-idn", "-A", "--no-addrconfig"}}, "lsmod": {}, "modinfo": {}, "lsattr": {metadata: true}, "getcap": {metadata: true}, "date": {allowOnlyFlags: []string{"-u", "-R", "-I", "--iso-8601"}}, "free": {}, "top": {allowOnlyFlags: []string{"-b", "-n", "-n1", "-o", "-c"}},
 	"pstree": {}, "ip": {verbs: []string{"addr", "a", "route", "r", "link", "l", "neigh", "n", "rule"}, denyArgs: []string{"add", "del", "delete", "set", "flush", "change", "replace", "exec"}},
-	"find":            {denyArgs: []string{"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}},
-	"journalctl":      {denyArgs: []string{"--rotate", "--vacuum-size", "--vacuum-time", "--vacuum-files", "--flush", "--sync", "--relinquish-var", "--smart-relinquish-var", "--setup-keys", "-f", "--follow", "--update-catalog"}},
-	"systemctl":       {verbs: []string{"status", "list-units", "list-unit-files", "list-timers", "list-sockets", "is-active", "is-enabled", "is-failed", "cat", "show", "list-dependencies"}},
-	"crontab":         {allowOnlyFlags: []string{"-l", "-u"}},
-	"docker":          {verbs: []string{"ps", "inspect", "images", "logs", "top", "diff", "version", "info", "port", "stats"}, denyArgs: []string{"-f", "--follow"}},
-	"podman":          {verbs: []string{"ps", "inspect", "images", "logs", "top", "diff", "version", "info", "port"}, denyArgs: []string{"-f", "--follow"}},
-	"dpkg":            {allowOnlyFlags: []string{"-l", "-L", "-S", "-s", "-V", "--verify", "--list", "--listfiles", "--search", "--status", "--get-selections"}},
-	"debsums":         {allowOnlyFlags: []string{"-c", "-s", "-a", "-e", "-l"}},
-	"rpm":             {allowOnlyFlags: []string{"-q", "-qa", "-qf", "-ql", "-qi", "-V", "-Va", "--verify", "--query", "-a", "-f", "-l", "-i"}},
-	"apk":             {verbs: []string{"info", "verify", "audit", "list", "policy"}},
+	"find":       {denyArgs: []string{"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}},
+	"journalctl": {denyArgs: []string{"--rotate", "--vacuum-size", "--vacuum-time", "--vacuum-files", "--flush", "--sync", "--relinquish-var", "--smart-relinquish-var", "--setup-keys", "-f", "--follow", "--update-catalog"}},
+	"systemctl":  {verbs: []string{"status", "list-units", "list-unit-files", "list-timers", "list-sockets", "is-active", "is-enabled", "is-failed", "cat", "show", "list-dependencies"}},
+	"crontab":    {allowOnlyFlags: []string{"-l", "-u"}},
+	"docker":     {verbs: []string{"ps", "inspect", "images", "logs", "top", "diff", "version", "info", "port", "stats"}, denyArgs: []string{"-f", "--follow"}},
+	"podman":     {verbs: []string{"ps", "inspect", "images", "logs", "top", "diff", "version", "info", "port"}, denyArgs: []string{"-f", "--follow"}},
+	"dpkg":       {allowOnlyFlags: []string{"-l", "-L", "-S", "-s", "-V", "--verify", "--list", "--listfiles", "--search", "--status", "--get-selections"}},
+	"debsums":    {allowOnlyFlags: []string{"-c", "-s", "-a", "-e", "-l"}},
+	"rpm":        {allowOnlyFlags: []string{"-q", "-qa", "-qf", "-ql", "-qi", "-V", "-Va", "--verify", "--query", "-a", "-f", "-l", "-i"}},
+	"apk":        {verbs: []string{"info", "verify", "audit", "list", "policy"}},
+	// apt reads the package lists (refreshed by the system's apt timer):
+	// installed and candidate versions, pending upgrades. apt-get only
+	// simulates (see check): -s prints what an upgrade would install.
+	"apt":             {verbs: []string{"list", "policy", "show"}, allowOnlyFlags: []string{"--upgradable", "--installed", "-a", "--all-versions", "-q", "-qq"}},
+	"apt-cache":       {verbs: []string{"policy", "show", "madison"}, allowOnlyFlags: []string{"-q", "-qq"}},
+	"apt-get":         {verbs: []string{"upgrade", "dist-upgrade", "full-upgrade"}, allowOnlyFlags: aptSimulate},
 	"iptables":        {allowOnlyFlags: []string{"-L", "-S", "-n", "-v", "-t", "--line-numbers", "-x"}},
 	"ip6tables":       {allowOnlyFlags: []string{"-L", "-S", "-n", "-v", "-t", "--line-numbers", "-x"}},
 	"nft":             {verbs: []string{"list"}},
@@ -65,6 +71,21 @@ var allow = map[string]policy{
 	"loginctl":        {verbs: []string{"list-sessions", "list-users", "show-session", "show-user", "session-status", "user-status"}},
 	"getfacl":         {},
 	"cat":             {}, // host_read is preferred; cat is here for monitors piping-free checks
+}
+
+// aptSimulate are apt-get's flags here; the first five make it simulate,
+// and one of them is required.
+var aptSimulate = []string{"-s", "--simulate", "--just-print", "--dry-run", "--no-act", "-q", "-qq", "-V"}
+
+func hasAny(args, flags []string) bool {
+	for _, a := range args {
+		for _, f := range flags {
+			if a == f {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // getentDatabases are the getent databases an agent may query: accounts,
@@ -194,6 +215,10 @@ func Validate(argv []string) error {
 	// Process and service environments carry credentials (API keys,
 	// database passwords), and kodeblue may read every process's.
 	switch bin {
+	case "apt-get":
+		if !hasAny(args, aptSimulate[:5]) {
+			return fmt.Errorf("apt-get only simulates here: add -s (it prints what an upgrade would install and changes nothing)")
+		}
 	case "ps":
 		if err := checkPS(args); err != nil {
 			return err
