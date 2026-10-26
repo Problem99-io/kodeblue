@@ -795,3 +795,5 @@ body.selbar-on .toast { bottom: 76px; }
   .srow { flex-wrap: wrap; white-space: normal; }
   .frow, .frow.c3 { grid-template-columns: minmax(0, 1fr); }
 }
+label.chk { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
+label.chk input { margin-top: 3px; flex: none; }

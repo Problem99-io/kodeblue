@@ -422,6 +422,13 @@ func (s *Server) handleDist(w http.ResponseWriter, r *http.Request) {
 // installer's stdin (--token-file -) when it reads it from there, so it is in
 // no process's argv (printf is a shell builtin); older installers get --token.
 func (s *Server) InstallCommand(r *http.Request, token string) string {
+	return s.InstallCommandWith(r, token, false)
+}
+
+// InstallCommandWith is InstallCommand; hubContain adds --hub-max-mode
+// contain, so the hub may switch the new server to contain (the installer
+// writes it to the server's root-owned config).
+func (s *Server) InstallCommandWith(r *http.Request, token string, hubContain bool) string {
 	base := shq(s.publicURL(r))
 	curl := "curl -fsSL"
 	if strings.HasPrefix(s.publicURL(r), "https://") {
@@ -433,6 +440,9 @@ func (s *Server) InstallCommand(r *http.Request, token string) string {
 		extra = " --pin " + shq(s.opt.Pin)
 	}
 	snap := s.dist()
+	if hubContain && (snap.script == nil || snap.hubMaxMode) {
+		extra += " --hub-max-mode contain"
+	}
 	if snap.script == nil {
 		// No installer published yet: the plain form, whose download fails
 		// with the hub's explanation.
@@ -662,7 +672,8 @@ func online(srv Host) bool {
 
 func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	var req struct {
-		Name string `json:"name"`
+		Name       string `json:"name"`
+		HubContain bool   `json:"hub_contain"`
 	}
 	if err := readJSON(w, r, 4<<10, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
@@ -673,8 +684,12 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request, c *o
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.st.Audit(c.user.Name, "server.create", srv.ID, srv.Name, c.ip)
-	writeJSON(w, http.StatusOK, map[string]any{"server": srv, "token": tok, "expires": srv.EnrollExpires, "install_command": s.InstallCommand(r, tok)})
+	what := srv.Name
+	if req.HubContain {
+		what += " (install command lets the hub switch it to contain)"
+	}
+	s.st.Audit(c.user.Name, "server.create", srv.ID, what, c.ip)
+	writeJSON(w, http.StatusOK, map[string]any{"server": srv, "token": tok, "expires": srv.EnrollExpires, "install_command": s.InstallCommandWith(r, tok, req.HubContain)})
 }
 
 func (s *Server) serverOr404(w http.ResponseWriter, r *http.Request) *Host {
@@ -731,13 +746,17 @@ func (s *Server) handleEnrollToken(w http.ResponseWriter, r *http.Request, c *op
 	if srv == nil {
 		return
 	}
+	var req struct {
+		HubContain bool `json:"hub_contain"`
+	}
+	_ = readJSON(w, r, 4<<10, &req) // an empty body is fine
 	tok, err := s.st.NewEnrollToken(srv.ID, s.opt.EnrollTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.st.Audit(c.user.Name, "server.enroll_token", srv.ID, srv.Name, c.ip)
-	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "expires": time.Now().Add(s.opt.EnrollTTL), "install_command": s.InstallCommand(r, tok)})
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "expires": time.Now().Add(s.opt.EnrollTTL), "install_command": s.InstallCommandWith(r, tok, req.HubContain)})
 }
 
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request, c *opCtx) {

@@ -459,6 +459,8 @@ Until a server has the new pin, its syncs fail and its notifications wait in the
 
 Start every server in `recommend` (the default). Agents then request containment and a human approves it, on the server (`kodeblue respond approve <id>`) or in the console. Move to `contain` only after you have seen what the agents ask for on that server, and consider narrowing `allowed_actions` when you do.
 
+With a hub, `hub_max_mode = "contain"` under `[response]` lets a hub operator switch the server to `contain` from Settings, without editing this file (it stays in `recommend` until then, and every switch is announced in Slack). It also means a stolen hub login can turn on actions without approval for that server, so set it only where that trade is worth it. The root helper honours it only while `[hub] accept_settings` is on.
+
 `/etc/kodeblue/kodeblue.toml`:
 
 ```toml

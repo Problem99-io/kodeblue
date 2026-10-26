@@ -1055,3 +1055,24 @@ func TestSettingsRestartWaitsForGap(t *testing.T) {
 		t.Fatal("restart due while a decision follow-up runs")
 	}
 }
+
+// A change of the response mode, above all to contain from the hub, is
+// announced once; a first start on the server's own mode is not.
+func TestAnnounceMode(t *testing.T) {
+	d, st, _, out := newTestDaemon(t)
+	d.cfg.Response.Mode, d.cfg.RootResponseMode = "recommend", "recommend"
+	d.announceMode()
+	if n := len(out.titles()); n != 0 {
+		t.Fatalf("first start announced: %v", out.titles())
+	}
+	d.cfg.Response.Mode = "contain"
+	d.announceMode()
+	d.announceMode()
+	got := out.titles()
+	if len(got) != 1 || got[0] != "Response mode is now contain" {
+		t.Fatalf("announcements: %v", got)
+	}
+	if st.Get("announced_response_mode") != "contain" {
+		t.Fatal("mode not remembered")
+	}
+}

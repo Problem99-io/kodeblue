@@ -53,6 +53,13 @@ func (c Config) SaveHubSettings(s *hubproto.Settings) error {
 	return os.Rename(tmp, path)
 }
 
+// ModeCeiling is the highest response mode this server may run: [response]
+// mode, or hub_max_mode when the hub's settings are accepted. Both are
+// root-owned.
+func (c Config) ModeCeiling() string {
+	return c.Response.Ceiling(c.Hub.Enabled() && c.Hub.AcceptSettings)
+}
+
 // WithHubSettings returns the config with the saved hub settings applied,
 // when [hub] accept_settings allows it. The daemon and the agents' MCP
 // server use it; the root response helper must not.
@@ -97,8 +104,9 @@ func (c Config) applyHubSettings(s *hubproto.Settings) Config {
 			c.ActionRules[action] = rule
 		}
 	}
-	// The hub's response mode can only lower the root-owned one.
-	if r := hubproto.ModeRank(s.ResponseMode); r >= 0 && r < hubproto.ModeRank(c.Response.Mode) {
+	// The hub's response mode can lower the root-owned one, and raise it up
+	// to the root-owned [response] hub_max_mode.
+	if r := hubproto.ModeRank(s.ResponseMode); r >= 0 && r <= hubproto.ModeRank(c.ModeCeiling()) {
 		c.Response.Mode = s.ResponseMode
 	}
 	c.applyTuning(s.Tuning)

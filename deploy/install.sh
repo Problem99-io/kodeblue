@@ -21,6 +21,9 @@
 #   --ca-file F            CA certificate that signed the hub's certificate
 #   --name NAME            server name in its config (default: hostname; the hub shows the name given in "Add server")
 #   --mode M               containment policy for a NEW install: off | recommend (default) | contain
+#   --hub-max-mode M       the highest mode the hub may switch this server to: recommend | contain
+#                          ([response] hub_max_mode; contain lets the hub turn on actions without
+#                          approval). Applied to an existing config too.
 #   --inference-url URL    OpenAI-compatible model endpoint (otherwise: hub default, or a prompt)
 #   --model M              model for triage and agents (with --inference-url)
 #   --inference-key-file F file holding the endpoint's API key (otherwise: hub default, or a prompt)
@@ -46,7 +49,7 @@ usage() {
 }
 
 # The token may arrive in the environment (preferred: never on a command line).
-HUB="" TOKEN="${KODEBLUE_ENROLL_TOKEN:-}" PIN="" CA="" NAME="" MODE="" INFURL="" INFMODEL="" KEYFILE="" SLACKFILE="" START=1 UNINSTALL=0 PURGE=0
+HUB="" TOKEN="${KODEBLUE_ENROLL_TOKEN:-}" PIN="" CA="" NAME="" MODE="" HUBMAXMODE="" INFURL="" INFMODEL="" KEYFILE="" SLACKFILE="" START=1 UNINSTALL=0 PURGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2 ;;
@@ -58,6 +61,7 @@ while [ $# -gt 0 ]; do
     --ca-file) CA=$2; shift 2 ;;
     --name) NAME=$2; shift 2 ;;
     --mode) MODE=$2; shift 2 ;;
+    --hub-max-mode) HUBMAXMODE=$2; shift 2 ;;
     --inference-url) INFURL=$2; shift 2 ;;
     --model) INFMODEL=$2; shift 2 ;;
     --inference-key-file|--im-key-file) KEYFILE=$2; shift 2 ;;
@@ -77,6 +81,7 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root (sudo)"
 [ "$(uname -s)" = Linux ] || die "kodeblue runs on Linux"
 case "$MODE" in ""|off|recommend|contain) ;; *) die "--mode must be off, recommend or contain" ;; esac
+case "$HUBMAXMODE" in ""|off|recommend|contain) ;; *) die "--hub-max-mode must be off, recommend or contain" ;; esac
 HAVE_SYSTEMD=0
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then HAVE_SYSTEMD=1; fi
 
@@ -192,6 +197,7 @@ if [ ! -f "$root/kodeblue" ] || [ ! -f "$root/kodeblue-engine" ] || [ ! -f "$her
   [ -n "$CA" ] && set -- "$@" --ca-file "$CA"
   [ -n "$NAME" ] && set -- "$@" --name "$NAME"
   [ -n "$MODE" ] && set -- "$@" --mode "$MODE"
+  [ -n "$HUBMAXMODE" ] && set -- "$@" --hub-max-mode "$HUBMAXMODE"
   [ -n "$INFURL" ] && set -- "$@" --inference-url "$INFURL"
   [ -n "$INFMODEL" ] && set -- "$@" --model "$INFMODEL"
   [ -n "$KEYFILE" ] && set -- "$@" --inference-key-file "$KEYFILE"
@@ -244,6 +250,19 @@ if [ ! -f /etc/kodeblue/kodeblue.toml ]; then
   fi
 elif [ -n "$MODE" ]; then
   warn "existing /etc/kodeblue/kodeblue.toml kept; --mode not applied (edit [response] mode yourself)"
+fi
+if [ -n "$HUBMAXMODE" ]; then
+  # Root's choice: how far the hub may raise [response] mode on this server.
+  if grep -q '^hub_max_mode *=' /etc/kodeblue/kodeblue.toml; then
+    sed -i "s/^hub_max_mode *=.*/hub_max_mode = \"$HUBMAXMODE\"/" /etc/kodeblue/kodeblue.toml
+  elif grep -q '^\[response\]' /etc/kodeblue/kodeblue.toml; then
+    sed -i "/^\[response\]/a hub_max_mode = \"$HUBMAXMODE\"" /etc/kodeblue/kodeblue.toml
+  else
+    printf '\n[response]\nhub_max_mode = "%s"\n' "$HUBMAXMODE" >> /etc/kodeblue/kodeblue.toml
+  fi
+  if [ "$HUBMAXMODE" = contain ]; then
+    say "the hub may switch this server to contain (actions without approval): [response] hub_max_mode in /etc/kodeblue/kodeblue.toml"
+  fi
 fi
 chown root:kodeblue /etc/kodeblue/kodeblue.toml && chmod 0640 /etc/kodeblue/kodeblue.toml
 # Earlier releases named the model key im.key.
