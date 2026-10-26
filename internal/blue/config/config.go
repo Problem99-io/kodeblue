@@ -39,7 +39,10 @@ type Config struct {
 	// RootResponseMode is [response] mode as the root-owned config sets it,
 	// before a stricter mode from the hub is applied.
 	RootResponseMode string `toml:"-"`
-	path             string
+	// RootCVEFeed is [cve_feed] as the root-owned config sets it: the most
+	// the hub may turn on.
+	RootCVEFeed CVEFeed `toml:"-"`
+	path        string
 }
 
 // Requests controls the request tap: kodeblue records the plaintext HTTP
@@ -51,14 +54,31 @@ type Requests struct {
 	Disabled bool `toml:"disabled"`
 }
 
-// CVEFeed is the daily pull of the CVEs NIST's NVD published and the ones
-// CISA added to its Known Exploited Vulnerabilities list, matched against
-// the software on this server for the reviewer to check. It only downloads
-// public feeds; nothing about the server is sent.
+// CVEFeed is the daily pull of new CVEs, matched against the software on
+// this server for the reviewer to check. It only downloads public feeds;
+// nothing about the server is sent. Each switch here is the most the hub
+// may turn on: off in this file (a server whose egress must stay closed),
+// the hub cannot turn it on; on, hub operators may switch it.
 type CVEFeed struct {
-	Disabled bool `toml:"disabled"`
+	Enabled bool `toml:"enabled"`
+	// Sources: NIST's National Vulnerability Database (every new CVE) and
+	// CISA's Known Exploited Vulnerabilities list (exploited now).
+	NVD bool `toml:"nvd"`
+	KEV bool `toml:"cisa_kev"`
 	// NVDAPIKey is optional: NVD allows more requests with one.
 	NVDAPIKey string `toml:"nvd_api_key"`
+}
+
+// Sources lists the feed's sources in effect (none when it is off).
+func (f CVEFeed) Sources() []string {
+	var l []string
+	if f.Enabled && f.NVD {
+		l = append(l, "nvd")
+	}
+	if f.Enabled && f.KEV {
+		l = append(l, "cisa_kev")
+	}
+	return l
 }
 
 // Agents holds extra instructions per agent role (learner, responder,
@@ -223,6 +243,7 @@ func Default() Config {
 		Response: respond.DefaultPolicy(),
 		Notify:   Notify{SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
 		Engine:   Engine{},
+		CVEFeed:  CVEFeed{Enabled: true, NVD: true, KEV: true},
 		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true},
 	}
 }

@@ -126,6 +126,9 @@ func TestStatusReportsBaselineAndSavedSettings(t *testing.T) {
 	if s := l.status(); s.SettingsSaved != "" || s.BaselineSweeps != 0 {
 		t.Fatalf("after apply: saved %q, sweeps %d", s.SettingsSaved, s.BaselineSweeps)
 	}
+	if s := l.status(); s.Software == nil || s.Software.Feed.Total != 1 {
+		t.Fatalf("software check not reported: %+v", s.Software)
+	}
 }
 
 // phaseAgent answers what status() asks of the daemon.
@@ -139,4 +142,7 @@ func (a *phaseAgent) ModelsEnabled() bool { return false }
 func (a *phaseAgent) Learning() bool      { return a.phase == "learning" }
 func (a *phaseAgent) Maintenance() string { return "" }
 func (a *phaseAgent) DecisionMade()       {}
-func (a *phaseAgent) ApplySettings()      { a.applied++ }
+func (a *phaseAgent) Software() *hubproto.Software {
+	return &hubproto.Software{Feed: hubproto.CVEFeedStatus{Sources: []string{"nvd"}, Total: 1}}
+}
+func (a *phaseAgent) ApplySettings() { a.applied++ }

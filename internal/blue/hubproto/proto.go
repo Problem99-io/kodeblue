@@ -108,6 +108,51 @@ type Status struct {
 	SettingsSaved string `json:"settings_saved,omitempty"`
 	// Tuning is the value of each hub-settable setting (Tunings) in effect.
 	Tuning map[string]string `json:"tuning,omitempty"`
+	// Software is the daily software check: versions and the CVE feed.
+	Software *Software `json:"software,omitempty"`
+}
+
+// Software is how up to date a server is and what the CVE feed found.
+type Software struct {
+	CheckedAt       string   `json:"checked_at,omitempty"`
+	OS              string   `json:"os,omitempty"`
+	SupportEnds     string   `json:"support_ends,omitempty"` // end of standard support (YYYY-MM-DD)
+	ExtendedEnds    string   `json:"extended_ends,omitempty"`
+	RebootRequired  bool     `json:"reboot_required,omitempty"`
+	Updates         int      `json:"updates"`
+	SecurityUpdates int      `json:"security_updates"`
+	ListsUpdated    string   `json:"lists_updated,omitempty"`
+	Images          []string `json:"images,omitempty"`
+
+	Feed CVEFeedStatus `json:"feed"`
+}
+
+// CVEFeedStatus is the CVE feed's state on a server.
+type CVEFeedStatus struct {
+	// Sources in effect; Allowed are those the server's own config allows
+	// the hub to turn on.
+	Sources  []string `json:"sources"`
+	Allowed  []string `json:"allowed"`
+	LastPull string   `json:"last_pull,omitempty"`
+	Through  string   `json:"through,omitempty"` // CVEs are covered up to here
+	Failures int      `json:"failures,omitempty"`
+	// Matches are the CVEs of the last 30 days naming software here, most
+	// urgent first (at most 25).
+	Matches []CVEMatch `json:"matches,omitempty"`
+	Total   int        `json:"total"`
+}
+
+// CVEMatch is a CVE that names software on the server.
+type CVEMatch struct {
+	ID       string  `json:"id"`
+	Severity string  `json:"severity,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+	KEV      bool    `json:"kev,omitempty"`
+	Term     string  `json:"term"`
+	From     string  `json:"from"`
+	How      string  `json:"how"`
+	FoundAt  string  `json:"found_at"`
+	Summary  string  `json:"summary,omitempty"`
 }
 
 // Record is one object the hub stores per server, keyed by (Kind, ID).

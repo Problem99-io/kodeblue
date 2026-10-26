@@ -2122,6 +2122,7 @@ async function vOverview(srv, body) {
           h("dt", null, "Last review"), h("dd", null, when(st.last_review_at)),
           h("dt", null, "Messages"), h("dd", null, !st.phase ? "—" : st.accepts_messages ? "accepted from the hub" : "disabled on the server"),
           h("dt", null, "Kernel"), h("dd", { class: "mono" }, st.kernel || "—")))),
+        softwarePanel(srv, st.software),
         panel("Model spend today by purpose", h("div", { class: "bd" }, purposes.length ? h("dl", { class: "kv" }, purposes.map(([k, v]) => [h("dt", null, k), h("dd", null, usd(v))])) : h("div", { class: "faint" }, "Nothing spent today.")), null, "purple"),
         panel("What kodeblue learned is normal", h("div", { class: "bd" }, base.length ? h("dl", { class: "kv" }, base.map(([k, v]) => [h("dt", null, k), h("dd", null, v.toLocaleString())])) : h("div", { class: "faint" }, "No baseline yet.")), null, "green")),
       h("div", { class: "stack" },
@@ -2129,6 +2130,44 @@ async function vOverview(srv, body) {
         panel("Open incidents", h("div", { class: "bd flush" }, open.length ? incidentTable(srv, open) : h("div", { class: "empty" }, "No open incidents.")), h("a", { href: "#/s/" + enc(srv.id), class: "small" }, "Board"), "red"),
         panel("Latest activity", h("div", { class: "bd flush" }, journalList(jr.map(parse))), h("a", { href: `#/s/${enc(srv.id)}/activity`, class: "small" }, "All activity"), "yellow"))));
   sync(body, node);
+}
+
+// softwarePanel shows the daily software check: how up to date the server
+// is and the new CVEs naming its software. The reviewer confirms each one
+// against the installed version; confirmed ones are on the Services tab.
+const FEED_SOURCES = { nvd: "NIST NVD", cisa_kev: "CISA known exploited" };
+function softwarePanel(srv, sw) {
+  if (!sw) return panel("Software and new CVEs", h("div", { class: "bd faint" }, "Not reported yet: the server checks once a day (kodeblue v0.1.5 or newer)."), null, "blue");
+  const feed = sw.feed || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const days = sw.support_ends ? Math.round((Date.parse(sw.support_ends) - Date.now()) / 864e5) : null;
+  const support = !sw.support_ends ? "—" : days < 0 ? h("span", { class: "badge b-high" }, "support ended " + sw.support_ends)
+    : days < 90 ? h("span", { class: "badge b-medium" }, `ends ${sw.support_ends} (${days} days)`) : `until ${sw.support_ends}`;
+  const sources = (feed.sources || []).length ? feed.sources.map((k) => FEED_SOURCES[k] || k).join(" · ") : "off";
+  const off = (feed.allowed || []).filter((k) => !(feed.sources || []).includes(k));
+  const matches = feed.matches || [];
+  const checked = !!sw.checked_at;
+  return panel("Software and new CVEs", h("div", { class: "bd stack" },
+    h("dl", { class: "kv" },
+      checked ? null : [h("dt", null, "Versions"), h("dd", { class: "faint" }, "not checked yet: the server checks at start and then once a day")],
+      checked ? h("dt", null, "OS") : null, checked ? h("dd", null, sw.os || "—", " ", h("span", { class: "faint small" }, "support "), support) : null,
+      checked ? h("dt", null, "Updates") : null, checked ? h("dd", null, sw.security_updates ? h("span", { class: "badge b-high" }, sw.security_updates + " security") : h("span", { class: "faint" }, "no security updates"),
+        " ", h("span", { class: "faint small" }, `${sw.updates || 0} in all`), sw.reboot_required ? h("span", { class: "badge b-medium ml" }, "reboot pending") : null,
+        sw.lists_updated ? h("span", { class: "faint small" }, " · lists " + ago(sw.lists_updated)) : null) : null,
+      checked ? h("dt", null, "Checked") : null, checked ? h("dd", null, ago(sw.checked_at)) : null,
+      h("dt", null, "CVE feed"), h("dd", null, sources, off.length ? h("span", { class: "faint small" }, " (off on the hub: " + off.map((k) => FEED_SOURCES[k] || k).join(", ") + ")") : null,
+        feed.last_pull ? h("span", { class: "faint small" }, " · pulled " + ago(feed.last_pull)) : null,
+        feed.failures ? h("span", { class: "badge b-warn ml", title: "The server retries with a growing pause; see its journal." }, feed.failures + " failed pulls") : null),
+      h("dt", null, "Matches (30 days)"), h("dd", null, String(feed.total || 0), " ", h("span", { class: "faint small" }, "naming software here; the reviewer checks the installed versions"))),
+    matches.length ? h("div", { class: "tbl-wrap" }, h("table", null,
+      h("thead", null, h("tr", null, ["CVE", "Severity", "Matched", "Found"].map((t) => h("th", null, t)))),
+      h("tbody", null, matches.slice(0, 10).map((m) => h("tr", null,
+        h("td", { class: "nowrap" }, h("a", { href: "https://nvd.nist.gov/vuln/detail/" + encodeURIComponent(m.id), target: "_blank", rel: "noopener noreferrer" }, m.id),
+          m.kev ? h("span", { class: "badge b-critical ml", title: "CISA lists it as exploited in the wild" }, "exploited") : null),
+        h("td", null, m.severity ? h("span", { class: "badge b-" + (VSEV.includes(m.severity) ? m.severity : "low") }, (m.score ? m.score.toFixed(1) + " " : "") + m.severity) : h("span", { class: "faint" }, "—")),
+        h("td", null, h("div", { title: m.summary || "" }, m.term), h("div", { class: "faint small" }, m.from)),
+        h("td", { class: "nowrap faint small" }, (m.found_at || "").slice(0, 10) === today ? "today" : ago(m.found_at))))))) : null,
+    h("div", { class: "faint small" }, "Turn the feed and its sources on or off under ", h("a", { href: `#/s/${enc(srv.id)}/settings` }, "Settings"), " → Vulnerability feed.")), null, "blue");
 }
 
 function incidentTable(srv, list) {

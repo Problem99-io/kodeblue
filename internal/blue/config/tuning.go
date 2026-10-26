@@ -38,16 +38,26 @@ func (c *Config) tuningFields() map[string]tuningField {
 		"hub.sync_seconds":                {i: &c.Hub.SyncSeconds},
 		"hub.messages_per_hour":           {i: &c.Hub.MessagesPerHour},
 		"hub.share_transcripts":           {b: &c.Hub.ShareTranscripts},
+		"cve_feed.enabled":                {b: &c.CVEFeed.Enabled},
+		"cve_feed.nvd":                    {b: &c.CVEFeed.NVD},
+		"cve_feed.cisa_kev":               {b: &c.CVEFeed.KEV},
 	}
 }
 
 // applyTuning sets the hub's tuning values that pass their checks. A value
 // whose setting only tightens (Tuning.Only) applies only when it is stricter
 // than the server's own. The daily budget is capped at the root-owned
-// hub_max_daily_usd; with none (0 or less) the hub may only lower it.
+// hub_max_daily_usd; with none (0 or less) the hub may only lower it. The
+// CVE feed and its sources stay off where the root config turns them off.
 func (c *Config) applyTuning(m map[string]string) {
 	fields := c.tuningFields()
 	rootDaily := c.Budget.DailyUSD
+	rootFeed := c.CVEFeed
+	defer func() {
+		c.CVEFeed.Enabled = c.CVEFeed.Enabled && rootFeed.Enabled
+		c.CVEFeed.NVD = c.CVEFeed.NVD && rootFeed.NVD
+		c.CVEFeed.KEV = c.CVEFeed.KEV && rootFeed.KEV
+	}()
 	for k, v := range m {
 		t, ok := hubproto.TuningFor(k)
 		fd, known := fields[k]

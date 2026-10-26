@@ -310,3 +310,33 @@ func contains(l []string, s string) bool {
 	}
 	return false
 }
+
+// The hub switches the CVE feed and its sources, within what the server's
+// own config allows: off there stays off.
+func TestHubCVEFeedWithinRoot(t *testing.T) {
+	c := Default()
+	c.applyTuning(map[string]string{"cve_feed.nvd": "false"})
+	if got := c.CVEFeed.Sources(); len(got) != 1 || got[0] != "cisa_kev" {
+		t.Errorf("hub turning NVD off: %v", got)
+	}
+	c = Default()
+	c.applyTuning(map[string]string{"cve_feed.enabled": "false"})
+	if len(c.CVEFeed.Sources()) != 0 {
+		t.Errorf("hub turning the feed off: %v", c.CVEFeed.Sources())
+	}
+	c = Default()
+	c.CVEFeed.Enabled, c.CVEFeed.KEV = true, false // root: no CISA
+	c.applyTuning(map[string]string{"cve_feed.cisa_kev": "true"})
+	if c.CVEFeed.KEV {
+		t.Error("hub turned on a source the root config turned off")
+	}
+	c = Default()
+	c.CVEFeed.Enabled = false // root: no downloads at all
+	c.applyTuning(map[string]string{"cve_feed.enabled": "true"})
+	if c.CVEFeed.Enabled || len(c.CVEFeed.Sources()) != 0 {
+		t.Error("hub turned on a feed the root config turned off")
+	}
+	if c.TuningValues()["cve_feed.enabled"] != "false" {
+		t.Errorf("reported %q", c.TuningValues()["cve_feed.enabled"])
+	}
+}

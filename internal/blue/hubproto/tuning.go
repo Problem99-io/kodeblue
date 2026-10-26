@@ -58,6 +58,12 @@ var Tunings = []Tuning{
 	{Key: "hub.sync_seconds", Group: "Hub link", Label: "Sync with the hub every (seconds)", Kind: "int", Min: 5, Max: 300},
 	{Key: "hub.messages_per_hour", Group: "Hub link", Label: "Operator chat messages per hour", Kind: "int", Min: 1, Max: 240, Only: "lower"},
 	{Key: "hub.share_transcripts", Group: "Hub link", Label: "Share agent transcripts with the hub", Kind: "bool", Only: "lower"},
+	{Key: "cve_feed.enabled", Group: "Vulnerability feed", Label: "Pull new CVEs every day", Kind: "bool",
+		Help: "Once a day the server downloads the CVEs published since its last pull and keeps those naming software it runs; the reviewer checks the installed versions. Download only: nothing about the server is sent. A server whose own config turns the feed or a source off keeps it off."},
+	{Key: "cve_feed.nvd", Group: "Vulnerability feed", Label: "Source: NIST National Vulnerability Database", Kind: "bool",
+		Help: "Every newly published CVE, with the affected products and versions."},
+	{Key: "cve_feed.cisa_kev", Group: "Vulnerability feed", Label: "Source: CISA Known Exploited Vulnerabilities", Kind: "bool",
+		Help: "CVEs attackers are exploiting now. A match goes to Slack at once."},
 }
 
 // TuningFor returns the tuning setting for key.
