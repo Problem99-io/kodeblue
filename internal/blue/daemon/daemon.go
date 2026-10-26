@@ -64,10 +64,12 @@ type Daemon struct {
 	ruleRun containment.Invoker
 	// upgradeMu serializes reads and writes of the upgrade status file
 	// (upgrade.go): the main loop and the hub link both settle it.
-	upgradeMu sync.Mutex
-	cveClient cvefeed.Client
-	wg        sync.WaitGroup
-	mu        sync.Mutex
+	upgradeMu      sync.Mutex
+	cveClient      cvefeed.Client
+	wg             sync.WaitGroup
+	mu             sync.Mutex
+	operatorMu     sync.Mutex        // serialize session admission, never the running agent
+	operatorInputs map[string]uint64 // admitted input version per operator session (operatorMu)
 	// eng is the running agent engine (nil: none). The engine supervisor
 	// replaces it while sessions and hub handlers use it: read it with
 	// engine or engineFor, never directly.

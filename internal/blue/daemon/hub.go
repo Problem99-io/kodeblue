@@ -183,13 +183,25 @@ func (d *Daemon) reportRemoteChanges(m hubproto.OperatorMessage, since time.Time
 // responder keeps its full context; anything else goes to the operator
 // liaison, one session per hub conversation.
 func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply {
+	return d.BeginOperatorMessage(ctx, m)()
+}
+
+// BeginOperatorMessage admits input in arrival order, then returns the wait for
+// its answer. A live session receives steering input without another waiter or
+// cost booking; its existing owner follows the session through the continuation.
+func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMessage) func() hubproto.MessageReply {
+	d.operatorMu.Lock()
+	defer d.operatorMu.Unlock()
 	kc, ectx, release := d.engineFor(ctx)
-	defer release()
+	immediate := func(reply hubproto.MessageReply) func() hubproto.MessageReply {
+		release()
+		return func() hubproto.MessageReply { return reply }
+	}
 	if kc == nil {
-		return hubproto.MessageReply{Status: "failed", Text: "kodeblue's model layer is not running on this server (no inference key, or the agent engine is not running or restarting). Sensors and detection still run."}
+		return immediate(hubproto.MessageReply{Status: "failed", Text: "kodeblue's model layer is not running on this server (no inference key, or the agent engine is not running or restarting). Sensors and detection still run."})
 	}
 	if d.overBudget(1.5) {
-		return hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Today's model budget is spent ($%.2f of $%.2f). Raise [budget] daily_usd on the server or try tomorrow.", d.spentToday(), d.cfg.Budget.DailyUSD)}
+		return immediate(hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Today's model budget is spent ($%.2f of $%.2f). Raise [budget] daily_usd on the server or try tomorrow.", d.spentToday(), d.cfg.Budget.DailyUSD)})
 	}
 	body := fmt.Sprintf("OPERATOR MESSAGE from %s via the kodeblue hub (authenticated; message #%d):\n\n%s", m.Author, m.ID, m.Body)
 
@@ -197,14 +209,38 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 	var sess *runtime.Session
 	var err error
 	var rec *store.Incident
-	if sid := d.st.Get(convKey); sid != "" && m.ConversationID != "" {
-		sess, err = kc.FollowUp(ctx, &runtime.Session{ID: sid}, body)
-		if inc := d.st.Incidents(`WHERE session_id=? ORDER BY id DESC LIMIT 1`, sid); len(inc) > 0 {
-			rec = &inc[0]
+	sid := ""
+	if m.ConversationID != "" {
+		sid = d.st.Get(convKey)
+	}
+	if sid == "" {
+		if in := d.st.GetIncident(m.IncidentID); in != nil && in.SessionID != "" {
+			sid = in.SessionID
+			rec = in
 		}
-	} else if in := d.st.GetIncident(m.IncidentID); in != nil && in.SessionID != "" && in.Status != "investigating" {
-		rec = in
-		sess, err = kc.FollowUp(ctx, &runtime.Session{ID: in.SessionID}, body+fmt.Sprintf("\n\n(This concerns incident #%d, which you investigated in this session. If the operator's information changes your verdict, call mcp__kodeblue__incident_resolve again.)", in.ID))
+	}
+	if sid != "" {
+		if rec == nil {
+			if inc := d.st.Incidents(`WHERE session_id=? ORDER BY id DESC LIMIT 1`, sid); len(inc) > 0 {
+				rec = &inc[0]
+			}
+		}
+		if _, live := d.LiveSessions()[sid]; live {
+			if err := kc.Steer(ctx, &runtime.Session{ID: sid}, body); err != nil {
+				return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not steer the agent: " + err.Error(), SessionID: sid})
+			}
+			if _, owned := d.operatorInputs[sid]; owned {
+				d.operatorInputs[sid]++
+			}
+			if m.ConversationID != "" {
+				_ = d.st.Set(convKey, sid)
+			}
+			return immediate(hubproto.MessageReply{Status: "done", Text: "Added to the running agent's context; its current action will finish before it continues with your message.", SessionID: sid})
+		}
+		if rec != nil && rec.Kind == "incident" {
+			body += fmt.Sprintf("\n\n(This concerns incident #%d, which you investigated in this session. If the operator's information changes your verdict, call mcp__kodeblue__incident_resolve again.)", rec.ID)
+		}
+		sess, err = kc.FollowUp(ctx, &runtime.Session{ID: sid}, body)
 	} else {
 		title := "Operator: " + strings.TrimSpace(strings.SplitN(m.Body, "\n", 2)[0])
 		if len(title) > 90 {
@@ -232,7 +268,7 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 		}
 	}
 	if err != nil {
-		return hubproto.MessageReply{Status: "failed", Text: "Could not start an agent session: " + err.Error()}
+		return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not start an agent session: " + err.Error()})
 	}
 	if m.ConversationID != "" {
 		_ = d.st.Set(convKey, sess.ID)
@@ -243,43 +279,66 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 		d.st.TouchIncident(rec.ID)
 	}
 	done := d.track(sess.ID, incID)
-	// A follow-up continues an existing session: book only this turn's usage.
+	if d.operatorInputs == nil {
+		d.operatorInputs = make(map[string]uint64)
+	}
+	d.operatorInputs[sess.ID] = 1
+	// Capture accounting before admitting any more input to this session.
 	usd0, in0, out0, cached0 := kc.SessionCost(context.Background(), sess.ID)
 	started := time.Now().Add(-time.Second)
-	out := kc.Wait(ectx, sess, 20*time.Minute)
-	done()
-	if ectx.Err() != nil && ctx.Err() == nil {
-		out.Status = "failed"
-		out.Text = "The agent engine stopped while answering; it is being restarted. Ask again in a minute."
-	}
-	d.reportRemoteChanges(m, started)
-	// The engine that replaced a dead one reads the same session store; with
-	// none running, book nothing rather than a negative delta.
-	usd, tin, tout, cached := d.sessionCost(sess.ID)
-	if tin < in0 || tout < out0 {
-		usd, tin, tout, cached = usd0, in0, out0, cached0
-	}
-	spent := d.st.Spend("operator", d.cfg.ModelFor(hubproto.RoleOperator), tin-in0, tout-out0, cached-cached0, usd-usd0)
-	if rec != nil {
-		if cur := d.st.GetIncident(rec.ID); cur != nil {
-			if cur.Kind == "operator" {
-				cur.Status, cur.Report, cur.Summary = "resolved", out.Text, "operator conversation "+out.Status
+	return func() hubproto.MessageReply {
+		defer release()
+		deadline := time.Now().Add(20 * time.Minute)
+		var out runtime.Outcome
+		for {
+			d.operatorMu.Lock()
+			version := d.operatorInputs[sess.ID]
+			d.operatorMu.Unlock()
+			out = kc.WaitSession(ectx, sess, time.Until(deadline))
+			d.operatorMu.Lock()
+			if version == d.operatorInputs[sess.ID] || ectx.Err() != nil || !time.Now().Before(deadline) {
+				break
 			}
-			cur.CostUSD += spent
-			_ = d.st.UpdateIncident(cur)
+			d.operatorMu.Unlock()
 		}
+		// Close tracking and book the final continuation before a later turn
+		// can acquire ownership of this session.
+		defer d.operatorMu.Unlock()
+		delete(d.operatorInputs, sess.ID)
+		done()
+		if ectx.Err() != nil && ctx.Err() == nil {
+			out.Status = "failed"
+			out.Text = "The agent engine stopped while answering; it is being restarted. Ask again in a minute."
+		}
+		d.reportRemoteChanges(m, started)
+		// The engine that replaced a dead one reads the same session store; with
+		// none running, book nothing rather than a negative delta.
+		usd, tin, tout, cached := d.sessionCost(sess.ID)
+		if tin < in0 || tout < out0 {
+			usd, tin, tout, cached = usd0, in0, out0, cached0
+		}
+		spent := d.st.Spend("operator", d.cfg.ModelFor(hubproto.RoleOperator), tin-in0, tout-out0, cached-cached0, usd-usd0)
+		if rec != nil {
+			if cur := d.st.GetIncident(rec.ID); cur != nil {
+				if cur.Kind == "operator" {
+					cur.Status, cur.Report, cur.Summary = "resolved", out.Text, "operator conversation "+out.Status
+				}
+				cur.CostUSD += spent
+				_ = d.st.UpdateIncident(cur)
+			}
+		}
+		status := "done"
+		if out.Status != "completed" {
+			status = "failed"
+		}
+		text := strings.TrimSpace(out.Text)
+		if text == "" && out.Status == "aborted" {
+			text = "(stopped before the agent replied)"
+		} else if text == "" {
+			text = "(the agent finished without a reply; status " + out.Status + ")"
+		}
+		return hubproto.MessageReply{Status: status, Text: text, SessionID: sess.ID, CostUSD: spent}
 	}
-	status := "done"
-	if out.Status != "completed" {
-		status = "failed"
-	}
-	text := strings.TrimSpace(out.Text)
-	if text == "" && out.Status == "aborted" {
-		text = "(stopped before the agent replied)"
-	} else if text == "" {
-		text = "(the agent finished without a reply; status " + out.Status + ")"
-	}
-	return hubproto.MessageReply{Status: status, Text: text, SessionID: sess.ID, CostUSD: spent}
 }
 
 // StopSession aborts a running agent session on the operator's request. The
