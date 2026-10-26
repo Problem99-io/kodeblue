@@ -480,3 +480,22 @@ func TestKeyAndHashBackstop(t *testing.T) {
 		t.Errorf("host_read returned the key: %q", text)
 	}
 }
+
+// apt and apt-cache only read; apt-get only simulates, so an agent can see
+// pending updates and write a vulnerability check on them but never install.
+func TestAptReadsAndSimulates(t *testing.T) {
+	ok := [][]string{{"apt", "list", "--upgradable"}, {"apt", "policy", "openssh-server"}, {"apt-cache", "policy", "sudo"},
+		{"apt-get", "-s", "dist-upgrade"}, {"apt-get", "--simulate", "-q", "upgrade"}}
+	for _, argv := range ok {
+		if err := Validate(argv); err != nil {
+			t.Errorf("%v should be allowed: %v", argv, err)
+		}
+	}
+	bad := [][]string{{"apt-get", "upgrade"}, {"apt-get", "-q", "dist-upgrade"}, {"apt-get", "-s", "install", "nmap"}, {"apt-get", "-sy", "upgrade"},
+		{"apt-get", "-s", "-o", "APT::Get::Simulate=false", "upgrade"}, {"apt", "install", "nmap"}, {"apt", "upgrade"}, {"apt-get", "-s", "update"}}
+	for _, argv := range bad {
+		if err := Validate(argv); err == nil {
+			t.Errorf("%v must be refused", argv)
+		}
+	}
+}

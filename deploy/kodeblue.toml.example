@@ -85,6 +85,12 @@ min_severity = "high"            # automatic incident-opened/outcome notices at 
 agent_messages_per_hour = 20     # cap on the agents' notify_slack tool
 # Containment actions (executed, awaiting approval, refused, undone) are ALWAYS posted.
 
+# [cve_feed] — once a day kodeblue downloads the CVEs NIST's NVD published that day and
+# CISA's known-exploited list, and hands the ones naming software on this server to the
+# reviewer, who checks the installed version. Download only: nothing about this server is sent.
+# disabled = false
+# nvd_api_key = ""                       # optional; https://nvd.nist.gov/developers/request-an-api-key
+
 # [hub] — written by `kodeblue enroll` (the installer runs it when given --token).
 # kodeblue dials out to the hub; nothing on this server listens for it.
 # url = "https://hub.example.com"

@@ -30,6 +30,7 @@ type Config struct {
 	Hub       Hub            `toml:"hub"`
 	Agents    Agents         `toml:"agents"`
 	Requests  Requests       `toml:"requests"`
+	CVEFeed   CVEFeed        `toml:"cve_feed"`
 	// ActionRules are the hub's per-action approval rules (see
 	// ActionRule). They come only from hub settings, never from this file.
 	ActionRules map[string]string `toml:"-"`
@@ -48,6 +49,16 @@ type Config struct {
 // CAP_NET_RAW.
 type Requests struct {
 	Disabled bool `toml:"disabled"`
+}
+
+// CVEFeed is the daily pull of the CVEs NIST's NVD published and the ones
+// CISA added to its Known Exploited Vulnerabilities list, matched against
+// the software on this server for the reviewer to check. It only downloads
+// public feeds; nothing about the server is sent.
+type CVEFeed struct {
+	Disabled bool `toml:"disabled"`
+	// NVDAPIKey is optional: NVD allows more requests with one.
+	NVDAPIKey string `toml:"nvd_api_key"`
 }
 
 // Agents holds extra instructions per agent role (learner, responder,
