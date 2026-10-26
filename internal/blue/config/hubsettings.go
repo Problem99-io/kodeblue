@@ -65,6 +65,7 @@ func (c Config) ModeCeiling() string {
 // server use it; the root response helper must not.
 func (c Config) WithHubSettings() Config {
 	c.RootResponseMode = c.Response.Mode
+	c.RootCVEFeed = c.CVEFeed
 	if !c.Hub.Enabled() || !c.Hub.AcceptSettings {
 		return c
 	}

@@ -59,6 +59,8 @@ type Agent interface {
 	// DecisionMade is called after an operator decision on a containment
 	// request was carried out, so the incident's agent can continue.
 	DecisionMade()
+	// Software is the daily software check: versions and the CVE feed.
+	Software() *hubproto.Software
 }
 
 type Link struct {
@@ -368,6 +370,7 @@ func (l *Link) status() hubproto.Status {
 	// The window the daemon enforces, not the file's raw (kodeblue-writable,
 	// possibly far-future) content.
 	s.Maintenance = l.agent.Maintenance()
+	s.Software = l.agent.Software()
 	if s.Phase == "learning" {
 		s.BaselineSweep, s.BaselineSweeps, s.BaselineETA = l.st.BaselineProgress()
 		s.BaselineAt = l.st.Get("baseline_at")

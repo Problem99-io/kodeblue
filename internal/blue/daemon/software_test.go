@@ -201,3 +201,45 @@ func TestCVEFeedKEVFailureAndBackoff(t *testing.T) {
 		t.Errorf("hits %d failures %s", nvd.Load(), st.Get(cveFailuresKey))
 	}
 }
+
+// With NVD turned off on the hub only CISA's list is pulled, and the hub's
+// status carries the sources, the versions and the matches.
+func TestCVEFeedSourcesAndStatus(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	_ = st.UpsertBaseline([]store.BaselineItem{{Collector: "container", Key: "traefik:v3.7.15#proxy"}}, "learned")
+	var nvd atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/kev") {
+			_, _ = w.Write([]byte(`{"vulnerabilities":[{"cveID":"CVE-2026-5555","vendorProject":"Traefik Labs","product":"Traefik","vulnerabilityName":"x","dateAdded":"` +
+				time.Now().UTC().Format("2006-01-02") + `","shortDescription":"y","requiredAction":"Patch."}]}`))
+			return
+		}
+		nvd.Add(1)
+		_, _ = w.Write([]byte(`{"totalResults":0,"vulnerabilities":[]}`))
+	}))
+	defer srv.Close()
+	d.cveClient = cvefeed.Client{NVD: srv.URL + "/nvd", KEV: srv.URL + "/kev"}
+	d.cfg.RootCVEFeed = d.cfg.CVEFeed
+	d.cfg.CVEFeed.NVD = false
+	if !d.cveFeed(context.Background(), time.Now().UTC()) || nvd.Load() != 0 {
+		t.Fatalf("NVD pulled while off (hits %d)", nvd.Load())
+	}
+	s := d.Software()
+	if strings.Join(s.Feed.Sources, ",") != "cisa_kev" || strings.Join(s.Feed.Allowed, ",") != "nvd,cisa_kev" {
+		t.Errorf("sources %v allowed %v", s.Feed.Sources, s.Feed.Allowed)
+	}
+	if s.Feed.Total != 1 || s.Feed.Matches[0].ID != "CVE-2026-5555" || !s.Feed.Matches[0].KEV || s.Feed.Through == "" {
+		t.Errorf("feed status: %+v", s.Feed)
+	}
+	d.cfg.CVEFeed.Enabled = false
+	_ = st.Set(versionsAtKey, time.Now().UTC().Format(time.RFC3339))
+	_ = st.Set(cveCheckedKey, "")
+	d.maybeSoftwareCheck(context.Background())
+	d.wg.Wait()
+	if nvd.Load() != 0 || st.Get(cveCheckedKey) != "" {
+		t.Error("feed ran while turned off")
+	}
+	if !strings.Contains(d.reviewDigest(time.Now().Add(-time.Hour)), "the CVE feed is off") {
+		t.Error("digest does not say the feed is off")
+	}
+}

@@ -266,6 +266,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Criticals a crash or stop left unrouted (recorded, not yet escalated).
 	d.routeStranded(ctx, 0)
 	d.sweepOnce(ctx, "startup")
+	d.maybeSoftwareCheck(ctx) // once a day; at startup so a new server is checked without waiting for the first tick
 	d.resumeQueued(ctx)
 	d.requestTriage()
 	for {
