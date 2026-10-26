@@ -625,3 +625,78 @@ func TestContainmentRuleCommands(t *testing.T) {
 		t.Fatalf("queued: %+v", msgs)
 	}
 }
+
+// Update in the console asks one server to upgrade to the hub's version. The
+// hub names nothing else, and refuses what the server would refuse.
+func TestUpgradeCommand(t *testing.T) {
+	_, st, ts := newHub(t)
+	_ = st.AddUser("alice", "correct horse battery")
+	jar, _ := cookiejar.New(nil)
+	c := ts.Client()
+	c.Jar = jar
+	_, b := do(t, c, "POST", ts.URL+"/api/login", "", "", map[string]string{"name": "alice", "password": "correct horse battery"})
+	var me struct {
+		CSRF    string `json:"csrf"`
+		Version string `json:"version"`
+	}
+	_ = json.Unmarshal(b, &me)
+	_, b = do(t, c, "GET", ts.URL+"/api/me", "", "", nil)
+	_ = json.Unmarshal(b, &me)
+	_, tok, _ := st.CreateServer("web-1", "test", time.Hour)
+	srv, _, _ := st.Enroll(tok, "web-1", "")
+	sync := func(s hubproto.Status) {
+		if err := st.ApplySync(srv.ID, &hubproto.SyncRequest{Status: s}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	up := func() (int, []byte) {
+		return do(t, c, "POST", ts.URL+"/api/servers/"+srv.ID+"/upgrade", "", me.CSRF, map[string]string{"version": "v9.9.9"})
+	}
+	old := hubproto.Version
+	t.Cleanup(func() { hubproto.Version = old })
+
+	hubproto.Version = "dev"
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.6", AcceptsUpgrades: true})
+	if code, b := up(); code != 409 || !strings.Contains(string(b), "development build") {
+		t.Fatalf("dev hub: %d %s", code, b)
+	}
+	hubproto.Version = "v0.1.7"
+	if _, b := do(t, c, "GET", ts.URL+"/api/me", "", "", nil); !strings.Contains(string(b), `"version":"v0.1.7"`) {
+		t.Fatalf("hub version not in /api/me: %s", b)
+	}
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.6"})
+	if code, b := up(); code != 409 || !strings.Contains(string(b), "install command") {
+		t.Fatalf("server without hub upgrades: %d %s", code, b)
+	}
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.8", AcceptsUpgrades: true})
+	if code, b := up(); code != 409 || !strings.Contains(string(b), "downgrade") {
+		t.Fatalf("downgrade: %d %s", code, b)
+	}
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.6", AcceptsUpgrades: true})
+	if code, _ := do(t, c, "POST", ts.URL+"/api/servers/"+srv.ID+"/upgrade", "", "", nil); code != 403 {
+		t.Fatalf("upgrade without csrf: %d", code)
+	}
+	if code, b := up(); code != 200 {
+		t.Fatalf("upgrade: %d %s", code, b)
+	}
+	if code, _ := up(); code != 409 {
+		t.Fatalf("second upgrade while one is open: %d", code)
+	}
+	if st.OpenCommand(srv.ID) != nil {
+		t.Fatal("an upgrade is not a learning command")
+	}
+	msgs := st.TakeQueued(srv.ID)
+	// The hub's own version, whatever the request body said.
+	if len(msgs) != 1 || msgs[0].Command != hubproto.CommandUpgrade || msgs[0].Body != "v0.1.7" || msgs[0].Author != "alice" {
+		t.Fatalf("queued: %+v", msgs)
+	}
+	_ = st.Reply(srv.ID, msgs[0].ID, hubproto.MessageReply{Status: "done", Text: "recorded"})
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.6", AcceptsUpgrades: true, Upgrade: &hubproto.UpgradeStatus{To: "v0.1.7", State: "installing"}})
+	if code, b := up(); code != 409 || !strings.Contains(string(b), "installing") {
+		t.Fatalf("while installing: %d %s", code, b)
+	}
+	sync(hubproto.Status{Phase: "watching", Version: "v0.1.7", AcceptsUpgrades: true})
+	if code, b := up(); code != 409 || !strings.Contains(string(b), "already runs") {
+		t.Fatalf("up to date: %d %s", code, b)
+	}
+}

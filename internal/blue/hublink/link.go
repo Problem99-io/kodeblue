@@ -62,6 +62,11 @@ type Agent interface {
 	DecisionMade()
 	// Software is the daily software check: versions and the CVE feed.
 	Software() *hubproto.Software
+	// Upgrade records an operator's upgrade to the release m.Body, which
+	// starts once no learning or agent session runs; UpgradeStatus is the
+	// last one asked for.
+	Upgrade(m hubproto.OperatorMessage) hubproto.MessageReply
+	UpgradeStatus() *hubproto.UpgradeStatus
 }
 
 type Link struct {
@@ -368,6 +373,7 @@ func (l *Link) status() hubproto.Status {
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
 		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
+		AcceptsUpgrades: l.cfg.Hub.AcceptUpgrades, Upgrade: l.agent.UpgradeStatus(),
 		Models: l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
 	}
 	for _, a := range respond.ActionNames() {
@@ -490,7 +496,7 @@ func (l *Link) messageLoop(ctx context.Context) {
 		}
 		backoff = 5 * time.Second
 		for _, m := range resp.Messages {
-			if m.Decision != "" || m.Command == hubproto.CommandStop || slices.Contains(hubproto.RuleCommands, m.Command) {
+			if m.Decision != "" || m.Command == hubproto.CommandStop || m.Command == hubproto.CommandUpgrade || slices.Contains(hubproto.RuleCommands, m.Command) {
 				go l.answer(ctx, m)
 				continue
 			}
@@ -525,6 +531,12 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		}
 		if slices.Contains(hubproto.RuleCommands, m.Command) {
 			return l.ruleCommand(ctx, m)
+		}
+		if m.Command == hubproto.CommandUpgrade {
+			if !l.cfg.Hub.AcceptUpgrades {
+				return hubproto.MessageReply{Status: "refused", Text: "This server does not take upgrades from the hub (hub.accept_upgrades = false in /etc/kodeblue/kodeblue.toml). Run on the server: sudo kodeblue upgrade " + m.Body}
+			}
+			return l.agent.Upgrade(m)
 		}
 		if m.Command != hubproto.CommandLearn && m.Command != hubproto.CommandRelearn {
 			return hubproto.MessageReply{Status: "refused", Text: "Unknown command " + m.Command}

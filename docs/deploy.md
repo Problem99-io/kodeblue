@@ -430,7 +430,23 @@ Take a backup first (below).
 
 ### Servers
 
-Upgrade the hub first: servers download their new release from it. Then, on each server, run the install command **without `--token`**. The installer authenticates with the server's own key:
+Upgrade the hub first. Then, from v0.1.7 on, click **Update** on a server's Overview in the hub (or **Update all** on the Servers page). Nothing upgrades on its own: an upgrade starts only when an operator clicks it, and each click is in the audit log.
+
+What happens:
+- the hub sends the server one thing, the version it runs itself
+- the server waits until no learning run or agent session is running, so an upgrade never cuts one short
+- its root helper starts `kodeblue upgrade <version>` in a separate unit, `kodeblue-upgrade`, which downloads that release from `[upgrade] release_url` (GitHub by default), checks the tarball against the release's SHA256SUMS, unpacks it and runs its installer
+- the Overview shows waiting, installing, then the new version, or why it failed; on the server, `journalctl -u kodeblue-upgrade`
+
+The hub never supplies the release, so a hub (or a kodeblue user) that was taken over can at most start the install of a newer published release. Downgrades and reinstalls are refused. Root can turn hub upgrades off with `[hub] accept_upgrades = false`, and point `release_url` at a mirror holding the same `<version>/` directories.
+
+On the server, root can do the same directly:
+
+```bash
+sudo kodeblue upgrade v0.1.7
+```
+
+Servers before v0.1.7, and servers without a hub, upgrade with the installer. On each server, run the install command **without `--token`**. The installer authenticates with the server's own key:
 
 ```bash
 curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- --hub https://hub.example.com
@@ -447,7 +463,7 @@ An upgrade:
 - keeps `/etc/kodeblue/kodeblue.toml`, the keys and all state (`--mode` is not applied to an existing config)
 - migrates kodeblue's database on start and refreshes the bundled skills; skills the agents wrote are kept
 
-Servers do not upgrade themselves. The hub shows each server's version.
+Servers never upgrade themselves. The hub shows each server's version, and marks the ones older than the hub with "update available".
 
 ## Backups
 

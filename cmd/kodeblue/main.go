@@ -68,6 +68,7 @@ func main() {
 	infURL := fs.String("url", "", "inference: OpenAI-compatible base URL (https://…)")
 	infModel := fs.String("model", "", "inference: model for triage and agents")
 	infProvider := fs.String("provider", "", "inference: provider label, for gateways that serve several vendors")
+	by := fs.String("by", "", "upgrade: who asked (journaled)")
 	infKeyFile := fs.String("key-file", "", "inference: file with the endpoint's API key (- reads it from stdin, asking on a terminal)")
 	// Positional args may come before or after flags.
 	var pos []string
@@ -196,15 +197,10 @@ func main() {
 		if err != nil || d > 24*time.Hour {
 			fatal(errors.New("duration must be like 30m or 2h (max 24h)"))
 		}
-		until := time.Now().Add(d).UTC().Format(time.RFC3339)
-		if err := os.WriteFile(cfg.MaintenanceFile(), []byte(until), 0o640); err != nil {
+		until, err := openMaintenance(cfg, st, d, strings.Join(pos[1:], " "))
+		if err != nil {
 			fatal(err)
 		}
-		reason := strings.TrimSpace(strings.Join(pos[1:], " "))
-		if reason == "" {
-			reason = "planned work"
-		}
-		st.Journal("operator", "maintenance.on", "until "+until+": "+reason)
 		fmt.Println("maintenance until", until, "— non-critical changes are absorbed into the baseline and journaled")
 	case "vulnerabilities", "vulns":
 		p := filepath.Join(cfg.WorkspaceDir(), "VULNERABILITIES.md")
@@ -213,6 +209,11 @@ func main() {
 			fatal(fmt.Errorf("%s: %w (kodeblue writes it after its next sweep; run with sudo)", p, err))
 		}
 		fmt.Print(string(b))
+	case "upgrade":
+		if len(pos) != 1 {
+			fatal(errors.New("usage: sudo kodeblue upgrade <version, e.g. v0.1.7>"))
+		}
+		upgradeCmd(cfg, pos[0], *by)
 	case "snapshot":
 		if len(pos) < 1 {
 			fatal(errors.New("usage: kodeblue snapshot <collector>"))
@@ -431,9 +432,12 @@ func statusCmd(cfg config.Config) {
 
 // helperEnvelope is what the unprivileged side sends to the root helper.
 type helperEnvelope struct {
-	Op      string          `json:"op"` // execute | undo | rule_approve | rule_pause | rule_delete
+	Op      string          `json:"op"` // execute | undo | upgrade | rule_approve | rule_pause | rule_delete
 	Request respond.Request `json:"request"`
 	UndoID  string          `json:"undo_id"`
+	// Version and By: an upgrade of kodeblue (op upgrade) and who asked.
+	Version string `json:"version,omitempty"`
+	By      string `json:"by,omitempty"`
 	// A containment rule (rule_*): the rule (approve), its id (pause,
 	// delete), the hash of the rule the approver saw, the hub operator who
 	// approved when relayed from the hub, and a note.
@@ -523,9 +527,6 @@ func rootHelper(cfg config.Config) {
 	if err := checkRootOwned(cfg.Path()); err != nil {
 		refuse(err.Error())
 	}
-	if cfg.Response.Mode == "off" {
-		refuse("response disabled by policy")
-	}
 	// Who is on the other end: only uid 0 (the operator CLI run via sudo, or
 	// root) may approve or undo; the kodeblue user gets only what the
 	// root-owned policy grants agents. stdin is the accepted socket under
@@ -538,9 +539,21 @@ func rootHelper(cfg config.Config) {
 	if err := json.NewDecoder(os.Stdin).Decode(&env); err != nil {
 		refuse("bad request: " + err.Error())
 	}
+	if env.Op == "upgrade" {
+		// Not containment: [response] mode does not govern it.
+		rec, err := startUpgrade(cfg, caller, env)
+		if err != nil {
+			refuse(err.Error())
+		}
+		reply(rec)
+		return
+	}
 	if strings.HasPrefix(env.Op, "rule_") {
 		replyRule(ruleOp(cfg, caller, env))
 		return
+	}
+	if cfg.Response.Mode == "off" {
+		refuse("response disabled by policy")
 	}
 	switch env.Op {
 	case "undo":
@@ -801,6 +814,7 @@ func usage() {
   respond list|approve <id>|deny <id>|undo <id> | mcp | version
   rules [list] | show <id> | approve <id> | reject <id> <why> | pause <id> <why> | delete <id>   containment rules (approve and delete need sudo)
   vulnerabilities     every known vulnerability on this server (the register in /var/lib/kodeblue/workspace/VULNERABILITIES.md)
+  upgrade <version>   install that release (from [upgrade] release_url, checked against its SHA256SUMS; as root)
   enroll --hub https://hub.example [--pin sha256//…] [--ca-file f] [--name n]   (token in $KODEBLUE_ENROLL_TOKEN)
   inference [--url https://… --model m [--provider p]]   show or set the model endpoint`)
 }

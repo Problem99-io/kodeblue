@@ -192,6 +192,11 @@ func (s *Store) addItemColumns() error {
 // model; detection already watches the server meanwhile.
 const LearnerPendingKey = "learner_pending"
 
+// AssessmentPendingKey is set (to the time) while the vulnerability
+// assessment after a learner that ran is still to do: it failed (a
+// provider's limit, a dropped connection) and is retried on its own.
+const AssessmentPendingKey = "assessment_pending"
+
 // BaselineProgressKey holds "done/total" baseline sweeps while the learning
 // phase collects them, and BaselineETAKey when the last one is due. A
 // restart mid-baseline resumes from them; both are cleared once it is done.

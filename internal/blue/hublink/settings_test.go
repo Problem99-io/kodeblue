@@ -129,6 +129,9 @@ func TestStatusReportsBaselineAndSavedSettings(t *testing.T) {
 	if s := l.status(); s.Software == nil || s.Software.Feed.Total != 1 {
 		t.Fatalf("software check not reported: %+v", s.Software)
 	}
+	if s := l.status(); !s.AcceptsUpgrades || s.Upgrade == nil || s.Upgrade.To != "v0.1.7" {
+		t.Fatalf("upgrade not reported: %v %+v", s.AcceptsUpgrades, s.Upgrade)
+	}
 }
 
 // phaseAgent answers what status() asks of the daemon.
@@ -146,3 +149,6 @@ func (a *phaseAgent) Software() *hubproto.Software {
 	return &hubproto.Software{Feed: hubproto.CVEFeedStatus{Sources: []string{"nvd"}, Total: 1}}
 }
 func (a *phaseAgent) ApplySettings() { a.applied++ }
+func (a *phaseAgent) UpgradeStatus() *hubproto.UpgradeStatus {
+	return &hubproto.UpgradeStatus{To: "v0.1.7", State: "waiting"}
+}

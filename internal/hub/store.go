@@ -750,6 +750,15 @@ func (s *Store) OpenCommand(server string) *Message {
 	return &list[0]
 }
 
+// OpenUpgrade is the queued or delivered upgrade command for server, if any.
+func (s *Store) OpenUpgrade(server string) *Message {
+	list := s.messages(`WHERE server_id=? AND command=? AND status IN ('queued','delivered') ORDER BY id DESC LIMIT 1`, server, hubproto.CommandUpgrade)
+	if len(list) == 0 {
+		return nil
+	}
+	return &list[0]
+}
+
 // OpenDecision is the queued or delivered decision on a request, if any.
 // DecisionReplyWait is how long a delivered ruling waits for the server's
 // reply before the request can be ruled on again (the helper's own deadline

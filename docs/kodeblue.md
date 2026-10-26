@@ -301,6 +301,7 @@ kodeblue vulnerabilities                        # every known vulnerability on t
 kodeblue relearn && systemctl restart kodeblue  # after a big planned change (or Relearn on the hub's Overview)
 kodeblue sensors                                # what each sensor can see here, and which are off
 kodeblue sensors on outbound                    # turn a sensor back on (off <sensor> <reason> turns one off)
+sudo kodeblue upgrade v0.1.7                    # install that release (or Update on the hub's Overview); never automatic
 ```
 
 The vulnerability register `/var/lib/kodeblue/workspace/VULNERABILITIES.md` lists everything known to be weak on the server in one place: open vulnerabilities by severity (with CVEs, evidence, fix and whether the fix's check passes), a table by service, security updates waiting, new CVEs from the daily feed that name software here, accepted risks and what was resolved in the last 30 days. kodeblue rewrites it after each sweep when something changed; `vulnerabilities.json` beside it holds the same for tools, and `sudo kodeblue vulnerabilities` prints it.

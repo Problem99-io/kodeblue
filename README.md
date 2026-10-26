@@ -235,6 +235,7 @@ sudo kodeblue respond list                   # then: respond approve|deny|undo <
 sudo kodeblue rules                          # containment rules; then: rules approve|reject|pause|delete <id>
 sudo kodeblue vulnerabilities                # every known vulnerability on this server
 sudo kodeblue inference                      # show the model endpoint (set it with --url, --model and --key-file -)
+sudo kodeblue upgrade v0.1.7                 # install a release (or Update on the hub); checked against its SHA256SUMS
 ```
 
 On the hub:

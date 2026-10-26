@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	internal "github.com/Problem99-io/kodeblue/internal"
 )
@@ -28,6 +30,7 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 			return
 		}
 		status, content := "running", ""
+		var failure runFailure
 		if len(events) > 0 {
 			e := events[0]
 			switch e.Type {
@@ -41,6 +44,7 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 				}
 			case internal.EventRunFailed:
 				status = "failed"
+				failure = readFailure(e.Payload)
 			case internal.EventRunAborted, internal.EventRunInterrupted:
 				status = "aborted"
 			}
@@ -59,6 +63,39 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 		if truncated {
 			content = string(text[:12000])
 		}
-		writeJSON(w, 200, map[string]any{"session_id": sessionID, "run_id": runID, "status": status, "text": content, "truncated": truncated})
+		out := map[string]any{"session_id": sessionID, "run_id": runID, "status": status, "text": content, "truncated": truncated}
+		if failure.text != "" {
+			out["error"], out["error_class"] = failure.text, failure.class
+			if failure.resetsAt != "" {
+				out["resets_at"] = failure.resetsAt
+			}
+		}
+		writeJSON(w, 200, out)
 	}
+}
+
+// runFailure is why a run failed, from its run.failed event: the reason the
+// agent loop wrote for people (never the request or a key), its class
+// (spend_limit, rate_limit, connection_reset, …) and when a provider's
+// spending limit lifts, if it said.
+type runFailure struct{ text, class, resetsAt string }
+
+func readFailure(payload json.RawMessage) runFailure {
+	var f struct {
+		Reason     string `json:"reason"`
+		HTTPStatus int    `json:"http_status"`
+		Class      string `json:"failure_class"`
+		ResetsAt   string `json:"resets_at"`
+	}
+	if json.Unmarshal(payload, &f) != nil || f.Reason == "" {
+		return runFailure{}
+	}
+	r := []rune(f.Reason)
+	if len(r) > 500 {
+		f.Reason = string(r[:500]) + "…"
+	}
+	if f.HTTPStatus != 0 && !strings.Contains(f.Reason, "HTTP") {
+		f.Reason = fmt.Sprintf("%s (HTTP %d)", f.Reason, f.HTTPStatus)
+	}
+	return runFailure{text: f.Reason, class: f.Class, resetsAt: f.ResetsAt}
 }

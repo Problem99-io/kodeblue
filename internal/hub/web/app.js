@@ -617,6 +617,7 @@ function serverBar(srv, tab) {
         srv.hostname ? h("span", null, srv.hostname) : null,
         st.os ? h("span", null, st.os) : null,
         srv.version ? h("span", null, "v" + String(srv.version).replace(/^v/, "")) : null,
+        updateAvailable(srv) ? h("a", { class: "badge b-warn", href: `#/s/${enc(srv.id)}/overview`, title: "The hub runs " + hubVersion() + ": update the server from its Overview" }, "update available") : null,
         srv.last_ip ? h("span", null, srv.last_ip) : null),
       h("div", { class: "sp" }),
       h("div", { class: "btns" },
@@ -1760,6 +1761,81 @@ function learningControls(srv, cmds, after) {
   return h("div", { class: "appr-act" }, lastNote, h("div", { class: "btns" }, learn, relearn));
 }
 
+// ---------- upgrades ----------
+// Upgrades are always started by an operator: one click per server (or
+// Update all, which confirms the list first). The hub names its own version;
+// the server downloads that release itself, checks it against the release's
+// SHA256SUMS and installs it once no learning or agent session runs.
+const hubVersion = () => (S.info && S.info.version) || "";
+const relVer = (v) => { const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v || "")); return m ? m.slice(1).map(Number) : null; };
+function newerVer(a, b) {
+  const x = relVer(a), y = relVer(b);
+  if (!x || !y || !/^v\d+\.\d+\.\d+$/.test(a)) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+function updateAvailable(srv) {
+  const st = srv.status || {};
+  const up = st.upgrade;
+  return srv.enrolled && !srv.revoked && newerVer(hubVersion(), st.version || srv.version) && !(up && up.to === hubVersion() && (up.state === "waiting" || up.state === "installing"));
+}
+// Hub upgrades arrived in v0.1.7: an older server upgrades with the install command.
+const hubUpgrades = (srv) => !!(srv.status || {}).accepts_upgrades;
+async function requestUpgrade(srv) {
+  try {
+    await api("POST", `/api/servers/${enc(srv.id)}/upgrade`, {});
+    return null;
+  } catch (e) { return e.message; }
+}
+const upgradeSteps = () => [
+  h("p", null, "Each server downloads kodeblue " + hubVersion() + " from its release URL (GitHub unless its config says otherwise), checks it against the release's SHA256SUMS, and installs it once no learning or agent session runs on it."),
+  h("p", null, "The install keeps the server's config, keys and state, opens a 10-minute maintenance window for the binary swap, and restarts kodeblue. Detection pauses for the few seconds of the restart."),
+  h("p", { class: "muted small" }, "Logged in the audit log; on the server: journalctl -u kodeblue-upgrade.")];
+function upgradeControls(srv, cmds, after) {
+  const st = srv.status || {};
+  const cur = st.version || srv.version || "";
+  const hv = hubVersion();
+  if (!srv.enrolled || srv.revoked || !st.phase) return cur || "—";
+  const ver = h("span", { class: "mono" }, cur || "—");
+  const open = cmds.find((m) => m.status === "queued" || m.status === "delivered");
+  if (open) return h("div", { class: "stack" }, ver, h("div", { class: "appr-st" }, h("span", { class: "pulse" }), `${open.author} asked to upgrade to ${open.body}; ${open.status === "queued" ? "waiting for the server…" : "the server is taking it…"}`));
+  const up = st.upgrade;
+  const last = cmds[cmds.length - 1];
+  let note = null;
+  if (up && up.state === "waiting") note = h("div", { class: "appr-st" }, h("span", { class: "pulse" }), `Upgrade to ${up.to} asked by ${String(up.by || "").replace(/^hub:/, "")}: ${up.detail || "starting…"}`);
+  else if (up && up.state === "installing") note = h("div", { class: "appr-st" }, h("span", { class: "pulse" }), `Installing ${up.to}: ${up.detail || "…"}`);
+  else if (last && last.status !== "done" && (!up || new Date(last.created_at) > new Date(up.at))) note = h("div", { class: "small c-red" }, `${last.author}: upgrade ${last.status} ${ago(last.replied_at || last.created_at)}`, last.reply ? " — " + last.reply : "");
+  else if (up && up.state === "failed") note = h("div", { class: "small c-red" }, `Upgrade to ${up.to} failed ${ago(up.at)}: ${up.detail || "no detail"}`);
+  else if (up && up.state === "done" && up.to === cur) note = h("div", { class: "small muted" }, `Upgraded from ${up.from || "?"} ${ago(up.at)} (${String(up.by || "").replace(/^hub:/, "")})`);
+  const busy = up && (up.state === "waiting" || up.state === "installing");
+  if (busy || !newerVer(hv, cur)) return h("div", { class: "stack" }, ver, note, !busy && relVer(hv) && !newerVer(hv, cur) ? h("span", { class: "faint small" }, "Up to date with the hub (" + hv + ").") : null);
+  if (!hubUpgrades(srv)) {
+    const cli = newerVer("v0.1.7", cur) ? "Rerun the install command without --token (Install command above shows it)." : "sudo kodeblue upgrade " + hv;
+    return h("div", { class: "appr-cli" }, ver, note, h("span", { class: "faint small" }, `The hub runs ${hv}. This server upgrades on the server only (kodeblue before v0.1.7, or hub.accept_upgrades = false):`),
+      h("code", { class: "copyable" }, cli));
+  }
+  const btn = h("button", { class: "btn small", type: "button", title: "Upgrade kodeblue on this server to " + hv }, ic("refresh", 12), "Update to " + hv);
+  btn.addEventListener("click", async () => {
+    if (!await ask(`Update ${srv.name} to ${hv}?`, [h("p", null, `${srv.name} runs ${cur}.`), ...upgradeSteps()], "Update")) return;
+    btn.disabled = true;
+    const err = await requestUpgrade(srv);
+    if (err) { btn.disabled = false; toast("Not sent: " + err, true); return; }
+    toast("Update requested on " + srv.name);
+    if (after) after();
+  });
+  return h("div", { class: "appr-act" }, ver, note, h("div", { class: "btns" }, btn));
+}
+async function updateAll(servers, after) {
+  const hv = hubVersion();
+  if (!await ask(`Update ${servers.length} server${servers.length > 1 ? "s" : ""} to ${hv}?`, [
+    h("ul", null, servers.map((s) => h("li", null, `${s.name}: ${(s.status || {}).version || s.version}`))), ...upgradeSteps()], "Update all")) return;
+  const failed = [];
+  for (const s of servers) { const err = await requestUpgrade(s); if (err) failed.push(s.name + ": " + err); }
+  if (failed.length) toast("Not sent to " + failed.join("; "), true);
+  else toast(`Update requested on ${servers.length} server${servers.length > 1 ? "s" : ""}`);
+  if (after) after();
+}
+
 // ---------- containment approvals ----------
 function acceptsApprovals(srvId) {
   const s = S.servers.find((x) => x.id === srvId);
@@ -2150,6 +2226,14 @@ async function vFleet(main) {
         h("button", { class: "btn primary", type: "button", on: { click: addServerDialog } }, ic("plus", 14), "Add server"))));
       return;
     }
+    const outdated = fleet.filter((s) => s.online && updateAvailable(s) && hubUpgrades(s));
+    const oldAgents = fleet.filter((s) => s.online && updateAvailable(s) && !hubUpgrades(s));
+    if (outdated.length || oldAgents.length) {
+      body.appendChild(h("div", { class: "callout" }, h("div", { class: "lbl" }, "kodeblue " + hubVersion() + " is available"),
+        outdated.length ? [`${outdated.map((s) => s.name).join(", ")} can be updated from here. `,
+          h("button", { class: "btn small", type: "button", on: { click: () => updateAll(outdated, () => { body.dataset.sig = ""; draw(); }) } }, ic("refresh", 12), "Update " + (outdated.length > 1 ? "all " + outdated.length : outdated[0].name))] : null,
+        oldAgents.length ? h("div", { class: "faint small" }, `${oldAgents.map((s) => s.name).join(", ")} run${oldAgents.length > 1 ? "" : "s"} a kodeblue before v0.1.7 (or keep${oldAgents.length > 1 ? "" : "s"} upgrades local): upgrade on the server with the install command without --token.`) : null));
+    }
     const waiting = fleet.filter((s) => s.enrolled && !s.revoked && learnWaits(s.status || {}) && !modelSet(s.status || {}) && !modelOnItsWay(s.status || {}));
     if (waiting.length) {
       body.appendChild(h("div", { class: "callout warn" }, h("div", { class: "lbl" }, "Learning is waiting for a model"),
@@ -2198,8 +2282,10 @@ async function vOverview(srv, body) {
   const st = srv.status || {};
   const [inc, jr, msgs] = await Promise.all([recs(srv.id, "incident", "?limit=60"), recs(srv.id, "journal", "?limit=25"),
     api("GET", `/api/servers/${enc(srv.id)}/messages`).catch(() => [])]);
-  const cmds = (msgs || []).filter((m) => m.command).sort((a, b) => a.id - b.id);
-  if (unchanged(body, "overview", [srv, inc, jr, cmds])) return;
+  const allCmds = (msgs || []).filter((m) => m.command).sort((a, b) => a.id - b.id);
+  const cmds = allCmds.filter((m) => m.command === "learn" || m.command === "relearn");
+  const upCmds = allCmds.filter((m) => m.command === "upgrade");
+  if (unchanged(body, "overview", [srv, inc, jr, allCmds, hubVersion()])) return;
   const incidents = inc.map(parse);
   const open = incidents.filter((i) => i.kind === "incident" && i.status !== "resolved");
   const live = incidents.filter((i) => i.status === "investigating");
@@ -2228,6 +2314,7 @@ async function vOverview(srv, body) {
           h("dt", null, "Heartbeat"), h("dd", null, ago(st.heartbeat)),
           h("dt", null, "Learned"), h("dd", null, when(st.learned_at)),
           h("dt", null, "Learning"), h("dd", null, learningControls(srv, cmds, () => { body.dataset.sig = ""; vOverview(srv, body); })),
+          h("dt", null, "kodeblue"), h("dd", null, upgradeControls(srv, upCmds, () => { body.dataset.sig = ""; vOverview(srv, body); })),
           h("dt", null, "Last review"), h("dd", null, when(st.last_review_at)),
           h("dt", null, "Messages"), h("dd", null, !st.phase ? "—" : st.accepts_messages ? "accepted from the hub" : "disabled on the server"),
           h("dt", null, "Kernel"), h("dd", { class: "mono" }, st.kernel || "—")))),

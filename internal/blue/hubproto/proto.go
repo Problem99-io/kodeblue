@@ -92,6 +92,10 @@ type Status struct {
 	// (hub.accept_learning). Learning is true while one runs.
 	AcceptsLearning bool `json:"accepts_learning"`
 	Learning        bool `json:"learning,omitempty"`
+	// AcceptsUpgrades: hub operators may start an upgrade to the hub's
+	// version (hub.accept_upgrades). Upgrade is the last one asked for.
+	AcceptsUpgrades bool           `json:"accepts_upgrades"`
+	Upgrade         *UpgradeStatus `json:"upgrade,omitempty"`
 	// Models is the model each role uses now; Actions is each enabled
 	// containment action's effective rule (auto | approve | off) after the
 	// root policy and the hub's rules.
@@ -114,6 +118,17 @@ type Status struct {
 	Tuning map[string]string `json:"tuning,omitempty"`
 	// Software is the daily software check: versions and the CVE feed.
 	Software *Software `json:"software,omitempty"`
+}
+
+// UpgradeStatus is an upgrade of kodeblue an operator asked for: waiting
+// (until no learning or agent session runs), installing, done or failed.
+type UpgradeStatus struct {
+	To     string    `json:"to"`
+	From   string    `json:"from,omitempty"`
+	State  string    `json:"state"`
+	Detail string    `json:"detail,omitempty"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // Software is how up to date a server is and what the CVE feed found.
@@ -367,6 +382,10 @@ const (
 	// CommandStop aborts a running agent session (by SessionID, or the
 	// session of IncidentID). Detection and other sessions keep running.
 	CommandStop = "stop"
+	// CommandUpgrade upgrades kodeblue to the release named in Body (the
+	// hub's own version), once no learning or agent session runs. Only an
+	// operator starts it; nothing upgrades on its own.
+	CommandUpgrade = "upgrade"
 )
 
 // Vulnerability commands an operator can send from the hub. The server

@@ -56,7 +56,10 @@ func (d *Daemon) saveInventory(inv services.Inventory) {
 // assess runs the vulnerability assessment after the learner: a separate,
 // short session that only records the weaknesses of each service, so a
 // learner that runs out of turns or skips a step cannot leave them out.
-func (d *Daemon) assess(ctx context.Context) {
+// assess runs the vulnerability assessment and reports whether it ran to the
+// end. One that did not stays pending (AssessmentPendingKey) and is retried
+// with a waiting learner (learnWhenModelReady).
+func (d *Daemon) assess(ctx context.Context) bool {
 	inv := services.Take(d.env, d.st, d.cfg.RequestsDir())
 	var l []string
 	for _, r := range inv.Services {
@@ -67,13 +70,20 @@ func (d *Daemon) assess(ctx context.Context) {
 		l = append(l, fmt.Sprintf("- %s (%s, %s) %s", r.Name, r.Role, r.State, strings.Join(ports, ", ")))
 	}
 	brief := fmt.Sprintf("Vulnerability assessment for server %q. kodeblue found these services:\n%s\nFollow your procedure: record every vulnerability you can show with vulnerability_report.", d.cfg.Server.Name, strings.Join(l, "\n"))
-	in, sess, err := d.startLearning(ctx, "blue-assessor", "Vulnerability assessment", brief)
-	if err != nil {
-		return
+	ok := false
+	if in, sess, err := d.startLearning(ctx, "blue-assessor", "Vulnerability assessment", brief); err == nil {
+		out := d.finishLearning(ctx, in, sess, "vulnerabilities.md")
+		ok = out.Status == "completed"
+		d.log.Info("assessment finished", "status", out.Status, "cost_usd", fmt.Sprintf("%.4f", in.CostUSD),
+			"open_vulnerabilities", len(d.st.Vulnerabilities(`WHERE status=?`, store.VulnOpen)))
 	}
-	out := d.finishLearning(ctx, in, sess, "vulnerabilities.md")
-	d.log.Info("assessment finished", "status", out.Status, "cost_usd", fmt.Sprintf("%.4f", in.CostUSD),
-		"open_vulnerabilities", len(d.st.Vulnerabilities(`WHERE status=?`, store.VulnOpen)))
+	if ok {
+		_ = d.st.Set(store.AssessmentPendingKey, "")
+	} else if ctx.Err() == nil {
+		_ = d.st.Set(store.AssessmentPendingKey, time.Now().UTC().Format(time.RFC3339))
+		d.learnWhenModelReady(ctx)
+	}
+	return ok
 }
 
 // serviceLoop keeps the inventory the hub shows current and reruns the

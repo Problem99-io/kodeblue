@@ -54,3 +54,39 @@ func TestHubLearningCommands(t *testing.T) {
 		t.Fatalf("agent got %v", a.got)
 	}
 }
+
+type upgradeAgent struct {
+	Agent
+	got []string
+}
+
+func (a *upgradeAgent) Upgrade(m hubproto.OperatorMessage) hubproto.MessageReply {
+	a.got = append(a.got, m.Body)
+	return hubproto.MessageReply{Status: "done", Text: "recorded"}
+}
+
+// Upgrades from the hub follow the root-owned hub.accept_upgrades.
+func TestHubUpgradeCommand(t *testing.T) {
+	cfg := config.Default()
+	a := &upgradeAgent{}
+	l := &Link{cfg: cfg, log: slog.New(slog.NewTextHandler(io.Discard, nil)), agent: a, st: openStore(t)}
+	ctx := context.Background()
+	l.cfg.Hub.AcceptUpgrades = false
+	if r := l.handle(ctx, hubproto.OperatorMessage{ID: 1, Author: "alice", Command: hubproto.CommandUpgrade, Body: "v0.1.7"}); r.Status != "refused" || !strings.Contains(r.Text, "accept_upgrades") || !strings.Contains(r.Text, "sudo kodeblue upgrade v0.1.7") {
+		t.Fatalf("upgrades off: %+v", r)
+	}
+	l.cfg.Hub.AcceptUpgrades = true
+	if r := l.handle(ctx, hubproto.OperatorMessage{ID: 2, Author: "alice", Command: hubproto.CommandUpgrade, Body: "v0.1.7"}); r.Status != "done" || len(a.got) != 1 || a.got[0] != "v0.1.7" {
+		t.Fatalf("upgrade: %+v %v", r, a.got)
+	}
+}
+
+func openStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "kb.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
