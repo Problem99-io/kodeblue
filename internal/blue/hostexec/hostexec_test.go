@@ -492,7 +492,10 @@ func TestAptReadsAndSimulates(t *testing.T) {
 		}
 	}
 	bad := [][]string{{"apt-get", "upgrade"}, {"apt-get", "-q", "dist-upgrade"}, {"apt-get", "-s", "install", "nmap"}, {"apt-get", "-sy", "upgrade"},
-		{"apt-get", "-s", "-o", "APT::Get::Simulate=false", "upgrade"}, {"apt", "install", "nmap"}, {"apt", "upgrade"}, {"apt-get", "-s", "update"}}
+		{"apt-get", "-s", "-o", "APT::Get::Simulate=false", "upgrade"}, {"apt", "install", "nmap"}, {"apt", "upgrade"}, {"apt-get", "-s", "update"},
+		// Switching simulation back off, and a local package to install.
+		{"apt-get", "-s", "-s=no", "upgrade"}, {"apt-get", "--simulate", "--simulate=false", "dist-upgrade"}, {"apt-get", "upgrade", "-s", "no"},
+		{"apt-get", "-s", "upgrade", "./x.deb"}, {"apt-get", "-s", "-qq", "upgrade"}, {"apt", "list", "-q=0"}}
 	for _, argv := range bad {
 		if err := Validate(argv); err == nil {
 			t.Errorf("%v must be refused", argv)

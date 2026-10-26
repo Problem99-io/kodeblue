@@ -26,6 +26,7 @@ type PackageIndex struct {
 	loadedAt  time.Time
 	stamp     time.Time
 	installed map[string]string
+	sources   map[string]string // package -> its source package, when they differ (libc6 -> glibc)
 	owners    map[string]string // path -> package
 	sums      map[string]string // path -> checksum ("md5:<hex>" | "sha1b64:<b64>")
 	sumsHash  map[string]string // package -> digest of its whole checksum list
@@ -89,7 +90,7 @@ func (p *PackageIndex) dbStamp(env *Env) (time.Time, bool) {
 func (p *PackageIndex) reload(env *Env) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.installed, p.owners, p.sums, p.sumsHash = map[string]string{}, map[string]string{}, map[string]string{}, map[string]string{}
+	p.installed, p.sources, p.owners, p.sums, p.sumsHash = map[string]string{}, map[string]string{}, map[string]string{}, map[string]string{}, map[string]string{}
 	p.loadedAt = time.Now()
 	switch {
 	case exists(env.Path("/var/lib/dpkg/status")):
@@ -116,7 +117,7 @@ func (p *PackageIndex) loadDpkg(env *Env) {
 	if err != nil {
 		return
 	}
-	var name, ver, status string
+	var name, ver, status, source string
 	flush := func() {
 		// "installed" is the steady state, but mid-transaction states
 		// (unpacked, half-configured, half-installed, triggers-*) also have
@@ -125,8 +126,11 @@ func (p *PackageIndex) loadDpkg(env *Env) {
 		// before it finishes. "not-installed" / "config-files" have no files.
 		if name != "" && ver != "" && pkgStatePresent(status) {
 			p.installed[name] = ver
+			if source != "" && source != name {
+				p.sources[name] = source
+			}
 		}
-		name, ver, status = "", "", ""
+		name, ver, status, source = "", "", "", ""
 	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -141,6 +145,10 @@ func (p *PackageIndex) loadDpkg(env *Env) {
 			ver = strings.TrimPrefix(line, "Version: ")
 		case strings.HasPrefix(line, "Status: "):
 			status = strings.TrimPrefix(line, "Status: ")
+		case strings.HasPrefix(line, "Source: "):
+			// "Source: glibc (2.39-0ubuntu8)": the version is there when it
+			// differs from the binary package's.
+			source, _, _ = strings.Cut(strings.TrimPrefix(line, "Source: "), " ")
 		}
 	}
 	flush()
@@ -248,6 +256,20 @@ func (p *PackageIndex) Installed() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// Source returns the source package pkg was built from (glibc for libc6),
+// or pkg itself when dpkg records none.
+func (p *PackageIndex) Source(pkg string) string {
+	if p == nil {
+		return pkg
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s := p.sources[pkg]; s != "" {
+		return s
+	}
+	return pkg
 }
 
 // Version returns the installed version of pkg, or "" when it is not (fully)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,40 +21,56 @@ import (
 // feeds and the package manager can take minutes, and the review waits for
 // a run in progress so it reads the day's results.
 const (
-	softwareCheckedKey = "software_checked_at"
-	softwareTriedKey   = "software_tried_at"
-	versionsKey        = "versions_report"
-	cveUntilKey        = "cve_feed_until"
-	cveCandidatesKey   = "cve_candidates"
-	softwareEvery      = 24 * time.Hour
-	softwareRetry      = time.Hour
-	cveKeep            = 30 * 24 * time.Hour
-	cveKeepMax         = 300
+	versionsAtKey    = "versions_at"
+	versionsKey      = "versions_report"
+	cveCheckedKey    = "software_checked_at" // the feed's last good pull
+	cveTriedKey      = "software_tried_at"
+	cveFailuresKey   = "cve_feed_failures"
+	cveUntilKey      = "cve_feed_until"
+	cveCandidatesKey = "cve_candidates"
+	softwareEvery    = 24 * time.Hour
+	softwareRetry    = time.Hour // after a failed pull, doubling to softwareEvery
+	cveKeep          = 30 * 24 * time.Hour
+	cveKeepMax       = 300
 )
 
-// maybeSoftwareCheck starts the daily check when it is due.
+// maybeSoftwareCheck starts the daily check when either half is due: the
+// versions once a day, the feed once a day or, after a failed pull, an hour
+// later, doubling while it keeps failing (a firewall that blocks the feeds).
 func (d *Daemon) maybeSoftwareCheck(ctx context.Context) {
 	now := time.Now().UTC()
-	last, _ := time.Parse(time.RFC3339, d.st.Get(softwareCheckedKey))
-	tried, _ := time.Parse(time.RFC3339, d.st.Get(softwareTriedKey))
-	if now.Sub(last) < softwareEvery || now.Sub(tried) < softwareRetry || !d.software.CompareAndSwap(false, true) {
+	at := func(k string) time.Time { t, _ := time.Parse(time.RFC3339, d.st.Get(k)); return t }
+	versionsDue := now.Sub(at(versionsAtKey)) >= softwareEvery
+	retry := softwareRetry << min(max(atoi(d.st.Get(cveFailuresKey))-1, 0), 5)
+	feedDue := !d.cfg.CVEFeed.Disabled && now.Sub(at(cveCheckedKey)) >= softwareEvery && now.Sub(at(cveTriedKey)) >= min(retry, softwareEvery)
+	if (!versionsDue && !feedDue) || !d.software.CompareAndSwap(false, true) {
 		return
 	}
-	_ = d.st.Set(softwareTriedKey, now.Format(time.RFC3339))
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
 		defer d.software.Store(false)
-		if d.softwareCheck(ctx, now) {
-			_ = d.st.Set(softwareCheckedKey, now.Format(time.RFC3339))
+		if versionsDue {
+			d.versionsCheck(ctx)
+			_ = d.st.Set(versionsAtKey, now.Format(time.RFC3339))
+		}
+		if !feedDue {
+			return
+		}
+		_ = d.st.Set(cveTriedKey, now.Format(time.RFC3339))
+		if d.cveFeed(ctx, now) {
+			_ = d.st.Set(cveCheckedKey, now.Format(time.RFC3339))
+			_ = d.st.Set(cveFailuresKey, "0")
+		} else {
+			_ = d.st.Set(cveFailuresKey, strconv.Itoa(atoi(d.st.Get(cveFailuresKey))+1))
 		}
 	}()
 }
 
-// softwareCheck records the versions report and pulls the CVE feed. It
-// reports whether the feed was pulled (or is off), so a failed pull is tried
-// again in an hour rather than tomorrow.
-func (d *Daemon) softwareCheck(ctx context.Context, now time.Time) bool {
+func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
+
+// versionsCheck records how up to date the server is.
+func (d *Daemon) versionsCheck(ctx context.Context) {
 	rep := versions.Take(ctx, versions.Env{Root: d.cfg.Server.Root}, d.runningImages())
 	if b, err := json.Marshal(rep); err == nil {
 		_ = d.st.Set(versionsKey, string(b))
@@ -61,46 +78,76 @@ func (d *Daemon) softwareCheck(ctx context.Context, now time.Time) bool {
 	if sec := rep.Security(); len(sec) > 0 || rep.RebootRequired {
 		d.st.Journal("kodeblue", "versions", fmt.Sprintf("%d package updates (%d security); reboot pending: %v", len(rep.Updates), len(sec), rep.RebootRequired))
 	}
-	if d.cfg.CVEFeed.Disabled {
-		return true
-	}
+}
+
+// cveFeed pulls the CVEs published since the last pull and CISA's new
+// exploited ones. It reports whether both feeds answered: the window moves
+// on only then, so a failed pull is covered by the next one.
+func (d *Daemon) cveFeed(ctx context.Context, now time.Time) bool {
 	from, _ := time.Parse(time.RFC3339, d.st.Get(cveUntilKey))
 	if from.IsZero() {
 		from = now.Add(-softwareEvery)
+	}
+	gap := ""
+	if now.Sub(from) > cvefeed.MaxWindow {
+		gap = fmt.Sprintf("; NOT covered: CVEs published %s → %s (the feed was off or failing for longer than %d days)",
+			from.Format("01-02 15:04"), now.Add(-cvefeed.MaxWindow).Format("01-02 15:04"), int(cvefeed.MaxWindow.Hours()/24))
+		d.log.Warn("cve feed: window capped; older CVEs are not pulled", "from", from, "pulled_from", now.Add(-cvefeed.MaxWindow))
+		from = now.Add(-cvefeed.MaxWindow)
 	}
 	feed := d.cveClient
 	feed.APIKey = d.cfg.CVEFeed.NVDAPIKey
 	cves, err := feed.Published(ctx, from, now)
 	if err != nil {
-		d.log.Warn("cve feed: NVD pull failed; trying again in an hour", "error", err)
+		d.log.Warn("cve feed: NVD pull failed; trying again later", "error", err)
 		return false
 	}
-	kev, err := feed.ExploitedSince(ctx, from)
-	if err != nil {
-		d.log.Warn("cve feed: CISA known-exploited list failed; matching NVD only", "error", err)
+	kev, kevErr := feed.ExploitedSince(ctx, from)
+	if kevErr != nil {
+		d.log.Warn("cve feed: CISA known-exploited list failed; keeping NVD matches, trying again later", "error", kevErr)
 	}
-	found := cvefeed.Match(cves, kev, d.softwareTerms(), now)
-	fresh := d.keepCandidates(found, now)
-	_ = d.st.Set(cveUntilKey, now.Format(time.RFC3339))
+	fresh := d.keepCandidates(cvefeed.Match(cves, kev, d.softwareTerms(), now), now)
 	var ids []string
 	for _, c := range fresh {
 		ids = append(ids, c.ID)
 	}
-	d.st.Journal("kodeblue", "cve.feed", fmt.Sprintf("%d CVEs published %s → %s, %d added to the exploited list; %d name software here: %s",
-		len(cves), from.Format("01-02 15:04"), now.Format("01-02 15:04"), len(kev), len(fresh), orDash(strings.Join(ids, " "))))
+	d.st.Journal("kodeblue", "cve.feed", fmt.Sprintf("%d CVEs published %s → %s, %d added to the exploited list; %d new or newly exploited name software here: %s%s",
+		len(cves), from.Format("01-02 15:04"), now.Format("01-02 15:04"), len(kev), len(fresh), orDash(strings.Join(ids, " ")), gap))
 	d.log.Info("cve feed pulled", "published", len(cves), "exploited_added", len(kev), "matches", len(fresh))
+	d.notifyUrgentCVEs(fresh)
+	if kevErr != nil {
+		return false
+	}
+	_ = d.st.Set(cveUntilKey, now.Format(time.RFC3339))
+	return true
+}
+
+// notifyUrgentCVEs posts one message for the new matches attackers exploit
+// or that score critical.
+func (d *Daemon) notifyUrgentCVEs(fresh []cvefeed.Candidate) {
+	var lines []string
+	sev := "high"
 	for _, c := range fresh {
 		if !c.Urgent() {
 			continue
 		}
-		sev, why := "high", fmt.Sprintf("CVSS %.1f", c.Score)
+		why := fmt.Sprintf("CVSS %.1f", c.Score)
 		if c.KEV {
-			sev, why = "critical", "attackers are exploiting it (CISA KEV)"
+			why, sev = "exploited (CISA KEV)", "critical"
 		}
-		d.notify("cve", sev, fmt.Sprintf("%s may affect this server (%s)", c.ID, c.Term),
-			fmt.Sprintf("%s; it names %s, from %s. The next review checks the installed version.\n%s", why, c.Term, c.From, clipText(c.Description, 300)), 0)
+		lines = append(lines, fmt.Sprintf("%s (%s, from %s): %s. %s", c.ID, c.Term, c.From, why, clipText(c.Description, 160)))
 	}
-	return true
+	if len(lines) == 0 {
+		return
+	}
+	title := fmt.Sprintf("%d new CVE(s) may affect this server", len(lines))
+	if len(lines) == 1 {
+		title = strings.SplitN(lines[0], " ", 2)[0] + " may affect this server"
+	}
+	if len(lines) > 8 {
+		lines = append(lines[:8], fmt.Sprintf("… %d more", len(lines)-8))
+	}
+	d.notify("cve", sev, title, strings.Join(lines, "\n")+"\nThe next review checks the installed versions.", 0)
 }
 
 // keepCandidates adds the matches not seen before to the stored list, drops
@@ -120,6 +167,16 @@ func (d *Daemon) keepCandidates(found []cvefeed.Candidate, now time.Time) []cvef
 		if !seen[c.ID] {
 			seen[c.ID] = true
 			fresh = append(fresh, c)
+			continue
+		}
+		// Seen before, and now ranks higher: CISA lists it as exploited
+		// since. Replace it and raise it again.
+		for i, o := range keep {
+			if o.ID == c.ID && cvefeed.Rank(c) > cvefeed.Rank(o) {
+				keep = append(keep[:i], keep[i+1:]...)
+				fresh = append(fresh, c)
+				break
+			}
 		}
 	}
 	keep = append(fresh, keep...)
@@ -157,11 +214,50 @@ var productAlias = map[string]string{
 	"sshd": "openssh", "postgres": "postgresql", "httpd": "http_server", "apache2": "http_server", "mongod": "mongodb",
 	"mongo": "mongodb", "dockerd": "docker", "php-fpm": "php", "node": "node.js", "mysqld": "mysql", "mariadbd": "mariadb",
 	"redis-server": "redis", "named": "bind", "smbd": "samba", "exim4": "exim", "master": "postfix",
+	"nodejs": "node.js", "libc": "glibc", "eglibc": "glibc",
 }
 
 // packageSuffix are trimmed from package names to reach the product:
 // openssh-server is OpenSSH, nginx-core is nginx.
-var packageSuffix = []string{"-server", "-client", "-core", "-common", "-bin", "-daemon", "-full", "-light", "-extras"}
+var packageSuffix = []string{"-server", "-client", "-core", "-common", "-bin", "-daemon", "-full", "-light", "-extras",
+	"-headless", "-jre", "-jdk", "-dev", "-utils", "-tools", "-data", "t64"}
+
+// trailingVersion is a version or soname at the end of a package name:
+// postgresql-16, php8.3, zlib1g, libexpat1, sqlite3, bind9.
+var trailingVersion = regexp.MustCompile(`^(.*?[a-z])[-.]?[0-9][0-9.]*[a-z]?[0-9]*$`)
+
+// productNames are the names a CVE may give the product a package carries:
+// the package, its source package, and both without suffix, version,
+// "python3-" or "lib" (libgnutls30t64 is gnutls; python3-urllib3 is urllib3).
+func productNames(pkg, source string) []string {
+	var out []string
+	seen := map[string]bool{}
+	var add func(n string)
+	add = func(n string) {
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		out = append(out, n)
+		if a, ok := productAlias[n]; ok {
+			add(a)
+		}
+		if t := trimPackage(n); t != n {
+			add(t)
+		}
+		if m := trailingVersion.FindStringSubmatch(n); m != nil {
+			add(m[1])
+		}
+		for _, pre := range []string{"python3-", "python-", "lib"} {
+			if t, ok := strings.CutPrefix(n, pre); ok && len(t) >= 3 {
+				add(t)
+			}
+		}
+	}
+	add(strings.ToLower(pkg))
+	add(strings.ToLower(source))
+	return out
+}
 
 // softwareTerms are the names of the software on this server: what its
 // services run (image, program, owning package) and, matched against a
@@ -191,14 +287,15 @@ func (d *Daemon) softwareTerms() []cvefeed.Term {
 			// "python3" in free text is most CVEs of the year.
 			add(filepath.Base(exe), "service "+s.Name, true)
 			if p := d.env.Pkg.Owner(exe); p != "" {
-				add(trimPackage(p), "package "+p+" (service "+s.Name+")", false)
+				for _, n := range productNames(p, d.env.Pkg.Source(p)) {
+					add(n, "package "+p+" (service "+s.Name+")", false)
+				}
 			}
 		}
 	}
 	for p := range d.env.Pkg.Installed() {
-		add(p, "package "+p, true)
-		if t := trimPackage(p); t != p {
-			add(t, "package "+p, true)
+		for _, n := range productNames(p, d.env.Pkg.Source(p)) {
+			add(n, "package "+p, true)
 		}
 	}
 	return terms
@@ -233,7 +330,7 @@ func (d *Daemon) softwareDigest(since, now time.Time) string {
 	if err := json.Unmarshal([]byte(d.st.Get(versionsKey)), &rep); err != nil {
 		b.WriteString("- not checked yet\n")
 	} else {
-		at, _ := time.Parse(time.RFC3339, d.st.Get(softwareCheckedKey))
+		at, _ := time.Parse(time.RFC3339, d.st.Get(versionsAtKey))
 		if !at.IsZero() {
 			fmt.Fprintf(&b, "- checked %s\n", at.Format("2006-01-02 15:04 UTC"))
 		}
