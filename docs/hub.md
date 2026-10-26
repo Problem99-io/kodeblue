@@ -86,6 +86,13 @@ These local limits persist across hub restarts. Cached locations remain usable
 during provider outages. IP geolocation can represent an ISP, datacenter, VPN or
 proxy exit; it is not proof of a person's physical location or attribution.
 
+Screenshots below use synthetic findings and illustrative enrichment data, not real
+incidents or verified attribution.
+
+![War room map with source locations and activity](assets/war-room-map.jpg)
+
+![Selected location with source intelligence and linked incident context](assets/war-room-details.jpg)
+
 ### What operators can and cannot do from the hub
 
 Operators can **message** a server's agents. A message about an incident continues that incident's own agent session (full context); anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
