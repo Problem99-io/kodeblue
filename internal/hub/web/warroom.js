@@ -8,7 +8,8 @@ function mountWarRoom() {
   if (!tab) {
     tab = h("button", { id: "war-tab", class: "war-tab", type: "button", "aria-controls": "war-room", "aria-expanded": "false", on: { click: () => WAR.open ? closeWarRoom() : openWarRoom() } },
       ic("layers", 15), h("span", null, "War room"), ic("chevRight", 12));
-    document.body.append(tab);
+    const drawer = h("div", { id: "war-drawer", class: "war-drawer" }, tab);
+    document.body.append(drawer);
   }
   tab.hidden = !S.me;
 }
@@ -18,8 +19,9 @@ function openWarRoom() {
   WAR.open = true;
   document.querySelectorAll(".menu").forEach((el) => el.remove());
   const tab = document.getElementById("war-tab");
+  const drawer = document.getElementById("war-drawer");
   tab.setAttribute("aria-expanded", "true"); tab.title = "Close war room";
-  WAR.background = [...document.body.children].filter((el) => el !== tab && el.tagName !== "SCRIPT").map((el) => ({ el, inert: el.inert }));
+  WAR.background = [...document.body.children].filter((el) => el !== drawer && el.tagName !== "SCRIPT").map((el) => ({ el, inert: el.inert }));
   for (const entry of WAR.background) entry.el.inert = true;
   document.body.classList.add("war-open");
   WAR.backdrop = h("div", { class: "war-backdrop", on: { click: closeWarRoom } });
@@ -53,8 +55,9 @@ function openWarRoom() {
       h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),
       WAR.recent), WAR.inspector));
   WAR.shell.addEventListener("keydown", warKeys);
-  document.body.append(WAR.backdrop, WAR.shell);
-  requestAnimationFrame(() => { if (WAR.open) WAR.shell.classList.add("on"); });
+  document.body.append(WAR.backdrop);
+  drawer.append(WAR.shell);
+  requestAnimationFrame(() => { if (WAR.open) drawer.classList.add("on"); });
   close.focus();
   refreshWarRoom();
   WAR.timer = setInterval(() => { if (!document.hidden && WAR.open) refreshWarRoom(); }, 10000);
@@ -68,7 +71,7 @@ function closeWarRoom() {
   WAR.background = [];
   document.body.classList.remove("war-open");
   const shell = WAR.shell, backdrop = WAR.backdrop;
-  shell.classList.remove("on");
+  shell.parentElement.classList.remove("on");
   backdrop.remove();
   setTimeout(() => shell.remove(), 340);
   const tab = document.getElementById("war-tab");

@@ -52,6 +52,7 @@ server (kodeblue, its own user)                          hub
 ### War room
 
 The **War room** tab on the right edge opens a world map above the current page.
+The tab travels with the map drawer’s leading edge as it slides open and closed.
 The page slides left and remains in place; close the drawer or press Escape to
 return. Select a map location to see its source IPs, providers, network types,
 linked incidents, event times, server names, evidence and incident summaries.
