@@ -806,6 +806,9 @@ func (d *Daemon) investigate(ctx context.Context, in *store.Incident, findings [
 		final.Status = "needs_human"
 		final.Verdict = "inconclusive"
 		final.Summary = "The investigation session ended (" + out.Status + ") without resolving the incident."
+		if out.Error != "" {
+			final.Summary += " " + clipText(out.Error, 400)
+		}
 		final.Report = out.Text
 		for _, f := range d.st.FindingsForIncident(in.ID) {
 			_ = d.st.SetFindingStatus(f.ID, "closed", "inconclusive", "unresolved session", 0)
@@ -1053,7 +1056,9 @@ func (d *Daemon) learnWhenModelReady(ctx context.Context) {
 				return
 			case <-time.After(retry):
 			}
-			retry = min(retry*2, 6*time.Hour)
+			// A provider's rate limit or spend cap usually lifts within the
+			// hour: do not leave a server unlearned for longer than that.
+			retry = min(retry*2, time.Hour)
 		}
 	}()
 }
@@ -1185,6 +1190,14 @@ func (d *Daemon) finishLearning(ctx context.Context, in *store.Incident, sess *r
 	usd = d.st.Spend("learning", d.cfg.ModelFor(hubproto.RoleLearner), tin, tout, cached, usd)
 	in.Status, in.Report, in.CostUSD = "resolved", out.Text, usd
 	in.Summary = "learning " + out.Status
+	if out.Error != "" {
+		// The hub shows the summary: say why (a provider's rate limit or
+		// spend cap), not only that it failed.
+		in.Summary += ": " + clipText(out.Error, 400)
+		if in.Report == "" {
+			in.Report = "The learning run failed: " + out.Error + "\n\nkodeblue retries it on its own (or use Run learner on the hub)."
+		}
+	}
 	_ = d.st.UpdateIncident(in)
 	_ = os.WriteFile(filepath.Join(d.cfg.WorkspaceDir(), "reports", report), []byte(out.Text), 0o640)
 	return out
