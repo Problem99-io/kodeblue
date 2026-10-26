@@ -350,9 +350,22 @@ else
   warn "systemd not found: services not installed. Run '/usr/local/bin/kodeblue run' as the kodeblue user under your supervisor."
 fi
 
-if ! kb inference >/dev/null 2>&1; then
+# A server on a hub takes its models from the hub's Settings, which arrive on
+# its first sync after the start: give that a moment before saying none came.
+models=0
+if kb inference >/dev/null 2>&1; then
+  models=1
+elif [ -s /etc/kodeblue/hub.key ] && [ "$START" = 1 ] && [ "$HAVE_SYSTEMD" = 1 ]; then
+  n=0
+  while [ "$n" -lt 10 ]; do
+    sleep 3
+    if kb inference >/dev/null 2>&1; then models=1; break; fi
+    n=$((n + 1))
+  done
+fi
+if [ "$models" = 0 ]; then
   if [ -s /etc/kodeblue/hub.key ]; then
-    warn "no model yet: sensors, detection and monitors run, and learning waits for a model. Add a model connection in the hub's Settings; this server picks it up on its own."
+    warn "no model from the hub yet: sensors, detection and monitors run, and learning waits for a model. Add a model connection in the hub's Settings (or check this server shows as connected there); this server picks it up on its own."
   else
     warn "no model yet: sensors, detection and monitors run, and learning waits for a model. Set one with: sudo kodeblue inference --url https://… --model … --key-file -"
   fi

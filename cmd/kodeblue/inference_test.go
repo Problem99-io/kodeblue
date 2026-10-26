@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
+	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 )
 
 func TestWriteInference(t *testing.T) {
@@ -116,5 +117,42 @@ func TestReadKey(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "keep" {
 		t.Fatalf("link target overwritten: %q", b)
+	}
+}
+
+// A server on a hub usually has no model of its own: the installer and the
+// operator must see the models the hub sent, not "no model yet".
+func TestShowInferenceCountsHubModels(t *testing.T) {
+	c := config.Default()
+	c.Server.StateDir = t.TempDir()
+	c.Hub.URL = "https://hub.example"
+	var out strings.Builder
+	if showInference(&out, c) || !strings.Contains(out.String(), "models    off") {
+		t.Fatalf("no models anywhere:\n%s", out.String())
+	}
+	s := &hubproto.Settings{Version: "v1",
+		Connections: []hubproto.Connection{{ID: "or", Kind: hubproto.ConnOpenRouter, BaseURL: "https://openrouter.ai/api", APIKey: "sk-or-test"}},
+		Models:      map[string]hubproto.ModelRef{hubproto.RoleDefault: {Connection: "or", Model: "vendor/small"}},
+	}
+	if err := c.SaveHubSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if !showInference(&out, c) {
+		t.Fatalf("hub models not counted:\n%s", out.String())
+	}
+	for _, want := range []string{"hub       ", "triage=or/vendor/small", "models    on (from the hub's Settings)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "sk-or-test") {
+		t.Fatal("the connection key was printed")
+	}
+	// A server that refuses hub settings runs without them.
+	c.Hub.AcceptSettings = false
+	out.Reset()
+	if showInference(&out, c) {
+		t.Fatalf("hub models counted with accept_settings = false:\n%s", out.String())
 	}
 }
