@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,16 +26,9 @@ import (
 // Setting either restarts kodeblue, so the change applies at once.
 func inferenceCmd(cfg config.Config, baseURL, provider, model, keyFile string) {
 	if baseURL == "" && provider == "" && model == "" && keyFile == "" {
-		in := cfg.Inference
-		fmt.Printf("endpoint  %s\nprovider  %s\ntriage    %s\nagents    %s\n", orNone(in.BaseURL), orNone(in.Provider), orNone(in.TriageModel), orNone(in.AgentModel))
-		if in.EscalationModel != "" {
-			fmt.Printf("critical  %s\n", in.EscalationModel)
-		}
-		if err := cfg.ModelsReady(); err != nil {
-			fmt.Printf("models    off (%v)\n", err)
+		if !showInference(os.Stdout, cfg) {
 			os.Exit(1)
 		}
-		fmt.Println("models    on")
 		return
 	}
 	if os.Geteuid() != 0 {
@@ -59,6 +54,38 @@ func inferenceCmd(cfg config.Config, baseURL, provider, model, keyFile string) {
 		}
 	}
 	restartService()
+}
+
+// showInference prints the model endpoint in this server's config and the
+// models the hub sent, and reports whether the agents have models. A server
+// on a hub usually has none of its own: its models come from the hub's
+// Settings (saved in the state directory, readable by root and kodeblue).
+func showInference(w io.Writer, cfg config.Config) bool {
+	in := cfg.Inference
+	fmt.Fprintf(w, "endpoint  %s\nprovider  %s\ntriage    %s\nagents    %s\n", orNone(in.BaseURL), orNone(in.Provider), orNone(in.TriageModel), orNone(in.AgentModel))
+	if in.EscalationModel != "" {
+		fmt.Fprintf(w, "critical  %s\n", in.EscalationModel)
+	}
+	eff := cfg.WithHubSettings()
+	if len(eff.Inference.Refs) > 0 {
+		models := eff.EffectiveModels()
+		roles := slices.Sorted(maps.Keys(models))
+		parts := make([]string, 0, len(roles))
+		for _, r := range roles {
+			parts = append(parts, r+"="+models[r])
+		}
+		fmt.Fprintf(w, "hub       %s\n", strings.Join(parts, " "))
+	}
+	if err := eff.ModelsReady(); err != nil {
+		fmt.Fprintf(w, "models    off (%v)\n", err)
+		return false
+	}
+	if len(eff.Inference.Refs) > 0 {
+		fmt.Fprintln(w, "models    on (from the hub's Settings)")
+	} else {
+		fmt.Fprintln(w, "models    on")
+	}
+	return true
 }
 
 // readKey reads the API key from a file, or from stdin for "-", asking for it
