@@ -115,6 +115,16 @@ func TestInstallCommandTokenForm(t *testing.T) {
 	if !strings.Contains(cmd, `printf '%s\n' kbe_abc | $r sh "$f" --hub https://hub.example.com:8443 --pin sha256//AbC+/x= --token-file -; s=$?`) || strings.Contains(cmd, "--token ") {
 		t.Fatalf("stdin form:\n%s", cmd)
 	}
+	if cmd := s.InstallCommandWith(r, "kbe_abc", true); strings.Contains(cmd, "--hub-max-mode") {
+		t.Fatalf("contain flag passed to an installer without it:\n%s", cmd)
+	}
+	withMax := distHub(t, map[string]string{"install.sh": "#!/bin/sh\n# --token-file F\n# --hub-max-mode M\n"})
+	if cmd := withMax.InstallCommandWith(r, "kbe_abc", true); !strings.Contains(cmd, "--hub-max-mode contain --token-file -") {
+		t.Fatalf("contain flag missing:\n%s", cmd)
+	}
+	if cmd := withMax.InstallCommand(r, "kbe_abc"); strings.Contains(cmd, "--hub-max-mode") {
+		t.Fatalf("contain flag without asking:\n%s", cmd)
+	}
 	// An older installer (which mentions KODEBLUE_ENROLL_TOKEN only for its
 	// own enroll call) still gets --token.
 	old := distHub(t, map[string]string{"install.sh": "#!/bin/sh\nKODEBLUE_ENROLL_TOKEN=$TOKEN kodeblue enroll\n"})

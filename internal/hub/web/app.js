@@ -1955,12 +1955,15 @@ function installView(res) {
 }
 function addServerDialog() {
   const name = h("input", { type: "text", placeholder: "e.g. web-1 (prod)", class: "full", maxlength: 80 });
-  const area = h("div", { class: "stack" }, h("label", { class: "field" }, "Server name", name));
+  const contain = h("input", { type: "checkbox" });
+  const area = h("div", { class: "stack" }, h("label", { class: "field" }, "Server name", name),
+    h("label", { class: "chk" }, contain, h("span", null, "Let the hub switch this server to Contain ",
+      h("span", { class: "faint small block" }, "Adds --hub-max-mode contain: from Settings, an operator can then turn on containment actions that run without approval. The server starts in recommend mode either way."))));
   const go = h("button", { class: "btn primary", type: "button", on: { click: async () => {
     if (!name.value.trim()) { name.focus(); return; }
     go.disabled = true;
     try {
-      const r = await api("POST", "/api/servers", { name: name.value });
+      const r = await api("POST", "/api/servers", { name: name.value, hub_contain: contain.checked });
       clear(area); add(area, installView(r));
       go.remove();
       S.serversAt = 0;
@@ -2853,8 +2856,8 @@ function instrBox(value, max, label) {
   return { ta, n, el: (extra) => h("div", { class: "fblock" }, h("div", { class: "fhd" }, h("span", { class: "fg" }, label), h("div", { class: "sp" }), n), ta, extra || null) };
 }
 function approvalNote() {
-  return h("div", { class: "note" }, "These rules can only make a server stricter than its own policy. “Automatic” only works on servers whose root-owned ",
-    h("code", null, "/etc/kodeblue/kodeblue.toml"), " has ", h("code", null, "[response] mode = \"contain\""), "; in the default recommend mode every action still needs approval.");
+  return h("div", { class: "note" }, "These rules can only make a server stricter than its own policy. “Automatic” only works on servers running contain (set in their root-owned ",
+    h("code", null, "/etc/kodeblue/kodeblue.toml"), ", or switched to it here where that file allows); in the default recommend mode every action still needs approval.");
 }
 
 // fleetAgents fills the fleet half of the Settings view: model
@@ -3120,21 +3123,22 @@ async function vServerSettings(srv, body) {
         el.textContent = r ? { auto: "automatic", approve: "needs approval", off: "off" }[r] || r : "not reported";
         el.title = "the rule this server applies now";
       }
-      const mode = a.response_mode, root = a.root_response_mode || "";
+      const mode = a.response_mode, root = a.root_response_mode || "", ceiling = a.response_mode_ceiling || root;
       modeNote.hidden = !reporting || !mode || mode === "contain";
       clear(modeNote).append(h("div", { class: "lbl" }, "Response mode: " + (mode || "?")),
         mode === "off" ? "Containment is off on this server, so no action runs at all." : "This server asks for approval for every action, so “Automatic” has no effect here.");
       clear(modeNow).append(reporting && mode ? modeBadge(mode) : h("span", { class: "faint small" }, "not reported"));
-      modeOwn.textContent = (fleet.response_mode ? "Inherit fleet (" + fleet.response_mode + ")" : "Server's own policy") + (root ? " · root: " + root : "");
+      modeOwn.textContent = (fleet.response_mode ? "Inherit fleet (" + fleet.response_mode + ")" : "Server's own policy") + (root ? " · own: " + root : "");
       for (const o of modeOpts) {
-        const above = !!root && modeRank(o.value) > modeRank(root);
+        const above = !!ceiling && modeRank(o.value) > modeRank(ceiling);
         o.disabled = above && o.value !== modeSel.value;
-        o.textContent = MODES.find(([v]) => v === o.value)[1] + (above ? " (above this server's root policy)" : "");
+        o.textContent = MODES.find(([v]) => v === o.value)[1] + (above ? " (not allowed by this server)" : "");
       }
-      const capped = root && modeSel.value && modeRank(modeSel.value) > modeRank(root);
-      modeCap.hidden = !root || root === "contain";
-      clear(modeCap).append(capped ? "This server's root policy allows at most “" + root + "”, so it runs “" + root + "”. " : "This server's root policy allows at most “" + root + "”. ",
-        "To allow more, set ", h("code", null, "[response] mode = \"contain\""), " in its ", h("code", null, "/etc/kodeblue/kodeblue.toml"), " as root.");
+      const capped = ceiling && modeSel.value && modeRank(modeSel.value) > modeRank(ceiling);
+      modeCap.hidden = !ceiling || ceiling === "contain";
+      clear(modeCap).append(capped ? "This server lets the hub choose at most “" + ceiling + "”, so it runs “" + ceiling + "”. " : "This server lets the hub choose at most “" + ceiling + "”. ",
+        "To let the hub switch it to contain, its root sets ", h("code", null, "hub_max_mode = \"contain\""), " under ", h("code", null, "[response]"), " in ", h("code", null, "/etc/kodeblue/kodeblue.toml"),
+        " (or reruns the installer with ", h("code", null, "--hub-max-mode contain"), ") and restarts kodeblue.");
     };
     sync(body, h("div", { class: "stack narrow" },
       panel("Hub settings for " + srv.name, state, null, "blue"),
@@ -3147,8 +3151,8 @@ async function vServerSettings(srv, body) {
         instr.map(([role, b]) => b.el(fi[role] ? h("details", { class: "fleet-i" }, h("summary", null, "Fleet instructions (used when this is empty)"), h("div", { class: "ftext" }, fi[role]))
           : h("div", { class: "faint small" }, "No fleet instructions for this agent.")))), null, "green"),
       panel("Response mode", h("div", { class: "bd stack" },
-        h("div", { class: "note" }, "What kodeblue does when it finds an attack on this server. Off: agents only recommend actions in their reports. Recommend: every action waits for an operator's approval. Contain: actions run at once, including monitor reflexes that kill a payload or quarantine a dropped file seconds after it appears. The hub can switch up to the mode in the server's root-owned ",
-          h("code", null, "/etc/kodeblue/kodeblue.toml"), ", never above it."),
+        h("div", { class: "note" }, "What kodeblue does when it finds an attack on this server. Off: agents only recommend actions in their reports. Recommend: every action waits for an operator's approval. Contain: actions run at once, including monitor reflexes that kill a payload or quarantine a dropped file seconds after it appears. The hub can switch up to what the server's root-owned ",
+          h("code", null, "/etc/kodeblue/kodeblue.toml"), " allows (its mode, or hub_max_mode), never above it. Every change is announced in Slack."),
         h("div", { class: "frows" }, h("div", { class: "frow c3" }, h("span", { class: "frow-l" }, "Mode"), modeSel, modeNow)),
         modeCap), null, "red"),
       panel("Containment approvals", h("div", { class: "bd stack" },

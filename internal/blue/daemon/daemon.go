@@ -224,6 +224,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startRequestTap(ctx)
 	firstLearn := d.st.Get("learned_at") == ""
 	d.learning.Store(firstLearn) // before the hub link, which may ask to learn
+	d.announceMode()
 	d.startHub(ctx)
 
 	if firstLearn {
@@ -1543,4 +1544,44 @@ func (d *Daemon) notify(kind, severity, title, body string, incident int64) {
 	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: kind, Severity: severity, Title: title, Body: body, IncidentID: incident}, func(err error) {
 		d.log.Error("slack notification failed", "error", err)
 	})
+}
+
+// announceMode journals and posts a change of the response mode this server
+// runs, so a switch made on the hub (contain: actions without approval) is
+// seen on the server and in Slack, not only in the hub's audit log.
+func (d *Daemon) announceMode() {
+	cur, root := d.cfg.Response.Mode, d.cfg.RootResponseMode
+	prev := d.st.Get("announced_response_mode")
+	if prev == cur {
+		return
+	}
+	_ = d.st.Set("announced_response_mode", cur)
+	if prev == "" && (root == "" || cur == root) {
+		return // a first start on the server's own mode
+	}
+	what := map[string]string{
+		"off":       "agents only recommend actions in their reports",
+		"recommend": "every containment action waits for an operator's approval",
+		"contain":   "agents' containment actions run at once, without an operator's approval (reversible, journaled, rate-limited)",
+	}[cur]
+	by := "this server's own policy"
+	if root != "" && cur != root {
+		by = "the kodeblue hub (this server's own policy: " + root + ")"
+	}
+	d.st.Journal("kodeblue", "response.mode", fmt.Sprintf("%s -> %s, set by %s", orDash(prev), cur, by))
+	d.log.Warn("response mode changed", "from", prev, "to", cur, "set_by", by)
+	sev := "info"
+	if cur == "contain" {
+		sev = "high"
+	}
+	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "action", Severity: sev,
+		Title: "Response mode is now " + cur,
+		Body:  "Set by " + by + ": " + what + "."}, nil)
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

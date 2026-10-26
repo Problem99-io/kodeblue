@@ -59,6 +59,10 @@ incident_max_iterations = 30
 # recommend — agents request actions; an operator runs `kodeblue respond approve <id>`
 # contain   — agents execute actions immediately (reversible, journaled, rate-limited)
 mode = "recommend"
+# The highest mode the kodeblue hub may switch this server to. Unset: the hub
+# can only lower mode. "contain" lets a hub operator turn on actions without
+# approval for this server (announced in Slack and the journal).
+# hub_max_mode = "contain"
 allowed_actions = ["kill_process", "quarantine_file", "block_ip", "disable_ssh_key", "lock_user", "stop_unit"]
 protected_users = ["root"]                     # never locked, keys never disabled (also root, uid 0, sudo/wheel/admin)
 protected_ips = []                             # your office / VPN / bastion, IPs or CIDRs

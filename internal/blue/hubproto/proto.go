@@ -46,15 +46,18 @@ type InferenceDefaults struct {
 
 // Status is the agent's current state, sent on every sync.
 type Status struct {
-	Name           string             `json:"name"`
-	Hostname       string             `json:"hostname"`
-	Version        string             `json:"version"`
-	OS             string             `json:"os,omitempty"`
-	Kernel         string             `json:"kernel,omitempty"`
-	Uptime         string             `json:"uptime,omitempty"`
-	Phase          string             `json:"phase"`                        // learning | watching | maintenance
-	ResponseMode   string             `json:"response_mode"`                // what the server applies now
-	RootMode       string             `json:"root_response_mode,omitempty"` // its root-owned ceiling
+	Name         string `json:"name"`
+	Hostname     string `json:"hostname"`
+	Version      string `json:"version"`
+	OS           string `json:"os,omitempty"`
+	Kernel       string `json:"kernel,omitempty"`
+	Uptime       string `json:"uptime,omitempty"`
+	Phase        string `json:"phase"`                        // learning | watching | maintenance
+	ResponseMode string `json:"response_mode"`                // what the server applies now
+	RootMode     string `json:"root_response_mode,omitempty"` // [response] mode in its root-owned config
+	// ModeCeiling is the highest mode the hub may switch it to: RootMode,
+	// or the root-owned [response] hub_max_mode when that is higher.
+	ModeCeiling    string             `json:"response_mode_ceiling,omitempty"`
 	ModelsEnabled  bool               `json:"models_enabled"`
 	TriageModel    string             `json:"triage_model"`
 	AgentModel     string             `json:"agent_model"`

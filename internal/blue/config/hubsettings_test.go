@@ -156,27 +156,53 @@ func TestLocalModelRefs(t *testing.T) {
 }
 
 func TestHubResponseModeIsCappedByRoot(t *testing.T) {
-	cases := []struct{ root, hub, want string }{
-		{"contain", "", "contain"},
-		{"contain", "recommend", "recommend"},
-		{"contain", "off", "off"},
-		{"recommend", "contain", "recommend"}, // never above the root policy
-		{"recommend", "off", "off"},
-		{"off", "contain", "off"},
-		{"contain", "bogus", "contain"},
+	cases := []struct{ root, max, hub, want string }{
+		{"contain", "", "", "contain"},
+		{"contain", "", "recommend", "recommend"},
+		{"contain", "", "off", "off"},
+		{"recommend", "", "contain", "recommend"}, // never above the root policy
+		{"recommend", "", "off", "off"},
+		{"off", "", "contain", "off"},
+		{"contain", "", "bogus", "contain"},
+		// Root lets the hub raise the mode up to hub_max_mode.
+		{"recommend", "contain", "contain", "contain"},
+		{"recommend", "contain", "", "recommend"},
+		{"recommend", "contain", "off", "off"},
+		{"off", "recommend", "contain", "off"},
+		{"off", "recommend", "recommend", "recommend"},
+		{"contain", "recommend", "contain", "contain"}, // a lower hub_max_mode never lowers mode
+		{"recommend", "bogus", "contain", "recommend"},
 	}
 	for _, tc := range cases {
 		c := Default()
 		c.Server.StateDir = t.TempDir()
 		c.Hub.URL = "https://hub.example"
-		c.Response.Mode = tc.root
+		c.Response.Mode, c.Response.HubMaxMode = tc.root, tc.max
 		if err := c.SaveHubSettings(&hubproto.Settings{Version: "v1", ResponseMode: tc.hub}); err != nil {
 			t.Fatal(err)
 		}
 		got := c.WithHubSettings()
 		if got.Response.Mode != tc.want || got.RootResponseMode != tc.root {
-			t.Errorf("root=%s hub=%q: mode %s (root %s), want %s", tc.root, tc.hub, got.Response.Mode, got.RootResponseMode, tc.want)
+			t.Errorf("root=%s max=%s hub=%q: mode %s (root %s), want %s", tc.root, tc.max, tc.hub, got.Response.Mode, got.RootResponseMode, tc.want)
 		}
+	}
+}
+
+// The root helper allows up to the ceiling only while the hub's settings are
+// accepted: hub_max_mode means nothing on a server that refuses them.
+func TestModeCeiling(t *testing.T) {
+	c := Default()
+	c.Response.Mode, c.Response.HubMaxMode = "recommend", "contain"
+	if got := c.ModeCeiling(); got != "recommend" {
+		t.Errorf("no hub: ceiling %s", got)
+	}
+	c.Hub.URL = "https://hub.example"
+	if got := c.ModeCeiling(); got != "contain" {
+		t.Errorf("hub: ceiling %s", got)
+	}
+	c.Hub.AcceptSettings = false
+	if got := c.ModeCeiling(); got != "recommend" {
+		t.Errorf("accept_settings = false: ceiling %s", got)
 	}
 }
 

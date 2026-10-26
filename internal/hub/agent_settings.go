@@ -382,7 +382,7 @@ func (s *Server) handleServerSettingsGet(w http.ResponseWriter, r *http.Request,
 		"effective":   eff,
 		"applied": map[string]any{
 			"accepts_settings": st.AcceptsSettings, "settings_version": st.SettingsVersion,
-			"models": st.Models, "actions": st.Actions, "response_mode": st.ResponseMode, "root_response_mode": st.RootMode, "tuning": st.Tuning,
+			"models": st.Models, "actions": st.Actions, "response_mode": st.ResponseMode, "root_response_mode": st.RootMode, "response_mode_ceiling": st.ModeCeiling, "tuning": st.Tuning,
 			"in_sync": st.AcceptsSettings && st.SettingsVersion == eff.Version,
 		},
 		"schema": settingsSchema(),

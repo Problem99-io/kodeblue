@@ -38,6 +38,8 @@ type distSnapshot struct {
 	// tokenStdin: the installer reads the enrollment token with
 	// --token-file - (stdin), so it need not be on any command line.
 	tokenStdin bool
+	// hubMaxMode: the installer takes --hub-max-mode.
+	hubMaxMode bool
 }
 
 // dist returns the snapshot, taking it on first use. Until an installer is
@@ -115,6 +117,7 @@ func (s *Server) snapshotDist() *distSnapshot {
 	h := sha256.Sum256(snap.script)
 	snap.sum = hex.EncodeToString(h[:])
 	snap.tokenStdin = bytes.Contains(raw, []byte("--token-file"))
+	snap.hubMaxMode = bytes.Contains(raw, []byte("--hub-max-mode"))
 	if len(lines) == 0 {
 		s.log.Warn("no agent tarballs to pin in install.sh", "dist", s.opt.DistDir)
 	}

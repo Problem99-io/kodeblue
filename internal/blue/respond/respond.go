@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,11 +39,29 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var modeOrder = []string{"off", "recommend", "contain"}
+
+// Ceiling is the highest mode this server may run: Mode, or HubMaxMode when
+// a hub may set the mode (hubSettings) and it is higher.
+func (p Policy) Ceiling(hubSettings bool) string {
+	if hubSettings && slices.Index(modeOrder, p.HubMaxMode) > slices.Index(modeOrder, p.Mode) {
+		return p.HubMaxMode
+	}
+	return p.Mode
+}
+
 // Policy governs what the helper will do.
 type Policy struct {
 	// Mode: off | recommend | contain. recommend records the request for an
 	// operator to approve with `kodeblue respond approve <id>`.
-	Mode           string   `toml:"mode"`
+	Mode string `toml:"mode"`
+	// HubMaxMode is the highest mode a kodeblue hub may switch this server
+	// to (off | recommend | contain); empty or lower than Mode: none above
+	// Mode. The helper cannot see the hub's choice, so above Mode it trusts
+	// the kodeblue daemon to apply it: with "contain" here, an agent's
+	// actions run without an operator's approval whenever the daemon says
+	// the hub chose contain. That is why only root can set it.
+	HubMaxMode     string   `toml:"hub_max_mode"`
 	AllowedActions []string `toml:"allowed_actions"`
 	ProtectedUsers []string `toml:"protected_users"`
 	ProtectedIPs   []string `toml:"protected_ips"` // IPs or CIDRs
