@@ -97,7 +97,7 @@ func rulesCmd(cfg config.Config, pos []string, yes bool) {
 func printRule(w io.Writer, v containment.View) {
 	fmt.Fprintf(w, "%s  %s\n  status:   %s", v.ID, v.Title, v.Status)
 	if v.Pending {
-		fmt.Fprint(w, " (a changed version waits for approval; approving replaces the active one)")
+		fmt.Fprint(w, " — a CHANGED version waits for approval; below is the new version, which approving makes active")
 	}
 	fmt.Fprintf(w, "\n  when:     a finding of rule %s", v.When.Rule)
 	if v.When.Field != "" {
@@ -111,6 +111,19 @@ func printRule(w io.Writer, v containment.View) {
 		fmt.Fprintf(w, ", %s %s", k, s)
 	}
 	fmt.Fprintf(w, "\n  limits:   %d per hour, active %d days after approval\n", v.MaxPerHour, v.Days)
+	if v.When.Extract != "" {
+		fmt.Fprint(w, "  warning:  targets are taken from log text, which a client can write: check the pattern only matches what the server itself records\n")
+	}
+	if c := v.Current; c != nil {
+		fmt.Fprintf(w, "  replaces: the active version: %s on %s from %q", c.Action, c.When.Rule, c.When.Field)
+		if c.When.Extract != "" {
+			fmt.Fprintf(w, " /%s/", c.When.Extract)
+		}
+		for k, s := range c.Scope {
+			fmt.Fprintf(w, ", %s %s", k, s)
+		}
+		fmt.Fprintf(w, ", %d per hour, %d days\n", c.MaxPerHour, c.Days)
+	}
 	fmt.Fprintf(w, "  proposed: by %s %s\n", v.ProposedBy, v.ProposedAt.Local().Format("2006-01-02 15:04"))
 	if v.ApprovedBy != "" {
 		fmt.Fprintf(w, "  approved: by %s %s, expires %s\n", v.ApprovedBy, v.ApprovedAt.Local().Format("2006-01-02 15:04"), v.ExpiresAt.Local().Format("2006-01-02 15:04"))

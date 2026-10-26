@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/containment"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
 	"github.com/Problem99-io/kodeblue/internal/blue/respond"
+	"github.com/Problem99-io/kodeblue/internal/blue/store"
 )
 
 // containmentRulePropose records an agent's proposal for a containment rule.
@@ -36,9 +38,14 @@ func (s *Server) containmentRulePropose(ctx context.Context, args json.RawMessag
 	// Recurring means seen before: name the cases that show it.
 	var seen []string
 	for _, id := range a.Incidents {
-		if in := s.st.GetIncident(id); in != nil {
-			seen = append(seen, fmt.Sprintf("incident #%d %s", id, truncate(in.Title, 100)))
+		in := s.st.GetIncident(id)
+		if in == nil {
+			continue
 		}
+		if !slices.ContainsFunc(s.st.FindingsForIncident(id), func(f store.Finding) bool { return f.Rule == a.Rule }) {
+			return "", fmt.Errorf("incident #%d has no %s finding: name incidents of the attack this rule answers", id, a.Rule)
+		}
+		seen = append(seen, fmt.Sprintf("incident #%d %s", id, truncate(in.Title, 100)))
 	}
 	for _, id := range a.Findings {
 		if f := s.st.GetFinding(id); f != nil {
