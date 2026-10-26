@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/respond"
 	"github.com/Problem99-io/kodeblue/internal/blue/store"
 )
@@ -59,15 +60,27 @@ func TestApplyRulesContainsAndRoutes(t *testing.T) {
 	if f := st.GetFinding(critical.ID); f.Status == "closed" {
 		t.Fatal("a critical finding was closed by a rule")
 	}
-	if len(out.titles()) != 3 {
+	if len(out.titles()) != 2 { // what was done; the refused one goes to triage
 		t.Fatalf("slack: %v", out.titles())
+	}
+	// An action the operators turned off on the hub, and an address the hub
+	// protects, never reach the helper.
+	asked = nil
+	d.cfg.ActionRules = map[string]string{"block_ip": hubproto.ActionOff}
+	if left := d.applyRules(context.Background(), []*store.Finding{add("auth.bruteforce", "high", "203.0.113.11")}); len(left) != 1 || len(asked) != 0 {
+		t.Fatalf("hub turned block_ip off: routed %d, asked %d", len(left), len(asked))
+	}
+	d.cfg.ActionRules = nil
+	d.cfg.Response.ProtectedIPs = append(d.cfg.Response.ProtectedIPs, "203.0.113.12")
+	if left := d.applyRules(context.Background(), []*store.Finding{add("auth.bruteforce", "high", "203.0.113.12")}); len(left) != 1 || len(asked) != 0 {
+		t.Fatalf("hub-protected address: routed %d, asked %d", len(left), len(asked))
 	}
 	d.cfg.Response.Mode = "off"
 	asked = nil
 	if left := d.applyRules(context.Background(), []*store.Finding{add("auth.bruteforce", "high", "203.0.113.10")}); len(left) != 1 || len(asked) != 0 {
 		t.Fatal("a rule acted with response off")
 	}
-	if dg := d.recurringDigest(time.Now()); !strings.Contains(dg, "auth.bruteforce: 4 findings") || !strings.Contains(dg, "cr-ssh [active]") {
+	if dg := d.recurringDigest(time.Now()); !strings.Contains(dg, "auth.bruteforce: 6 findings") || !strings.Contains(dg, "cr-ssh [active]") {
 		t.Fatalf("digest:\n%s", dg)
 	}
 }

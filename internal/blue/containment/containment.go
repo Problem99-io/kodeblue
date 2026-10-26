@@ -29,9 +29,11 @@ type View struct {
 	Fired     int       `json:"fired"`
 	FiredHour int       `json:"fired_last_hour"`
 	LastFired time.Time `json:"last_fired,omitzero"`
-	// Proposed is the proposal waiting (or rejected) beside an approved copy
-	// that differs from it: approving it replaces the approved copy.
-	Pending bool `json:"pending_change,omitempty"`
+	// Pending: a changed proposal waits beside an approved copy. The view's
+	// content is then the proposal (what an approval activates), with the
+	// approved copy's state, and Current is the approved copy it replaces.
+	Pending bool          `json:"pending_change,omitempty"`
+	Current *respond.Rule `json:"current,omitempty"`
 }
 
 // Propose records an agent's proposal. It acts on nothing until a person
@@ -83,11 +85,15 @@ func List(cfg config.Config, st *store.Store) []View {
 		}
 		v := &View{Rule: r, Hash: r.Hash()}
 		if a, ok := approved[r.ID]; ok {
-			pending := p.Status == respond.RuleProposed && a.Hash() != r.Hash()
 			a.ProposedBy, a.ProposedAt = r.ProposedBy, r.ProposedAt
-			v = &View{Rule: a, Hash: a.Hash(), Pending: pending}
-			if pending {
-				v.Hash = r.Hash() // what an approval must name
+			v = &View{Rule: a, Hash: a.Hash()}
+			if p.Status == respond.RuleProposed && a.Hash() != r.Hash() {
+				// Show what an approval would make active, never the copy
+				// it replaces under the new content's hash.
+				cur := a
+				r.Status, r.ApprovedBy, r.ApprovedAt, r.ExpiresAt = a.Status, a.ApprovedBy, a.ApprovedAt, a.ExpiresAt
+				r.ChangedBy, r.ChangedAt, r.Note = a.ChangedBy, a.ChangedAt, a.Note
+				v = &View{Rule: r, Hash: r.Hash(), Pending: true, Current: &cur}
 			}
 		}
 		byID[r.ID] = v
@@ -277,8 +283,10 @@ type Fired struct {
 }
 
 // Fire runs every active rule that answers f, for each target the finding
-// names. The helper decides; this only asks.
-func Fire(ctx context.Context, rules []respond.Rule, f *store.Finding, run Invoker) []Fired {
+// names. check, when set, refuses a request before it reaches the helper
+// (what the hub added: actions turned off, protected targets, a lower rate
+// limit, which the helper does not know). The helper decides the rest.
+func Fire(ctx context.Context, rules []respond.Rule, f *store.Finding, check func(respond.Request) error, run Invoker) []Fired {
 	var out []Fired
 	for _, r := range rules {
 		if r.When.Rule != f.Rule {
@@ -293,6 +301,12 @@ func Fire(ctx context.Context, rules []respond.Rule, f *store.Finding, run Invok
 			req := respond.Request{ID: respond.NewID(), IncidentID: f.IncidentID, Action: r.Action, Params: params,
 				Justification: fmt.Sprintf("containment rule %s (%s), approved by %s, answering finding #%d: %s", r.ID, r.Title, r.ApprovedBy, f.ID, f.Title),
 				RequestedBy:   respond.RuleRequester(r.ID), RequestedAt: time.Now()}
+			if check != nil {
+				if err := check(req); err != nil {
+					out = append(out, Fired{Rule: r.ID, Target: target, Message: "not taken: " + err.Error()})
+					continue
+				}
+			}
 			rec, err := run(ctx, req)
 			switch {
 			case err != nil:

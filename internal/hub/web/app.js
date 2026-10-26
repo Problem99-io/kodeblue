@@ -873,12 +873,15 @@ function needsYou(t, model) {
 function passes(t, f, r, model) {
   if (f.sev.length && !f.sev.includes(sevOf(t))) return false;
   if (f.kind.length && !f.kind.includes(kindOf(t))) return false;
-  if (!r.srv && f.srv && t._srv !== f.srv) return false;
+  if (!r.srv && srvFilter(f) && t._srv !== f.srv) return false;
   if (f.pinned && !t._pin) return false;
   if (f.attn && !needsYou(t, model)) return false;
   return true;
 }
-function filterCount(f, r) { return f.sev.length + f.kind.length + (!r.srv && f.srv ? 1 : 0) + (f.pinned ? 1 : 0) + (f.attn ? 1 : 0); }
+// srvFilter: the saved server filter, while that server is still listed and
+// the select that shows it is drawn.
+function srvFilter(f) { return !!f.srv && S.servers.length > 1 && S.servers.some((x) => x.id === f.srv); }
+function filterCount(f, r) { return f.sev.length + f.kind.length + (!r.srv && srvFilter(f) ? 1 : 0) + (f.pinned ? 1 : 0) + (f.attn ? 1 : 0); }
 function saveFilters() {
   try { localStorage.setItem("kb.filt", JSON.stringify(S.filt)); } catch { /* private mode */ }
   redraw();
@@ -906,7 +909,7 @@ function paintFilters(bar, r, model) {
     h("span", { class: "fsep" }),
     grp("Type", KINDS.map((k) => chip(f.kind.includes(k), k, tally((t) => kindOf(t) === k), () => { toggleIn(f.kind, k); saveFilters(); }, "cap")))];
   if (!r.srv && S.servers.length > 1) {
-    const sel = h("select", { class: "fsel" + (f.srv ? " on" : ""), "aria-label": "Server", on: { change: () => { f.srv = sel.value; saveFilters(); } } },
+    const sel = h("select", { class: "fsel" + (srvFilter(f) ? " on" : ""), "aria-label": "Server", on: { change: () => { f.srv = sel.value; saveFilters(); } } },
       h("option", { value: "" }, "All servers"), S.servers.map((x) => h("option", { value: x.id, selected: f.srv === x.id }, x.name)));
     kids.push(h("span", { class: "fsep" }), grp("Server", sel));
   }
@@ -2482,7 +2485,10 @@ function approveRuleDialog(srv, r, after) {
   const go = h("button", { class: "btn primary", type: "button", on: { click: async () => { m.close(); await ruleCommand(srv, r, "rule_approve", "", after); } } }, "Approve rule");
   const m = modal("Approve containment rule", [h("div", { class: "stack" },
     h("div", { class: "strong" }, r.title),
+    r.pending_change ? h("div", { class: "small strong c-orange" }, "This is a changed version of an active rule. Approving makes this version active:") : null,
     h("div", { class: "callout warn" }, ruleSummary(r)),
+    r.current ? h("div", { class: "small muted" }, "It replaces: " + ruleSummary(r.current)) : null,
+    (r.when || {}).extract ? h("div", { class: "small c-orange" }, "Targets are taken from log text, which a client can write (a forwarded-for header, a user agent). Check the pattern only matches what the server itself records.") : null,
     h("div", null, h("div", { class: "small faint" }, "Why the agent proposes it"), md(r.why || "—")),
     ruleDetail(r),
     h("div", { class: "small muted" }, "Once approved, kodeblue takes this action by itself on every match, without asking, in any response mode except off. Protected addresses and paths are still refused, and you can pause it at any time."))], [go]);

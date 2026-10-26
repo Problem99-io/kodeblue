@@ -158,7 +158,7 @@ func (r Rule) Hash() string {
 		Days           int
 	}{r.ID, r.Title, r.Why, r.When, r.Action, r.Scope, r.MaxPerHour, r.Days})
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:8])
+	return hex.EncodeToString(h[:])
 }
 
 // Effective is the state at now: an active rule past its expiry is expired.
@@ -395,7 +395,7 @@ func ExecuteRule(p Policy, r Request, now time.Time) Record {
 		}
 		n := 0
 		for _, rec := range records {
-			if rec.RequestedBy == r.RequestedBy && rec.Status == "done" && now.Sub(rec.DoneAt) < time.Hour {
+			if rec.RequestedBy == r.RequestedBy && rec.Status == "done" && now.Sub(rec.DoneAt) < time.Hour && !strings.HasPrefix(rec.Result, "already done by ") {
 				n++
 			}
 		}
