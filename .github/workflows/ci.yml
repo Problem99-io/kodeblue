@@ -45,5 +45,6 @@ jobs:
           for f in deploy/install.sh deploy/build-dist.sh deploy/hub/install-hub.sh deploy/e2e/*.sh; do sh -n "$f"; done
           shellcheck -S warning deploy/install.sh deploy/build-dist.sh deploy/hub/install-hub.sh
           node --check internal/hub/web/app.js
+          node --check internal/hub/web/warroom.js
       - name: Build kodeblue release (agent tarballs for amd64/arm64 + hub bundles)
         run: sh deploy/build-dist.sh /tmp/dist && ls -la /tmp/dist /tmp/dist/agent && (cd /tmp/dist/agent && sha256sum -c SHA256SUMS)

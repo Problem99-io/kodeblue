@@ -49,6 +49,43 @@ server (kodeblue, its own user)                          hub
 - **Pinned release hashes.** The install command the console prints carries the sha256 of the `install.sh` the hub serves and checks it before running it as root. That `install.sh` carries the sha256 of each agent tarball (written in by the hub as `KODEBLUE_DIST_SHA256SUMS`), and the installer checks the download against it instead of fetching `SHA256SUMS`. The hub takes these hashes once, when it first needs an installer (it keeps looking until one is published), and keeps them until it restarts. Restart the hub after updating its release files; `kodeblue-hub server add` (a separate process) hashes the files as they are now, so run it only after that restart. A release file swapped under a running hub, with or without a matching `SHA256SUMS`, then fails the check instead of being installed. A tarball that disagrees with `SHA256SUMS` at that moment is not pinned at all, and installs of it fail. Upgrading the hub restarts it.
 - **The hub's own outbound calls** (the model connection test, the model browser, and Slack posts and the Slack test button) refuse loopback, link-local (`169.254.0.0/16`, `fe80::/10`, the metadata service of every major cloud), `fd00:ec2::254`, `100.100.100.200`, unspecified and multicast addresses, whatever a name resolves to. They also do not follow redirects to another host and do not use `HTTPS_PROXY`. Private LAN ranges (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`) stay allowed, because self-hosted gateways live there. For an endpoint on the hub's own host, allow it with `--endpoint-allow 127.0.0.1` (`KODEBLUE_HUB_ENDPOINT_ALLOW`). Servers reach their model endpoints themselves, so a connection such as `http://127.0.0.1:11434` (a model on each server) still works for them.
 
+### War room
+
+The **War room** tab on the right edge opens a world map above the current page.
+The page slides left and remains in place; close the drawer or press Escape to
+return. Select a map location to see its source IPs, providers, network types,
+linked incidents, event times, server names, evidence and incident summaries.
+Incident links open the existing case panel. Unlocated and private sources remain
+available in the source list without an invented map position.
+
+The map indexes registered findings with explicit source fields (`ip`,
+`source_ip`, `src_ip`, `client_ip`, `remote_ip`, `peer_ip`, `src_addr`), including
+source fields in a finding's structured value. It does not scrape addresses from
+reports, log prose, forwarded-header lists, or destination fields. Findings with
+the same coordinates cluster together. Time filters use finding updates; the
+context panel shows the original event time when available and its last update.
+Raw sensor events that never become findings are not uploaded by the existing
+sync protocol and are not shown. The latest 5,000 source/finding associations are
+returned per view; a notice asks for narrower filters if this limit is reached.
+
+Public IPv4 and IPv6 addresses are enriched on the hub through
+[ipapi.is](https://ipapi.is/developers.html); only the source IP and an optional
+provider key leave the hub. Logs, incident details, server names and private or
+reserved addresses are never sent. The bundled public-domain Natural Earth map
+uses no external tiles, scripts, fonts, or browser geolocation.
+
+Open **Enrichment** inside the drawer to disable lookups or save/clear an optional
+API key. Keys stay on the hub and are never returned to the browser or enrolled
+servers. Anonymous lookups provide ownership and approximate location, with a
+local ceiling of 30 attempts per UTC day. A key enables network classification
+when supplied by the provider and raises the local ceiling to 1,000 attempts.
+Unknown classifications stay unknown. Results are cached for seven days; saving
+a key schedules a refresh for richer data. Requests are paced, failures back off,
+and provider quota/access refusals stop further lookups until the next UTC day.
+These local limits persist across hub restarts. Cached locations remain usable
+during provider outages. IP geolocation can represent an ISP, datacenter, VPN or
+proxy exit; it is not proof of a person's physical location or attribution.
+
 ### What operators can and cannot do from the hub
 
 Operators can **message** a server's agents. A message about an incident continues that incident's own agent session (full context); anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.

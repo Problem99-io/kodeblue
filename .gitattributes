@@ -6,3 +6,5 @@
 # Third-party data (see NOTICE): not ours to diff, not counted as project code.
 internal/tokenestimate/assets/*.tiktoken -diff linguist-vendored
 internal/hub/web/JetBrainsMono-* linguist-vendored
+
+internal/hub/web/world-land.json -diff linguist-vendored

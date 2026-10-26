@@ -164,6 +164,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
+	s.warRoutes()
 	s.slackRoutes()
 	s.settingsRoutes()
 

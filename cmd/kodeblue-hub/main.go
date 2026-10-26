@@ -188,6 +188,7 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	defer stop()
 	go srv.Janitor(ctx)
 	go srv.NotificationForwarder(ctx)
+	go srv.EnrichSources(ctx)
 	hs := &http.Server{Addr: listen, Handler: srv.Handler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	var local *http.Server

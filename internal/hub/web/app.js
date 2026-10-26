@@ -305,6 +305,8 @@ async function logout() {
 
 function renderLogin(msg) {
   if (S.loginShown) { if (msg) { const e = document.querySelector(".lerr"); if (e && !e.textContent) e.textContent = msg; } return; }
+  closeWarRoom();
+  const warTab = document.getElementById("war-tab"); if (warTab) warTab.hidden = true;
   S.loginShown = true; S.viewKey = "";
   setTimer(null); closePanel();
   document.querySelectorAll(".scrim, .menu").forEach((x) => x.remove());
@@ -566,6 +568,7 @@ async function openBell(anchor) {
 setInterval(() => { if (!document.hidden) bellLoad(); }, 20000);
 
 async function renderView(r) {
+  mountWarRoom();
   try { await loadServers(); } catch (e) { if (e.status === 401) return; }
   setTimer(null);
   clear(app);
