@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	internal "github.com/Problem99-io/kodeblue/internal"
@@ -27,7 +28,7 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 			writeError(w, 500, "run unavailable")
 			return
 		}
-		status, content := "running", ""
+		status, content, failure := "running", "", ""
 		if len(events) > 0 {
 			e := events[0]
 			switch e.Type {
@@ -41,6 +42,7 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 				}
 			case internal.EventRunFailed:
 				status = "failed"
+				failure = failureText(e.Payload)
 			case internal.EventRunAborted, internal.EventRunInterrupted:
 				status = "aborted"
 			}
@@ -59,6 +61,31 @@ func handleGetRunOutcome(deps *Dependencies) http.HandlerFunc {
 		if truncated {
 			content = string(text[:12000])
 		}
-		writeJSON(w, 200, map[string]any{"session_id": sessionID, "run_id": runID, "status": status, "text": content, "truncated": truncated})
+		out := map[string]any{"session_id": sessionID, "run_id": runID, "status": status, "text": content, "truncated": truncated}
+		if failure != "" {
+			out["error"] = failure
+		}
+		writeJSON(w, 200, out)
 	}
+}
+
+// failureText is why a run failed, from its run.failed event: the reason the
+// agent loop wrote for people (the provider's message, such as a rate limit,
+// never the request or a key) and the HTTP status when there was one.
+func failureText(payload json.RawMessage) string {
+	var f struct {
+		Reason     string `json:"reason"`
+		HTTPStatus int    `json:"http_status"`
+	}
+	if json.Unmarshal(payload, &f) != nil || f.Reason == "" {
+		return ""
+	}
+	r := []rune(f.Reason)
+	if len(r) > 500 {
+		f.Reason = string(r[:500]) + "…"
+	}
+	if f.HTTPStatus != 0 {
+		return fmt.Sprintf("%s (HTTP %d)", f.Reason, f.HTTPStatus)
+	}
+	return f.Reason
 }

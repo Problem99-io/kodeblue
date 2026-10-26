@@ -464,6 +464,9 @@ func (k *Engine) WaitSession(ctx context.Context, s *Session, timeout time.Durat
 type Outcome struct {
 	Status string // completed | failed | aborted | timeout
 	Text   string
+	// Error is why a failed run failed, as the engine tells people (the
+	// model provider's message, such as a rate limit).
+	Error string
 }
 
 // Wait polls the run until it ends or timeout passes (then aborts it).
@@ -473,10 +476,11 @@ func (k *Engine) Wait(ctx context.Context, s *Session, timeout time.Duration) Ou
 		var out struct {
 			Status string `json:"status"`
 			Text   string `json:"text"`
+			Error  string `json:"error"`
 		}
 		err := k.do(ctx, http.MethodGet, "/v1/sessions/"+s.ID+"/runs/"+s.RunID+"/outcome", nil, &out)
 		if err == nil && out.Status != "running" {
-			return Outcome{Status: out.Status, Text: out.Text}
+			return Outcome{Status: out.Status, Text: out.Text, Error: out.Error}
 		}
 		k.answerPending(ctx, s.ID)
 		if ctx.Err() != nil || time.Now().After(deadline) {

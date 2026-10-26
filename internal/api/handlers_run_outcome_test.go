@@ -61,3 +61,26 @@ func TestRunOutcomeBindsSessionAndExcludesOtherRuns(t *testing.T) {
 		t.Fatal("exposed unrelated data")
 	}
 }
+
+// A failed run says why, as the agent loop wrote it for people: the daemon
+// shows it on the case (a provider's rate limit, a spend cap).
+func TestRunOutcomeSaysWhyARunFailed(t *testing.T) {
+	deps, _ := setupTestDeps(t)
+	now := time.Now()
+	session := &internal.Session{ID: internal.NewSessionID(), Status: internal.SessionActive, CreatedAt: now, UpdatedAt: now}
+	run := &internal.Run{ID: internal.NewRunID(), SessionID: session.ID, Status: internal.RunFailed, CreatedAt: now}
+	if deps.Sessions.Create(session) != nil || deps.Runs.Create(run) != nil {
+		t.Fatal("setup")
+	}
+	payload, _ := json.Marshal(map[string]any{"reason": "Rate limit exceeded: free-models-per-day.", "http_status": 429, "failure_class": "rate_limited"})
+	if err := deps.Events.Append(&internal.Event{SessionID: session.ID, RunID: run.ID, Type: internal.EventRunFailed, Payload: payload, Timestamp: now}); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	NewRouter(deps).ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/"+string(session.ID)+"/runs/"+string(run.ID)+"/outcome", nil))
+	var out struct{ Status, Error string }
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if out.Status != "failed" || out.Error != "Rate limit exceeded: free-models-per-day. (HTTP 429)" {
+		t.Fatalf("outcome: %s", w.Body.String())
+	}
+}
