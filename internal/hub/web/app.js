@@ -7,8 +7,17 @@
 const app = document.getElementById("app");
 const S = { me: null, csrf: "", info: null, timer: null, open: new Set(), cache: {}, servers: [], serversAt: 0,
   board: null, q: "", viewKey: "", loginShown: false, drafts: {}, conn: true, sel: new Set(), selAnchor: "",
-  stopping: new Set() }; // session ids the operator asked to stop
+  stopping: new Set(), // session ids the operator asked to stop
+  filt: loadFilters() };
 const enc = encodeURIComponent;
+// Board filters are this browser's own view; pins are shared on the hub.
+function loadFilters() {
+  const f = { sev: [], kind: [], srv: "", pinned: false, attn: false };
+  try { Object.assign(f, JSON.parse(localStorage.getItem("kb.filt") || "{}")); } catch { /* none saved */ }
+  if (!Array.isArray(f.sev)) f.sev = [];
+  if (!Array.isArray(f.kind)) f.kind = [];
+  return f;
+}
 
 // ---------- DOM helpers ----------
 function h(tag, attrs, ...kids) {
@@ -82,6 +91,9 @@ const ICONS = {
   sliders: ["M20 7h-9", "M14 17H5", "c:17,17,3", "c:7,7,3"],
   archive: ["r:2,3,20,5,1", "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8", "M10 12h4"],
   check: ["M20 6 9 17l-5-5"],
+  pause: ["r:6,4,4,16,1", "r:14,4,4,16,1"],
+  pin: ["M12 17v5", "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"],
+  filter: ["M22 3H2l8 9.46V19l4 2v-8.54L22 3z"],
   checkSq: ["r:3,3,18,18,3", "m8 12 3 3 5-6"],
   layers: ["M12 2 2 7l10 5 10-5-10-5Z", "m2 17 10 5 10-5", "m2 12 10 5 10-5"],
   external: ["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"],
@@ -616,6 +628,7 @@ function serverBar(srv, tab) {
       k === "board" && nOpen ? h("span", { class: "n" }, nOpen) : null,
       k === "findings" && c.needs_ack ? h("span", { class: "n" }, c.needs_ack) : null,
       k === "services" && openVulns(c) ? h("span", { class: "n" + (worstVuln(c) ? " warn" : ""), title: "open vulnerabilities" }, openVulns(c)) : null,
+      k === "monitors" && c.rules_waiting ? h("span", { class: "n warn", title: "containment rules waiting for approval" }, c.rules_waiting) : null,
       k === "activity" && c.pending_actions ? h("span", { class: "n warn" }, c.pending_actions) : null))),
     learnWaitAlert(st));
 }
@@ -701,7 +714,7 @@ function titleMatches(task, m) {
 function boardModel(d) {
   const tasks = (d.tasks || []).map((row) => {
     const t = Object.assign({}, parse(row));
-    t._srv = row.server_id; t._srvName = row.server_name; t._key = row.server_id + ":" + t.id; t._board = row.board || null;
+    t._srv = row.server_id; t._srvName = row.server_name; t._key = row.server_id + ":" + t.id; t._board = row.board || null; t._pin = row.pin || null;
     return t;
   });
   const bySess = new Map();
@@ -768,6 +781,7 @@ function isArchived(t) { const b = boardState(t); return !!(b && b.archived); }
 
 async function vBoard(r, main, srv) {
   const cols = h("div", { class: "board" });
+  const fbar = h("div", { class: "fbar", role: "toolbar", "aria-label": "Filter cases" });
   const count = h("span", { class: "count" }, "…");
   const newHref = r.srv ? `#/s/${enc(r.srv)}/new` : "#/new";
   const archBtn = h("button", { class: "btn ghost arch-t", type: "button", "aria-pressed": S.showArchived ? "true" : "false", title: "Show archived cases",
@@ -779,7 +793,7 @@ async function vBoard(r, main, srv) {
     h("span", { class: "bb-sub" }, r.srv ? "every investigation, learning run, review and operator chat on this server" : "every investigation, learning run, review and operator chat, across " + S.servers.length + " server" + (S.servers.length === 1 ? "" : "s")),
     h("div", { class: "sp" }), archBtn,
     srv && (!srv.enrolled || srv.revoked) ? h("button", { class: "btn primary", type: "button", disabled: true, title: "This server is not connected to the hub" }, ic("plus", 14), "New case")
-      : h("a", { class: "btn primary", href: newHref }, ic("plus", 14), "New case")), cols);
+      : h("a", { class: "btn primary", href: newHref }, ic("plus", 14), "New case")), fbar, cols);
   if (!r.srv && !S.servers.length) {
     cols.appendChild(h("div", { class: "empty big" }, logo(true),
       h("h2", null, "No servers yet"),
@@ -794,14 +808,17 @@ async function vBoard(r, main, srv) {
     const model = boardModel(d);
     S.model = model;
     const q = S.q.trim().toLowerCase();
-    const hit = (t) => !q || [t.title, "#" + t.id, t._srvName, t.kind, t.status, t.verdict].some((x) => String(x || "").toLowerCase().includes(q));
+    const f = S.filt;
+    const hit = (t) => (!q || [t.title, "#" + t.id, t._srvName, t.kind, t.status, t.verdict].some((x) => String(x || "").toLowerCase().includes(q))) && passes(t, f, r, model);
     const arch = !!S.showArchived;
     const buckets = { live: [], human: [], done: [] };
-    if (!arch) for (const m of model.placeholders) {
+    const filtering = filterCount(f, r) > 0;
+    if (!arch && !filtering) for (const m of model.placeholders) {
       if (q && !m.body.toLowerCase().includes(q)) continue;
       buckets[m.status === "queued" || m.status === "delivered" ? "live" : "done"].push(placeholderCard(m, r));
     }
     let n = 0, archived = 0;
+    const pinned = { live: [], human: [], done: [] };
     for (const t of model.tasks) {
       const a = isArchived(t);
       if (a) archived++;
@@ -809,14 +826,17 @@ async function vBoard(r, main, srv) {
       n++;
       const pm = model.pending.get(t._key);
       const ap = model.approvals.get(t._key);
-      buckets[column(t, pm, ap)].push(taskCard(t, r, pm, ap));
+      const col = column(t, pm, ap);
+      (t._pin ? pinned : buckets)[col].push(taskCard(t, r, pm, ap));
     }
-    count.textContent = String(n + (arch ? 0 : model.placeholders.length));
+    for (const k of Object.keys(buckets)) buckets[k] = pinned[k].concat(buckets[k]);
+    count.textContent = String(n + (arch || filtering ? 0 : model.placeholders.length));
+    paintFilters(fbar, r, model);
     archBtn.lastChild.textContent = archived ? String(archived) : "";
     clear(cols);
     for (const c of COLS) {
       const list = buckets[c.k];
-      const bd = h("div", { class: "col-bd" }, list.length ? list : h("div", { class: "col-empty" }, q ? "No matching cases" : arch ? "No archived cases here." : c.empty));
+      const bd = h("div", { class: "col-bd" }, list.length ? list : h("div", { class: "col-empty" }, q || filtering ? "No matching cases" : arch ? "No archived cases here." : c.empty));
       cols.appendChild(h("section", { class: "col cc-" + c.color, "data-col": c.k },
         h("div", { class: "col-hd" }, h("span", { class: "cdot c-" + c.color }), h("h2", null, c.name), h("span", { class: "cnt" }, String(list.length)),
           c.k === "live" && list.length ? h("span", { class: "col-live" }, h("span", { class: "pulse" }), "live") : null),
@@ -840,6 +860,84 @@ async function vBoard(r, main, srv) {
 }
 
 const DROP_HINT = { live: "Ask the agent to look again", human: "Move to Needs human", done: "Mark resolved" };
+
+// ----- board filters (kept in this browser) and pins (shared on the hub)
+const KINDS = ["incident", "learning", "review", "operator", "coverage"];
+const sevOf = (t) => (SEV.includes(t.severity) ? t.severity : "info");
+const kindOf = (t) => (KINDS.includes(t.kind) ? t.kind : "incident");
+// needsYou: waiting on a person: approvals, or the Needs human column.
+function needsYou(t, model) {
+  const ap = model.approvals.get(t._key);
+  return !!(ap && ap.length) || column(t, model.pending.get(t._key), ap) === "human";
+}
+function passes(t, f, r, model) {
+  if (f.sev.length && !f.sev.includes(sevOf(t))) return false;
+  if (f.kind.length && !f.kind.includes(kindOf(t))) return false;
+  if (!r.srv && f.srv && t._srv !== f.srv) return false;
+  if (f.pinned && !t._pin) return false;
+  if (f.attn && !needsYou(t, model)) return false;
+  return true;
+}
+function filterCount(f, r) { return f.sev.length + f.kind.length + (!r.srv && f.srv ? 1 : 0) + (f.pinned ? 1 : 0) + (f.attn ? 1 : 0); }
+function saveFilters() {
+  try { localStorage.setItem("kb.filt", JSON.stringify(S.filt)); } catch { /* private mode */ }
+  redraw();
+}
+function toggleIn(list, v) { const i = list.indexOf(v); if (i >= 0) list.splice(i, 1); else list.push(v); }
+// paintFilters draws the filter bar with live counts of what each choice
+// would show among the cases on the board.
+function paintFilters(bar, r, model) {
+  const f = S.filt;
+  const arch = !!S.showArchived;
+  const base = model.tasks.filter((t) => isArchived(t) === arch);
+  const sig = JSON.stringify([f, r.srv, arch, base.map((t) => [t._key, t.severity, t.kind, !!t._pin, needsYou(t, model)])]);
+  if (bar.dataset.sig === sig) return;
+  bar.dataset.sig = sig;
+  const tally = (pred) => base.filter(pred).length;
+  const chip = (on, label, n, click, cls, title) => h("button", { class: "fchip" + (on ? " on" : "") + (cls ? " " + cls : ""), type: "button", "aria-pressed": on ? "true" : "false", title,
+    on: { click } }, label, h("span", { class: "fn" }, String(n)));
+  const grp = (label, kids) => h("div", { class: "fgrp" }, h("span", { class: "flbl" }, label), kids);
+  const nPinned = tally((t) => !!t._pin), nAttn = tally((t) => needsYou(t, model));
+  const kids = [
+    chip(f.attn, [ic("user", 12), "Needs you"], nAttn, () => { f.attn = !f.attn; saveFilters(); }, "attn", "Cases waiting on a person: approvals and Needs human"),
+    chip(f.pinned, [ic("pin", 12), "Pinned"], nPinned, () => { f.pinned = !f.pinned; saveFilters(); }, "pinf", "Only pinned cases"),
+    h("span", { class: "fsep" }),
+    grp("Severity", SEV.map((s) => chip(f.sev.includes(s), [h("i", { class: "sdot s-" + s }), s], tally((t) => sevOf(t) === s), () => { toggleIn(f.sev, s); saveFilters(); }, "cap"))),
+    h("span", { class: "fsep" }),
+    grp("Type", KINDS.map((k) => chip(f.kind.includes(k), k, tally((t) => kindOf(t) === k), () => { toggleIn(f.kind, k); saveFilters(); }, "cap")))];
+  if (!r.srv && S.servers.length > 1) {
+    const sel = h("select", { class: "fsel" + (f.srv ? " on" : ""), "aria-label": "Server", on: { change: () => { f.srv = sel.value; saveFilters(); } } },
+      h("option", { value: "" }, "All servers"), S.servers.map((x) => h("option", { value: x.id, selected: f.srv === x.id }, x.name)));
+    kids.push(h("span", { class: "fsep" }), grp("Server", sel));
+  }
+  const n = filterCount(f, r);
+  // On a phone the bar folds behind one button.
+  kids.unshift(h("button", { class: "ftog", type: "button", "aria-expanded": S.filtOpen ? "true" : "false",
+    on: { click: () => { S.filtOpen = !S.filtOpen; bar.classList.toggle("open", S.filtOpen); bar.querySelector(".ftog").setAttribute("aria-expanded", S.filtOpen ? "true" : "false"); } } },
+  ic("filter", 12), "Filters", n ? h("span", { class: "fn" }, String(n)) : null, ic("chevDown", 12)));
+  if (n) kids.push(h("button", { class: "fclear", type: "button", on: { click: () => { Object.assign(f, { sev: [], kind: [], srv: "", pinned: false, attn: false }); saveFilters(); } } }, ic("x", 12), "Clear filters"));
+  clear(bar);
+  add(bar, kids);
+  bar.classList.toggle("active", n > 0);
+  bar.classList.toggle("open", !!S.filtOpen);
+}
+// setPins pins or unpins cases for every operator, painting at once.
+async function setPins(list, on) {
+  list = list.filter((t) => !!t._pin !== on);
+  if (!list.length) return;
+  const by = S.me ? S.me.name : "";
+  const prev = list.map((t) => { const row = boardRow(t); const p = row ? row.pin : null; if (row) row.pin = on ? { by, at: new Date().toISOString() } : null; return p; });
+  redraw();
+  const res = await Promise.allSettled(list.map((t) => api("POST", "/api/cases/state", { server_id: t._srv, incident_id: Number(t.id), pinned: on })));
+  const bad = res.filter((x, i) => {
+    if (x.status === "fulfilled") return false;
+    const row = boardRow(list[i]); if (row) row.pin = prev[i];
+    return true;
+  });
+  redraw();
+  if (bad.length) { toast("Not saved: " + (bad[0].reason && bad[0].reason.message || "error"), true); return; }
+  toast(on ? `Pinned ${caseLabel(list).toLowerCase()} to the top for everyone` : `Unpinned ${caseLabel(list).toLowerCase()}`);
+}
 function boardTitle(r) { return S.showArchived ? "Archived cases" : r.srv ? "Cases" : "Fleet cases"; }
 function caseByKey(key) { return S.model ? S.model.tasks.find((t) => t._key === key) : null; }
 
@@ -906,6 +1004,12 @@ function wireBoard(cols, r) {
     const card = e.target.closest(".card[data-key]");
     if (!card || !caseByKey(card.dataset.key)) return;
     const key = card.dataset.key;
+    if (e.target.closest(".pinb")) {
+      e.preventDefault();
+      const t = caseByKey(key);
+      setPins([t], !t._pin);
+      return;
+    }
     const ck = e.target.closest(".ck");
     if (!ck && !e.metaKey && !e.ctrlKey && !e.shiftKey && !S.sel.size) return;
     e.preventDefault();
@@ -967,6 +1071,7 @@ function caseMenu(t, r, href) {
       } }));
   }
   items.push(h("div", { class: "msep" }));
+  items.push(menuItem(t._pin ? "Unpin" : "Pin to top", { icon: "pin", click: () => setPins([t], !t._pin) }));
   items.push(arch ? menuItem("Unarchive", { icon: "archive", click: () => setCaseState(t, { archived: false }, "Case #" + t.id + " is back on the board") })
     : menuItem("Archive", { icon: "archive", click: () => setCaseState(t, { archived: true }, "Archived case #" + t.id + ". It comes back if the agent updates it.", true) }));
   if (!r.srv) items.push(menuItem("Open server", { icon: "server", href: "#/s/" + enc(t._srv) + "/overview" }));
@@ -1098,9 +1203,11 @@ function taskCard(t, r, pm, ap) {
   const live = !!pm || t.status === "investigating";
   const sv = SEV.includes(t.severity) ? t.severity : "info";
   const b = boardState(t);
-  return h("a", { class: "card sv-" + sv + (live ? " live" : "") + (isArchived(t) ? " arch" : ""), href: taskHash(r.srv, t._srv, t.id), "data-key": t._key, draggable: "true" },
+  return h("a", { class: "card sv-" + sv + (live ? " live" : "") + (isArchived(t) ? " arch" : "") + (t._pin ? " pinned" : ""), href: taskHash(r.srv, t._srv, t.id), "data-key": t._key, draggable: "true" },
     h("div", { class: "card-hd" },
       h("div", { class: "card-r1" }, h("h3", { class: "card-t", title: t.title }, t.title), h("span", { class: "card-id" }, "#" + t.id),
+        h("span", { class: "pinb", role: "button", "aria-pressed": t._pin ? "true" : "false", "aria-label": t._pin ? "Unpin case #" + t.id : "Pin case #" + t.id,
+          title: t._pin ? `Pinned by ${t._pin.by || "an operator"} ${ago(t._pin.at)}. Click to unpin.` : "Pin to the top of its column, for everyone" }, ic("pin", 12)),
         h("span", { class: "ck", role: "checkbox", "aria-checked": S.sel.has(t._key) ? "true" : "false", "aria-label": "Select case #" + t.id, title: "Select" }, ic("check", 11))),
       t.summary ? h("p", { class: "card-desc" }, t.summary) : null,
       h("div", { class: "card-r2" },
@@ -1203,6 +1310,8 @@ function bulkMenu(list) {
   if (!arch && list.some((t) => (boardState(t) || {}).column)) items.push(menuItem("Follow the agent's status", { icon: "refresh",
     click: () => setCasesState(list.filter((t) => (boardState(t) || {}).column).map((t) => ({ t, change: { column: "" } })), "Back on the agent's status") }));
   items.push(h("div", { class: "msep" }));
+  const allPinned = list.every((t) => !!t._pin);
+  items.push(menuItem(allPinned ? "Unpin" : "Pin to top", { icon: "pin", click: () => setPins(list, !allPinned) }));
   items.push(menuItem(arch ? "Unarchive" : "Archive", { icon: "archive", click: () => archiveCases(list, !arch) }));
   items.push(menuItem("Copy links", { icon: "copy", click: () => copyText(list.map((t) => new URL(taskHash(parseHash().srv, t._srv, t.id), location.href).href).join("\n"), "Links copied") }));
   items.push(menuItem("Clear selection", { icon: "x", click: clearSel }));
@@ -2319,13 +2428,125 @@ async function vFindings(srv, body) {
 }
 
 // ----- monitors
+// ----- containment rules: what kodeblue does on its own, once approved
+const RULE_ST = { proposed: "b-warn", active: "b-ok", paused: "", expired: "", rejected: "", deleted: "" };
+function ruleStatus(r) {
+  if (r.pending_change) return h("span", { class: "badge b-warn", title: "a changed version waits for approval; the approved one keeps acting until then" }, r.status + " · change waiting");
+  return h("span", { class: "badge " + (RULE_ST[r.status] || "") }, r.status === "proposed" ? "waiting for approval" : r.status);
+}
+function ruleSummary(r) {
+  const scope = Object.entries(r.scope || {}).map(([k, v]) => (k === "cidr" ? "inside " : "under ") + v).join(", ");
+  const verb = { block_ip: "block the address", quarantine_file: "quarantine the file" }[r.action] || r.action;
+  const from = r.when && r.when.field ? ` from ${r.when.field}` : "";
+  return `On every ${(r.when || {}).rule} finding, ${verb}${from}${scope ? " " + scope : ""}; at most ${r.max_per_hour}/hour, for ${r.days} days after approval.`;
+}
+async function ruleCommand(srv, r, command, note, after) {
+  try {
+    await api("POST", `/api/servers/${enc(srv.id)}/rules/${enc(r.id)}`, { command, hash: r.hash, note });
+    toast({ rule_approve: "Approval sent", rule_reject: "Rejected", rule_pause: "Pause sent", rule_delete: "Delete sent" }[command] + "; the server applies it within seconds");
+    setTimeout(after, 4000);
+  } catch (e) { toast(e.message, true); }
+}
+function ruleNoteDialog(srv, r, command, title, label, placeholder, okLabel, after) {
+  const why = h("textarea", { class: "full", rows: 3, placeholder });
+  const go = h("button", { class: "btn " + (command === "rule_delete" ? "danger solid" : "primary"), type: "button", on: { click: async () => {
+    if (command !== "rule_delete" && !why.value.trim()) { why.focus(); return; }
+    m.close();
+    await ruleCommand(srv, r, command, why.value, after);
+  } } }, okLabel);
+  const m = modal(title, [h("div", { class: "stack" }, h("div", { class: "strong" }, r.title), h("label", { class: "field" }, label, why))], [go]);
+  why.focus();
+}
+function ruleDetail(r) {
+  const w = r.when || {};
+  return h("dl", { class: "kv" },
+    h("dt", null, "Answers"), h("dd", null, h("code", null, w.rule)),
+    w.field ? [h("dt", null, "Target from"), h("dd", null, h("code", null, w.field))] : null,
+    w.extract ? [h("dt", null, "Extracted with"), h("dd", null, h("code", null, w.extract))] : null,
+    h("dt", null, "Action"), h("dd", null, r.action, Object.entries(r.scope || {}).map(([k, v]) => h("span", { class: "faint" }, ` · ${k} `, h("code", null, v)))),
+    h("dt", null, "Limits"), h("dd", null, `${r.max_per_hour} per hour · ${r.days} days after approval`),
+    h("dt", null, "Proposed"), h("dd", null, `${r.proposed_by || "?"} ${when(r.proposed_at)}`),
+    r.approved_by ? [h("dt", null, "Approved"), h("dd", null, `${r.approved_by} ${when(r.approved_at)} · expires ${when(r.expires_at)}`)] : null,
+    r.changed_by ? [h("dt", null, "Changed"), h("dd", null, `${r.status} by ${r.changed_by} ${when(r.changed_at)}`, r.note ? h("div", { class: "faint" }, r.note) : null)] : null,
+    h("dt", null, "Content"), h("dd", { class: "mono faint small" }, r.hash));
+}
+function approveRuleDialog(srv, r, after) {
+  if (!(srv.status || {}).accepts_rule_approvals) {
+    modal("Approve on the server", [h("div", { class: "stack" },
+      h("div", { class: "strong" }, r.title),
+      h("div", { class: "callout warn" }, ruleSummary(r)),
+      h("div", null, "An approved rule acts without asking, so this server takes the approval from the hub only when its root allowed automatic actions from the hub ([response] hub_max_mode = \"contain\", and hub.accept_approvals). Approve it on the server:"),
+      h("div", { class: "cmd" }, "sudo kodeblue rules approve " + r.id))], []);
+    return;
+  }
+  const go = h("button", { class: "btn primary", type: "button", on: { click: async () => { m.close(); await ruleCommand(srv, r, "rule_approve", "", after); } } }, "Approve rule");
+  const m = modal("Approve containment rule", [h("div", { class: "stack" },
+    h("div", { class: "strong" }, r.title),
+    h("div", { class: "callout warn" }, ruleSummary(r)),
+    h("div", null, h("div", { class: "small faint" }, "Why the agent proposes it"), md(r.why || "—")),
+    ruleDetail(r),
+    h("div", { class: "small muted" }, "Once approved, kodeblue takes this action by itself on every match, without asking, in any response mode except off. Protected addresses and paths are still refused, and you can pause it at any time."))], [go]);
+}
+const RULE_ORDER = { proposed: 0, active: 1, paused: 2, expired: 3, rejected: 4, deleted: 5 };
+const ruleRank = (r) => (r.pending_change ? -1 : RULE_ORDER[r.status] ?? 6);
+// rulesPanel: msgs are the server's rule commands, newest first, so a ruling
+// on its way shows instead of the buttons, and a refusal says why.
+function rulesPanel(srv, list, after, msgs) {
+  list = list.slice().sort((a, b) => ruleRank(a) - ruleRank(b) || String(a.id).localeCompare(String(b.id)));
+  const live = list.filter((r) => !["rejected", "deleted"].includes(r.status));
+  const old = list.length - live.length;
+  const shown = S.open.has("rules-old") ? list : live;
+  const waiting = list.filter((r) => r.status === "proposed" || r.pending_change).length;
+  const active = list.filter((r) => r.status === "active").length;
+  const extra = h("span", { class: "hd-x" }, waiting ? h("span", { class: "badge b-warn" }, waiting + " waiting for you") : null,
+    old ? h("button", { class: "btn small ghost", type: "button", on: { click: () => { S.open.has("rules-old") ? S.open.delete("rules-old") : S.open.add("rules-old"); after(); } } },
+      S.open.has("rules-old") ? "Hide rejected and deleted" : `Show rejected and deleted (${old})`) : null);
+  const cols = ["Rule", "Status", "Fired", "Last fired", "Expires"];
+  return panel(`Containment rules (${active} active)`, h("div", { class: "bd flush tbl-wrap" }, shown.length ? h("table", null,
+    h("thead", null, h("tr", null, cols.map((t, i) => h("th", { class: i === 2 ? "num" : "" }, t)))),
+    h("tbody", null, shown.map((r) => {
+      const key = "cr" + r.id;
+      const mine = (msgs || []).filter((m) => m.request_id === r.id);
+      const open = mine.find(decOpen);
+      const last = mine[0];
+      const btns = [];
+      if (r.status === "proposed" || r.pending_change || r.status === "paused" || r.status === "expired")
+        btns.push(h("button", { class: "btn small primary", type: "button", on: { click: () => approveRuleDialog(srv, r, after) } }, ic("check", 12), r.status === "proposed" || r.pending_change ? "Approve" : r.status === "paused" ? "Resume" : "Renew"));
+      if (r.status === "proposed" || r.pending_change)
+        btns.push(h("button", { class: "btn small", type: "button", on: { click: () => ruleNoteDialog(srv, r, "rule_reject", "Reject " + r.id, "Why not", "e.g. these addresses include our office VPN", "Reject", after) } }, "Reject"));
+      if (r.status === "active")
+        btns.push(h("button", { class: "btn small", type: "button", on: { click: () => ruleNoteDialog(srv, r, "rule_pause", "Pause " + r.id, "Why pause it", "e.g. it blocked a partner's scanner", "Pause rule", after) } }, ic("pause", 12), "Pause"));
+      if (!["deleted", "rejected"].includes(r.status) && r.approved_by && acceptsApprovals(srv.id))
+        btns.push(h("button", { class: "btn small danger", type: "button", on: { click: () => ruleNoteDialog(srv, r, "rule_delete", "Delete " + r.id, "Note (optional)", "", "Delete rule", after) } }, ic("trash", 12), "Delete"));
+      const ex = h("tr", { hidden: !S.open.has(key), class: "ex" }, h("td", { colspan: cols.length }, h("div", { class: "stack" },
+        h("div", null, h("div", { class: "small faint" }, "Why"), md(r.why || "—")), ruleDetail(r))));
+      const row = h("tr", { class: "click" + (r.status === "proposed" || r.pending_change ? " attn" : ""), on: { click: (e) => { if (e.target.closest("button")) return; S.open.has(key) ? S.open.delete(key) : S.open.add(key); ex.hidden = !S.open.has(key); } } },
+        h("td", null, h("div", { class: "fg strong" }, r.title), h("div", { class: "small muted" }, ruleSummary(r)),
+          open ? h("div", { class: "appr-st", style: "margin-top:6px" }, h("span", { class: "pulse" }), `${open.author} sent ${open.command.replace("rule_", "")}; ${open.status === "queued" ? "waiting for the server…" : "the server is handling it…"}`)
+            : btns.length ? h("div", { class: "btns", style: "margin-top:6px" }, btns) : null,
+          !open && last && (last.status === "refused" || last.status === "failed") && Date.now() - (validTime(last.replied_at) || 0) < 86400000
+            ? h("div", { class: "small c-red", style: "margin-top:4px" }, `${last.command.replace("rule_", "")} by ${last.author} ${last.status}: ${last.reply}`) : null),
+        h("td", null, ruleStatus(r)),
+        h("td", { class: "num" }, r.fired || 0, r.fired_last_hour ? h("div", { class: "faint small" }, r.fired_last_hour + " last hour") : null),
+        h("td", { class: "nowrap small muted" }, validTime(r.last_fired) ? ago(r.last_fired) : "—"),
+        h("td", { class: "nowrap small muted" }, validTime(r.expires_at) ? when(r.expires_at) : "—"));
+      return [row, ex];
+    }))) : h("div", { class: "empty" }, "No containment rules. When the same attack keeps coming back, the reviewer or responder proposes one here; it acts only after you approve it.")), extra, "red");
+}
+
 async function vMonitors(srv, body) {
   const [mons, rules] = await Promise.all([recs(srv.id, "monitor", "?limit=500"), recs(srv.id, "allow_rule", "?limit=500")]);
+  const [crules, msgs] = await Promise.all([recs(srv.id, "containment_rule", "?limit=500").then((x) => x.map(parse)),
+    api("GET", `/api/servers/${enc(srv.id)}/messages`).then((m) => m.filter((x) => String(x.command || "").startsWith("rule_"))).catch(() => [])]);
+  const again = () => { if (body.isConnected) vMonitors(srv, body); };
+  // While a ruling is on its way, look again until the server answered.
+  if (msgs.some(decOpen)) setTimeout(again, 4000);
   const st = srv.status || {};
   const ml = mons.map(parse).sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const rl = rules.map(parse);
   const coll = Object.entries(st.collector_runs || {}).sort();
   sync(body, h("div", { class: "stack" },
+    rulesPanel(srv, crules, again, msgs),
     panel(`Agent-written monitors (${ml.filter((m) => !m.disabled).length} active)`, h("div", { class: "bd flush tbl-wrap" }, ml.length ? h("table", null,
       h("thead", null, h("tr", null, ["Monitor", "Check", "Status", "Runs", "Fails", "Last run", "By"].map((t, i) => h("th", { class: i === 3 || i === 4 ? "num" : "" }, t)))),
       h("tbody", null, ml.map((m) => {

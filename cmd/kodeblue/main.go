@@ -60,6 +60,7 @@ func main() {
 	status := fs.String("status", "", "filter by status")
 	allow := fs.Bool("allow", false, "also add an operator allow rule for the exact item")
 	verbose := fs.Bool("v", false, "debug logging")
+	yes := fs.Bool("yes", false, "rules approve: approve without asking")
 	hubURL := fs.String("hub", "", "enroll: hub URL (https://…)")
 	hubPin := fs.String("pin", "", "enroll: hub certificate pin (sha256//…), for a self-signed hub")
 	hubCA := fs.String("ca-file", "", "enroll: CA certificate that signed the hub's certificate")
@@ -113,6 +114,8 @@ func main() {
 		}
 	case "respond":
 		respondCmd(cfg, pos)
+	case "rules":
+		rulesCmd(cfg, pos, *yes)
 	case "status":
 		statusCmd(cfg)
 	case "incidents":
@@ -199,6 +202,13 @@ func main() {
 			fatal(err)
 		}
 		fmt.Println("maintenance until", until, "— non-critical changes are absorbed into the baseline and journaled")
+	case "vulnerabilities", "vulns":
+		p := filepath.Join(cfg.WorkspaceDir(), "VULNERABILITIES.md")
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fatal(fmt.Errorf("%s: %w (kodeblue writes it after its next sweep; run with sudo)", p, err))
+		}
+		fmt.Print(string(b))
 	case "upgrade":
 		if len(pos) != 1 {
 			fatal(errors.New("usage: sudo kodeblue upgrade <version, e.g. v0.1.7>"))
@@ -422,12 +432,20 @@ func statusCmd(cfg config.Config) {
 
 // helperEnvelope is what the unprivileged side sends to the root helper.
 type helperEnvelope struct {
-	Op      string          `json:"op"` // execute | undo | upgrade
+	Op      string          `json:"op"` // execute | undo | upgrade | rule_approve | rule_pause | rule_delete
 	Request respond.Request `json:"request"`
 	UndoID  string          `json:"undo_id"`
 	// Version and By: an upgrade of kodeblue (op upgrade) and who asked.
 	Version string `json:"version,omitempty"`
 	By      string `json:"by,omitempty"`
+	// A containment rule (rule_*): the rule (approve), its id (pause,
+	// delete), the hash of the rule the approver saw, the hub operator who
+	// approved when relayed from the hub, and a note.
+	Rule     respond.Rule `json:"rule,omitzero"`
+	RuleID   string       `json:"rule_id,omitempty"`
+	RuleHash string       `json:"rule_hash,omitempty"`
+	HubBy    string       `json:"hub_by,omitempty"`
+	Note     string       `json:"note,omitempty"`
 }
 
 func respondCmd(cfg config.Config, pos []string) {
@@ -530,6 +548,10 @@ func rootHelper(cfg config.Config) {
 		reply(rec)
 		return
 	}
+	if strings.HasPrefix(env.Op, "rule_") {
+		replyRule(ruleOp(cfg, caller, env))
+		return
+	}
 	if cfg.Response.Mode == "off" {
 		refuse("response disabled by policy")
 	}
@@ -565,8 +587,59 @@ func rootHelper(cfg config.Config) {
 		if req.Params != nil && !respond.VouchedByOperator(hubApprovals, caller, req) {
 			delete(req.Params, "incident_linked")
 		}
+		if respond.RuleOf(req.RequestedBy) != "" {
+			reply(respond.ExecuteRule(cfg.Response, req, time.Now()))
+			return
+		}
 		reply(respond.Execute(cfg.Response, req))
 	}
+}
+
+// ruleOp approves, pauses or deletes a containment rule in the helper's own
+// copy. Approving needs root or a hub approval the root-owned config accepts;
+// pausing is always allowed (it only takes power away), deleting needs the
+// same as approving.
+func ruleOp(cfg config.Config, caller respond.Caller, env helperEnvelope) (respond.Rule, error) {
+	hubApprovals := cfg.Hub.Enabled() && cfg.Hub.AcceptApprovals
+	now := time.Now()
+	switch env.Op {
+	case "rule_approve":
+		// A rule acts without asking: from the hub only where root let the
+		// hub turn on automatic actions.
+		by, err := respond.RuleApprover(hubApprovals && cfg.Response.HubMayAutomate(), caller, env.HubBy)
+		if err != nil {
+			return respond.Rule{}, err
+		}
+		if !slices.Contains(cfg.Response.AllowedActions, env.Rule.Action) {
+			return respond.Rule{}, fmt.Errorf("%s is not in this server's allowed_actions", env.Rule.Action)
+		}
+		return respond.ApproveRule(cfg.Response, env.Rule, env.RuleHash, by, now)
+	case "rule_pause":
+		by := "agent"
+		if caller.Operator() {
+			by = "root"
+		} else if env.HubBy != "" && strings.HasPrefix(env.HubBy, "hub:") && len(env.HubBy) < 200 {
+			by = env.HubBy
+		}
+		return respond.SetRuleStatus(cfg.Response, env.RuleID, respond.RulePaused, by, env.Note, now)
+	case "rule_delete":
+		by, err := respond.RuleApprover(hubApprovals, caller, env.HubBy)
+		if err != nil {
+			return respond.Rule{}, err
+		}
+		return respond.SetRuleStatus(cfg.Response, env.RuleID, respond.RuleDeleted, by, env.Note, now)
+	}
+	return respond.Rule{}, fmt.Errorf("unknown op %q", env.Op)
+}
+
+// replyRule answers a rule op: the rule as the helper now holds it, or why not.
+func replyRule(r respond.Rule, err error) {
+	out := map[string]any{"status": "done", "rule": r}
+	if err != nil {
+		out = map[string]any{"status": "refused", "result": err.Error()}
+	}
+	b, _ := json.Marshal(out)
+	fmt.Println(string(b))
 }
 
 func callHelper(cfg config.Config, env helperEnvelope) (string, error) {
@@ -739,6 +812,8 @@ func usage() {
   maintenance <duration>|off | snapshot <collector> | relearn | forget <item-id> | forget match <substring>
   sensors [on <sensor> | off <sensor> <reason>]   what each sensor can see on this server
   respond list|approve <id>|deny <id>|undo <id> | mcp | version
+  rules [list] | show <id> | approve <id> | reject <id> <why> | pause <id> <why> | delete <id>   containment rules (approve and delete need sudo)
+  vulnerabilities     every known vulnerability on this server (the register in /var/lib/kodeblue/workspace/VULNERABILITIES.md)
   upgrade <version>   install that release (from [upgrade] release_url, checked against its SHA256SUMS; as root)
   enroll --hub https://hub.example [--pin sha256//…] [--ca-file f] [--name n]   (token in $KODEBLUE_ENROLL_TOKEN)
   inference [--url https://… --model m [--provider p]]   show or set the model endpoint`)

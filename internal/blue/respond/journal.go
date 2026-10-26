@@ -116,9 +116,13 @@ func (j *journal) Close() {
 
 // open opens the journal file in the checked directory and makes sure it is
 // root's: a record root did not write is never acted on.
-func (j *journal) open(flag int) (*os.File, error) {
-	path := filepath.Join(j.dir, journalName)
-	fd, err := unix.Openat(j.dfd, journalName, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o640)
+func (j *journal) open(flag int) (*os.File, error) { return j.openFile(journalName, flag) }
+
+// openFile opens name (the journal, or the containment rules) in the checked
+// directory, refusing anything but a regular root-owned file.
+func (j *journal) openFile(name string, flag int) (*os.File, error) {
+	path := filepath.Join(j.dir, name)
+	fd, err := unix.Openat(j.dfd, name, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o640)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -130,7 +134,7 @@ func (j *journal) open(flag int) (*os.File, error) {
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || !trustedOwner(st.Uid) || st.Mode&0o022 != 0 {
 		f.Close()
-		return nil, fmt.Errorf("refusing journal %s: it must be a regular root-owned file with one link, writable only by root", path)
+		return nil, fmt.Errorf("refusing %s: it must be a regular root-owned file with one link, writable only by root", path)
 	}
 	return f, nil
 }

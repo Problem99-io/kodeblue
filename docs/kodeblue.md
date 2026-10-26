@@ -170,6 +170,24 @@ Files in another container are reached as `/proc/<pid>/root/<path>`. The helper 
 
 Findings that arrive while an incident is still being investigated join that incident, and the responder is steered onto them at once instead of a second incident opening at the next triage batch.
 
+### Containment rules
+Some attacks come back every day in the same shape: SSH password spraying from new addresses, the same exploit request against a web app from changing addresses, a dropper that keeps writing into one directory. Each time the responder asks, an operator approves, and the address is blocked. A containment rule turns that into a standing answer a person approved once.
+
+- **Agents propose, people approve.** The reviewer (from the digest's *Recurring findings*), the responder (when an incident repeats earlier ones) or the operator agent proposes a rule with `containment_rule_propose`, naming at least two existing findings or incidents that show the pattern. A proposal does nothing. The team is asked on Slack, and the rule waits on the hub (Monitors & rules) or for `sudo kodeblue rules approve <id>` on the server.
+- **What a rule can do.** It answers one finding rule (`auth.bruteforce`, `monitor.<id>`, …) by taking `block_ip` on the address the finding names, or `quarantine_file` on a file under one directory (`path_prefix`, required). A `cidr` scope narrows `block_ip`. Every rule has a per-rule hourly limit (1–60) and expires after 1–90 days; it then needs approval again.
+- **The approval is root's.** Approving and deleting go through the root helper, which keeps the only copy that counts in `rules.jsonl` beside the action journal (root-owned, readable by the kodeblue user). The approval names the hash of the rule the person saw, so a rule changed after it was shown is not approved. Because an approved rule acts without asking, a hub approval counts only where root let the hub turn on automatic actions: `hub.accept_approvals = true` and `[response] mode` or `hub_max_mode` is `contain`. Everywhere else rules are approved on the server. Agents can propose and pause rules, never approve or delete them.
+- **When it acts.** On each sweep, before triage, the daemon runs the active rules against new findings. Each action goes to the root helper as `requested_by: rule:<id>`; the helper checks its own copy of the rule (active, unexpired, same action, target within the scope, under the rule's hourly limit) and then everything an agent's request goes through: protected addresses and paths, infrastructure, `max_actions_per_hour`. Rules act in `recommend` and `contain`, not in `off`.
+- **After it acts.** The action is journaled and posted to Slack. A finding all of whose targets were contained is closed as `contained`; one a rule could not fully answer, and every critical finding, goes on to triage as usual.
+- **Stopping one.** `sudo kodeblue rules pause <id> <why>` (or Pause on the hub, or an agent that sees it misfire) stops it at once; approving it again resumes it. `rules delete` removes it for good. A blocked address stays blocked: undo it with `kodeblue respond undo <id>`.
+
+```bash
+sudo kodeblue rules                  # list: waiting, active, paused, expired
+sudo kodeblue rules show cr-ssh-bruteforce
+sudo kodeblue rules approve cr-ssh-bruteforce        # shows the rule and asks; --yes skips the question
+sudo kodeblue rules reject cr-ssh-bruteforce "our office VPN is in that range"
+sudo kodeblue rules pause cr-ssh-bruteforce "blocked a partner's scanner"
+```
+
 ### Guard rails on automated containment
 These were added after end-to-end testing showed where a small model can over-reach:
 - **`kill_process`.** The root helper only kills what looks like attacker tooling:
@@ -278,11 +296,15 @@ kodeblue maintenance 2h "deploy v42"             # planned work (reason journale
 kodeblue forget persistence|/etc/cron.d/x       # drop a wrongly learned item; next sweep re-evaluates it
 kodeblue forget match 203.0.113.                # … or every baseline item containing a substring
 kodeblue respond list / approve <id> / undo <id>
+kodeblue rules / rules approve <id>             # containment rules the agents proposed
+kodeblue vulnerabilities                        # every known vulnerability on this server
 kodeblue relearn && systemctl restart kodeblue  # after a big planned change (or Relearn on the hub's Overview)
 kodeblue sensors                                # what each sensor can see here, and which are off
 kodeblue sensors on outbound                    # turn a sensor back on (off <sensor> <reason> turns one off)
 sudo kodeblue upgrade v0.1.7                    # install that release (or Update on the hub's Overview); never automatic
 ```
+
+The vulnerability register `/var/lib/kodeblue/workspace/VULNERABILITIES.md` lists everything known to be weak on the server in one place: open vulnerabilities by severity (with CVEs, evidence, fix and whether the fix's check passes), a table by service, security updates waiting, new CVEs from the daily feed that name software here, accepted risks and what was resolved in the last 30 days. kodeblue rewrites it after each sweep when something changed; `vulnerabilities.json` beside it holds the same for tools, and `sudo kodeblue vulnerabilities` prints it.
 
 The workspace `/var/lib/kodeblue/workspace` holds everything the agents produced: `reports/` (one markdown file per incident, plus learning and review reports), `.kodeblue/skills`, and `.kodeblue/definitions`.
 

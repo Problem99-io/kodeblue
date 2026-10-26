@@ -292,6 +292,41 @@ func (s *Server) register() {
 			Fn:          s.vulnerabilityResolve,
 		},
 		{
+			Name: "containment_rule_propose",
+			Description: "Propose a containment rule for an attack that keeps coming back: the same finding again and again (SSH brute force from new addresses every day, the same exploit attempt against a web app, a dropper rewriting the same directory). " +
+				"Once a person approves it, kodeblue answers each new finding of that rule on its own, at once and without asking again: block_ip on the address the finding names, or quarantine_file on a file under a directory you scope it to. " +
+				"Nothing happens until it is approved; it expires after `days` and needs approval again. Name at least two incidents or findings that show the pattern. " +
+				"trigger_rule is the finding's rule as findings_list shows it (auth.bruteforce, monitor.<monitor id>); target_field is the evidence field holding the target (ip for SSH findings; output for a monitor, with extract, a regex whose first group is the address or path, e.g. client=([0-9a-f.:]+)). " +
+				"Keep it narrow: never propose one for a finding that could name your own team, the hub, a model endpoint or a service the server depends on. Check containment_rule_list first and update a rule by its id instead of adding another.",
+			Schema: obj(map[string]any{
+				"id":           str("cr- followed by a short slug, e.g. cr-ssh-bruteforce"),
+				"title":        str("what it does, in one line, e.g. Block addresses brute-forcing SSH"),
+				"why":          str("the recurring pattern: how often, from where, what it costs to answer each by hand"),
+				"trigger_rule": str("the finding rule it answers"),
+				"target_field": str("the evidence field naming the target"),
+				"extract":      str("optional regex with one capture group, to pull targets out of target_field"),
+				"action":       str("block_ip or quarantine_file"),
+				"scope":        map[string]any{"type": "object", "description": "optional cidr (block_ip only inside it); path_prefix (required for quarantine_file: the directory it may quarantine in)"},
+				"max_per_hour": num("at most this many actions an hour (1-60, default 10)"),
+				"days":         num("how long it stays active once approved (1-90, default 30)"),
+				"incidents":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "incident ids that show the pattern"},
+				"findings":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "finding ids of trigger_rule that show the pattern"},
+			}, "id", "title", "why", "trigger_rule", "target_field", "action"),
+			Fn: s.containmentRulePropose,
+		},
+		{
+			Name:        "containment_rule_list",
+			Description: "List the containment rules: proposed (waiting for a person), active, paused, expired, rejected; what each answers and does, who approved it, and how often it fired.",
+			Schema:      obj(map[string]any{}),
+			Fn:          s.containmentRuleList,
+		},
+		{
+			Name:        "containment_rule_pause",
+			Description: "Stop an active containment rule at once, when it acted on something it should not have or the attack it answers is over. Only a person's approval makes it act again.",
+			Schema:      obj(map[string]any{"id": str("rule id"), "reason": str("why it must stop")}, "id", "reason"),
+			Fn:          s.containmentRulePause,
+		},
+		{
 			Name:        "sensor_coverage",
 			Description: "How much of this server each kodeblue sensor can see from where kodeblue runs: ok, partial, blind or unavailable, why, what it never sees by design (limits), which processes it cannot see into (unseen, with the /proc/<pid>/root or /proc/<pid>/net path that still reaches them) and which monitors cover the gap (replace_with). Also shows sensors that were turned off.",
 			Schema:      obj(map[string]any{}),
