@@ -14,6 +14,7 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/respond"
+	"github.com/Problem99-io/kodeblue/internal/blue/upgrade"
 )
 
 const DefaultPath = "/etc/kodeblue/kodeblue.toml"
@@ -31,6 +32,7 @@ type Config struct {
 	Agents    Agents         `toml:"agents"`
 	Requests  Requests       `toml:"requests"`
 	CVEFeed   CVEFeed        `toml:"cve_feed"`
+	Upgrade   Upgrade        `toml:"upgrade"`
 	// ActionRules are the hub's per-action approval rules (see
 	// ActionRule). They come only from hub settings, never from this file.
 	ActionRules map[string]string `toml:"-"`
@@ -209,6 +211,19 @@ type Hub struct {
 	// whole baseline. Relearning absorbs what the server runs at that moment
 	// as normal, so every run is announced in Slack.
 	AcceptLearning bool `toml:"accept_learning"`
+	// AcceptUpgrades lets hub operators start an upgrade of kodeblue to the
+	// hub's version (Update in the console). The release still comes from
+	// [upgrade] release_url and must match its SHA256SUMS; downgrades are
+	// refused. Nothing upgrades without an operator asking.
+	AcceptUpgrades bool `toml:"accept_upgrades"`
+}
+
+// Upgrade is where releases come from, for an upgrade a hub operator
+// started or `kodeblue upgrade`. Only the root-owned config sets it.
+type Upgrade struct {
+	// ReleaseURL holds one directory per release tag, each with the agent
+	// tarballs and SHA256SUMS (default: the GitHub releases).
+	ReleaseURL string `toml:"release_url"`
 }
 
 func (h Hub) Enabled() bool { return strings.TrimSpace(h.URL) != "" }
@@ -244,7 +259,8 @@ func Default() Config {
 		Notify:   Notify{SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
 		Engine:   Engine{},
 		CVEFeed:  CVEFeed{Enabled: true, NVD: true, KEV: true},
-		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true},
+		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true, AcceptUpgrades: true},
+		Upgrade:  Upgrade{ReleaseURL: upgrade.DefaultReleaseURL},
 	}
 }
 

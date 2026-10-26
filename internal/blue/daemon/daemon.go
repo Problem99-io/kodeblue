@@ -57,7 +57,10 @@ type Daemon struct {
 	incSem   chan struct{}
 	// software is set while the daily software check runs (software.go);
 	// cveClient fetches its feeds (tests point it at a fake).
-	software  atomic.Bool
+	software atomic.Bool
+	// upgradeMu serializes reads and writes of the upgrade status file
+	// (upgrade.go): the main loop and the hub link both settle it.
+	upgradeMu sync.Mutex
 	cveClient cvefeed.Client
 	wg        sync.WaitGroup
 	mu        sync.Mutex
@@ -314,6 +317,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.learnWhenModelReady(ctx)
 		case <-d.restartNow:
 		}
+		d.maybeUpgrade(ctx)
 		if d.restartDue() && !d.learning.Load() {
 			d.log.Info("new hub settings saved; restarting to apply them")
 			return ErrRestart

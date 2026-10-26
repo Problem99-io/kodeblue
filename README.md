@@ -232,6 +232,7 @@ sudo kodeblue findings --status needs_ack ; sudo kodeblue ack <id> [--allow]
 sudo kodeblue maintenance 2h "deploy v42"    # planned work: absorb non-critical changes
 sudo kodeblue respond list                   # then: respond approve|deny|undo <id>
 sudo kodeblue inference                      # show the model endpoint (set it with --url, --model and --key-file -)
+sudo kodeblue upgrade v0.1.7                 # install a release (or Update on the hub); checked against its SHA256SUMS
 ```
 
 On the hub:

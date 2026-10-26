@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
+	"github.com/Problem99-io/kodeblue/internal/blue/upgrade"
 )
 
 //go:embed web
@@ -151,6 +152,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/servers/{id}/messages", s.op(s.handleSendMessage))
 	m.HandleFunc("POST /api/servers/{id}/actions/{rid}/decision", s.op(s.handleDecision))
 	m.HandleFunc("POST /api/servers/{id}/learn", s.op(s.handleLearn))
+	m.HandleFunc("POST /api/servers/{id}/upgrade", s.op(s.handleUpgrade))
 	m.HandleFunc("POST /api/servers/{id}/stop-session", s.op(s.handleStop))
 	m.HandleFunc("POST /api/servers/{id}/vulnerabilities/{rid}", s.op(s.handleVuln))
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
@@ -649,7 +651,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, c *opCtx) 
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": c.user, "csrf": c.csrf, "pin": s.opt.Pin,
-		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured})
+		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured, "version": hubproto.Version})
 }
 
 type fleetRow struct {
@@ -986,6 +988,59 @@ func (s *Server) handleLearn(w http.ResponseWriter, r *http.Request, c *opCtx) {
 		return
 	}
 	s.st.Audit(c.user.Name, "learning."+req.Mode, srv.ID, body, c.ip)
+	s.wake(srv.ID)
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleUpgrade asks a server to upgrade kodeblue to the hub's own version.
+// It is the only way an upgrade starts from the hub: one operator click per
+// server, never on its own. The hub names the version and nothing else; the
+// server downloads that release from its own release URL, checks it against
+// the release's SHA256SUMS and installs it once no learning or agent session
+// runs, if its root-owned config accepts upgrades from the hub.
+func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	srv := s.serverOr404(w, r)
+	if srv == nil {
+		return
+	}
+	to := hubproto.Version
+	if !upgrade.Valid(to) {
+		writeErr(w, http.StatusConflict, "this hub runs a development build ("+to+"), not a release: servers upgrade only to a released version")
+		return
+	}
+	if !srv.Enrolled || srv.Revoked {
+		writeErr(w, http.StatusConflict, "server is not connected to the hub")
+		return
+	}
+	var st struct {
+		Version         string                  `json:"version"`
+		AcceptsUpgrades bool                    `json:"accepts_upgrades"`
+		Upgrade         *hubproto.UpgradeStatus `json:"upgrade"`
+	}
+	_ = json.Unmarshal(srv.Status, &st)
+	if err := upgrade.Check(to, st.Version); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	switch {
+	case !st.AcceptsUpgrades:
+		writeErr(w, http.StatusConflict, "this server does not take upgrades from the hub (it runs a kodeblue older than v0.1.7, or hub.accept_upgrades is false): run on the server: sudo kodeblue upgrade "+to+", or the install command without a token")
+		return
+	case st.Upgrade != nil && st.Upgrade.To == to && (st.Upgrade.State == upgrade.Waiting || st.Upgrade.State == upgrade.Installing):
+		writeErr(w, http.StatusConflict, "the upgrade to "+to+" is already "+st.Upgrade.State)
+		return
+	}
+	if m := s.st.OpenUpgrade(srv.ID); m != nil {
+		writeErr(w, http.StatusConflict, m.Author+" already asked for an upgrade; waiting for the server")
+		return
+	}
+	body := to
+	m := &Message{ServerID: srv.ID, Author: c.user.Name, Command: hubproto.CommandUpgrade, Body: body}
+	if err := s.st.AddMessage(m); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.st.Audit(c.user.Name, "upgrade", srv.ID, st.Version+" -> "+to, c.ip)
 	s.wake(srv.ID)
 	writeJSON(w, http.StatusOK, m)
 }
