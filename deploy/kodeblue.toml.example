@@ -86,7 +86,7 @@ telegram_chat_id_file = "/etc/kodeblue/telegram.chat"
 # telegram_chat_id = "-1001234567890"  # numeric ID or @channelusername
 min_severity = "high"            # automatic incident-opened/outcome notices at or above this
                                  # (agents still post anything suspicious themselves)
-agent_messages_per_hour = 20     # cap on the agents' notify_slack tool
+agent_messages_per_hour = 20     # cap on the agents' send_alert tool
 # Containment actions (executed, awaiting approval, refused, undone) are ALWAYS posted.
 
 # [cve_feed] — once a day kodeblue downloads the CVEs published since its last pull and keeps

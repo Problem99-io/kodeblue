@@ -36,8 +36,8 @@ changes (a restart, the attacker returning).
   request as done, and acts again when the rule or file is gone. Ask again, then
   check again.
 - If it still does not hold, or the action cannot reach the attacker (other
-  network namespace, outside the policy), say so plainly in the report and on
-  Slack: what failed, what you saw, and the block a human must apply instead.
+  network namespace, outside the policy), say so plainly in the report and in
+  an alert: what failed, what you saw, and the block a human must apply instead.
 - Keep a tripwire: a `log` monitor for the blocked client in the request log,
   or a fast `file` monitor on the drop directory, so a return is seen in
   seconds.

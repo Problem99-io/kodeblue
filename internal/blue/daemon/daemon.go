@@ -866,7 +866,7 @@ func (d *Daemon) incidentBrief(in *store.Incident, findings []store.Finding) str
 	return b.String()
 }
 
-// agentPosted reports whether the responder already told Slack about this
+// agentPosted reports whether the responder already alerted the team about this
 // incident, so the automatic outcome notice would only repeat it.
 func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 	if !notify.Enabled(d.slack) {
@@ -874,7 +874,7 @@ func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 	}
 	tag := fmt.Sprintf("incident=%d ", id)
 	for _, j := range d.st.JournalSince(since, 500) {
-		if j.Action == "slack.agent" && strings.HasPrefix(j.Detail, tag) {
+		if (j.Action == "alert.agent" || j.Action == "slack.agent") && strings.HasPrefix(j.Detail, tag) {
 			return true
 		}
 	}
@@ -1605,7 +1605,7 @@ func (d *Daemon) prune() {
 
 // notify sends an automatic update to Slack (one-way incoming webhook) when
 // severity is at or above the threshold. Agents send their own narrative
-// updates with the notify_slack tool; these are the system's guaranteed ones.
+// updates with the send_alert tool; these are the system's guaranteed ones.
 func (d *Daemon) notify(kind, severity, title, body string, incident int64) {
 	if detect.Rank(severity) < detect.Rank(d.cfg.Notify.MinSeverity) && kind != "needs_ack" {
 		return

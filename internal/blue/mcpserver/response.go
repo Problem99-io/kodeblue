@@ -152,7 +152,7 @@ func (s *Server) responseList(ctx context.Context, args json.RawMessage) (string
 	return jsonOut(map[string]any{"executed": respond.Load(s.cfg.Response.StateDir), "pending": LoadRequests(s.cfg)}), nil
 }
 
-func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string, error) {
+func (s *Server) sendAlert(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
 		Severity   string `json:"severity"`
 		Title      string `json:"title"`
@@ -163,7 +163,7 @@ func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string,
 		return "", err
 	}
 	if !notify.Enabled(s.slack) {
-		return "", errors.New("Notifications are not configured for this server (no hub, Slack webhook or Telegram bot); put the update in your report instead")
+		return "", errors.New("Notifications are not configured for this server (no hub or notification destination); put the update in your report instead")
 	}
 	switch a.Severity {
 	case "info", "low", "medium", "high", "critical":
@@ -179,12 +179,13 @@ func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string,
 	}
 	sent := 0
 	for _, j := range s.st.JournalSince(time.Now().Add(-time.Hour), 500) {
-		if j.Action == "slack.agent" {
+		// Count older entries too so upgrading does not reset the hourly cap.
+		if j.Action == "alert.agent" || j.Action == "slack.agent" {
 			sent++
 		}
 	}
 	if sent >= limit {
-		return "", fmt.Errorf("Slack rate limit reached (%d agent messages/hour); include this in your report instead", limit)
+		return "", fmt.Errorf("Alert rate limit reached (%d agent messages/hour); include this in your report instead", limit)
 	}
 	fields := map[string]string{}
 	if a.IncidentID > 0 {
@@ -193,14 +194,14 @@ func (s *Server) notifySlack(ctx context.Context, args json.RawMessage) (string,
 	if err := s.slack.Send(ctx, notify.Message{Server: s.cfg.Server.Name, Kind: "agent", Severity: a.Severity, Title: a.Title, Body: a.Message, Fields: fields, IncidentID: a.IncidentID}); err != nil {
 		return "", err
 	}
-	s.st.Journal("agent", "slack.agent", fmt.Sprintf("incident=%d %s: %s", a.IncidentID, a.Severity, a.Title))
+	s.st.Journal("agent", "alert.agent", fmt.Sprintf("incident=%d %s: %s", a.IncidentID, a.Severity, a.Title))
 	if notify.ViaHub(s.slack) {
 		return "sent: the kodeblue hub delivers it to the configured notification destinations", nil
 	}
 	return "posted to the configured notification destinations", nil
 }
 
-// announceAction posts every containment action to Slack, whatever the agent
+// announceAction posts every containment action to notification destinations, whatever the agent
 // remembers to say: humans must always know when kodeblue touched the host.
 func announceAction(cfg config.Config, slack notify.Sender, req respond.Request, status, result string, undo map[string]string) {
 	sev := "high"

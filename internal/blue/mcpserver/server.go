@@ -8,7 +8,7 @@
 // server.go holds the tool catalog; the tools live in host.go (host
 // inspection), incidents.go (findings, incidents, allow rules), knowledge.go
 // (monitors, profile, skills, self-evaluation), response.go (containment and
-// Slack) and protocol.go (the JSON-RPC loop).
+// notifications) and protocol.go (the JSON-RPC loop).
 package mcpserver
 
 import (
@@ -229,8 +229,8 @@ func (s *Server) register() {
 			Fn: s.findingReport,
 		},
 		{
-			Name: "notify_slack",
-			Description: "Post a one-way update to the team's configured notification destinations (Slack and/or Telegram; no replies come back). The tool name is retained for compatibility. USE IT when you find something suspicious or confirmed, when you take or request a containment action, and when an investigation concludes something a human must do. " +
+			Name: "send_alert",
+			Description: "Post a one-way update to the team's configured notification destinations (no replies come back). USE IT when you find something suspicious or confirmed, when you take or request a containment action, and when an investigation concludes something a human must do. " +
 				"Do not use it for routine benign results. Write for a busy on-call engineer: what happened, the evidence in one line, what you did, and what they should do. Never paste secrets or long raw logs.",
 			Schema: obj(map[string]any{
 				"severity":    str("info|low|medium|high|critical"),
@@ -238,7 +238,7 @@ func (s *Server) register() {
 				"message":     str("2-6 short lines: what, evidence, action taken, what a human should do"),
 				"incident_id": num("related incident, if any"),
 			}, "severity", "title", "message"),
-			Fn: s.notifySlack,
+			Fn: s.sendAlert,
 		},
 		{
 			Name: "service_inventory",

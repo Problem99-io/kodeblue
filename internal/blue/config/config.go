@@ -177,7 +177,7 @@ type Notify struct {
 	// MinSeverity gates automatic incident notifications. Containment actions
 	// and agent-sent messages are always delivered.
 	MinSeverity string `toml:"min_severity"`
-	// AgentMessagesPerHour caps the notify_slack tool.
+	// AgentMessagesPerHour caps the send_alert tool.
 	AgentMessagesPerHour int `toml:"agent_messages_per_hour"`
 	// With a hub, notification delivery belongs to the hub: notifications are queued for it
 	// and local destinations are ignored. Direct = true also posts straight
