@@ -130,7 +130,7 @@ func TestCredentialEchoAndRedirectAreSafe(t *testing.T) {
 		calls := 0
 		client := tlsClient(t, func(w http.ResponseWriter, r *http.Request) {
 			calls++
-			http.Redirect(w, r, "https://elsewhere.invalid/token", 302)
+			http.Redirect(w, r, "https://elsewhere.invalid/token", http.StatusFound)
 		})
 		_, err := client.Lookup(context.Background(), Query{IP: "192.0.2.1"}, []string{testZone})
 		if err == nil || calls != 1 {
