@@ -316,3 +316,17 @@ The workspace `/var/lib/kodeblue/workspace` holds everything the agents produced
 - `go test ./internal/hub/` covers the hub's security properties: one-time enrollment (including concurrent reuse), hashed keys, per-server isolation of records and message replies, revocation, CSRF, sign-in throttling, gated release downloads and the console's CSP.
 - `deploy/e2e/Dockerfile.bare` is a server with no kodeblue on it, for testing the real path: the hub's install command, pinned TLS, enrollment, upgrades and the hub link.
 - `deploy/e2e/` contains a disposable Ubuntu "server" (sshd, cron, sudo, rsyslog, a small web app) that runs kodeblue as its own user with the same capabilities as the systemd unit. It is used for end-to-end runs; set your model endpoint in `deploy/e2e/kodeblue.toml` first.
+
+## Cloudflare security context
+
+Standalone servers may configure a root-owned `[cloudflare]` section with
+`api_token_file = "/etc/kodeblue/cloudflare.token"` and an explicit `zone_ids`
+array. Keep the token file root:kodeblue 0640; its resolved path must stay under
+`/etc/kodeblue/`, which host inspection tools cannot read. An `api_token` in the
+root-owned TOML is also supported. Never put the token in agent instructions.
+
+When enrolled, configure credentials on the hub in the server's Settings tab;
+local Cloudflare credentials are not used. The `cloudflare_context` tool lists
+available zones when called without `ip`, and looks up recent sampled evidence
+for one IP when called with `ip`, `zone_id` (optional for one configured zone),
+and `hours` (1–24). See [hub configuration and limitations](hub.md#cloudflare-security-context).

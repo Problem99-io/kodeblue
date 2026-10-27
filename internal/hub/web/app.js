@@ -3681,6 +3681,7 @@ async function vServerSettings(srv, body) {
         h("div", { class: "note" }, "Override single values for this server. Empty fields inherit the fleet's value, or the server's own from its kodeblue.toml; “now” is what the server reports it runs."),
         tun.el), null, "purple"),
       panel("Protected users, IPs and services", h("div", { class: "bd stack" }, prot.el), null, "red"),
+      cloudflarePanel(srv),
       h("div", { class: "savebar" }, save, reset, msg.el)));
     body.querySelector(".narrow").addEventListener("input", () => msg.say("Unsaved changes"));
     body.querySelector(".narrow").addEventListener("change", () => { msg.say("Unsaved changes"); placeholders(); });
@@ -3696,6 +3697,47 @@ async function vServerSettings(srv, body) {
 }
 
 // ---------- audit ----------
+function cloudflarePanel(srv) {
+  const token = h("input", {type:"password", class:"full", autocomplete:"off", spellcheck:"false", "aria-label":"Cloudflare API token", placeholder:"Read-only analytics API token"});
+  const zones = h("textarea", {class:"ta", rows:3, spellcheck:"false", "aria-label":"Cloudflare zone IDs", placeholder:"One zone ID per line"});
+  const state = h("span", {class:"badge"}, "Loading…");
+  const message = statusLine();
+  const save = h("button", {class:"btn primary", type:"button"}, "Save Cloudflare");
+  const clear = h("button", {class:"btn danger", type:"button"}, "Clear Cloudflare");
+  const path = `/api/servers/${enc(srv.id)}/cloudflare`;
+  const paint = (s) => {
+    state.textContent = s.configured ? "configured" : "not configured";
+    state.className = "badge" + (s.configured ? " b-ok" : "");
+    zones.value = (s.zone_ids || []).join("\n");
+    token.value = "";
+    token.placeholder = s.configured ? "Leave blank to keep the stored token" : "Read-only analytics API token";
+  };
+  save.addEventListener("click", () => busyBtn(save, message, async () => {
+    const data = {zone_ids:zones.value.split(/[\s,]+/).filter(Boolean)};
+    if (token.value.trim()) data.api_token = token.value.trim();
+    paint(await api("PUT", path, data));
+    message.say("Cloudflare settings saved.", "ok");
+  }));
+  clear.addEventListener("click", () => busyBtn(clear, message, async () => {
+    if (!(await ask("Clear Cloudflare", "Remove this server's stored token and zone access?", "Clear", true))) return;
+    paint(await api("PUT", path, {api_token:"", zone_ids:[]}));
+    message.say("Cloudflare access cleared.", "ok");
+  }));
+  api("GET", path).then(paint).catch((e) => {state.textContent="unavailable";message.say(e.message,"bad");});
+  const view = panel("Cloudflare security context", h("div", {class:"bd stack"},
+    h("div", {class:"note"}, "Read-only evidence for this server's agents: security events and bot signals where your Cloudflare plan permits. The token stays on the hub. Agents can query only the zone IDs below; no Cloudflare rules are changed."),
+    h("div", null, state),
+    h("div", {class:"stack"}, h("label", null, "API token"), token),
+    h("div", {class:"stack"}, h("label", null, "Zone IDs (up to 10)"), zones),
+    h("div", {class:"note"}, "Use an Analytics Read token limited to these zones. Missing bot scores remain unknown. Blank token keeps the saved secret; Clear removes it."),
+    h("div", {class:"btns"}, save, clear), message.el), null, "cyan");
+  for (const event of ["input", "change"]) view.addEventListener(event, (e) => {
+    e.stopPropagation();
+    message.say("Unsaved Cloudflare settings");
+  });
+  return view;
+}
+
 async function vAudit(main) {
   let list = [];
   try { list = await api("GET", "/api/audit"); } catch (e) { if (e.status === 401) return; main.appendChild(h("div", { class: "empty" }, e.message)); return; }

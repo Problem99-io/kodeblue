@@ -115,3 +115,9 @@ agent_messages_per_hour = 20     # cap on the agents' send_alert tool
 # [upgrade] — where `kodeblue upgrade` and Update in the hub get releases from.
 # The release must match that release's SHA256SUMS; downgrades are refused.
 # release_url = "https://github.com/Problem99-io/kodeblue/releases/download"   # holds one <version>/ directory per release
+
+# Standalone Cloudflare context. With a hub, configure this server's token and
+# zones in its Settings tab instead; the token remains on the hub.
+[cloudflare]
+api_token_file = ""             # e.g. /etc/kodeblue/cloudflare.token (root:kodeblue 0640)
+zone_ids = []                   # explicit zone IDs; at most 10, 32 hex characters each

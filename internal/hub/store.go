@@ -289,10 +289,18 @@ func (s *Store) Revoke(id string) error {
 }
 
 func (s *Store) DeleteServer(id string) error {
-	if _, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	return s.SetSetting(settingServerPrefix+id, "")
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM settings WHERE k IN (?,?,?)`, settingServerPrefix+id, "cloudflare.token."+id, "cloudflare.zones."+id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RenameServer(id, name string) error {

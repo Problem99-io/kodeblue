@@ -20,19 +20,20 @@ import (
 const DefaultPath = "/etc/kodeblue/kodeblue.toml"
 
 type Config struct {
-	Server    Server         `toml:"server"`
-	Inference Inference      `toml:"inference"`
-	Schedule  Schedule       `toml:"schedule"`
-	Detect    Detect         `toml:"detect"`
-	Budget    Budget         `toml:"budget"`
-	Response  respond.Policy `toml:"response"`
-	Notify    Notify         `toml:"notify"`
-	Engine    Engine         `toml:"engine"`
-	Hub       Hub            `toml:"hub"`
-	Agents    Agents         `toml:"agents"`
-	Requests  Requests       `toml:"requests"`
-	CVEFeed   CVEFeed        `toml:"cve_feed"`
-	Upgrade   Upgrade        `toml:"upgrade"`
+	Server     Server         `toml:"server"`
+	Inference  Inference      `toml:"inference"`
+	Schedule   Schedule       `toml:"schedule"`
+	Detect     Detect         `toml:"detect"`
+	Budget     Budget         `toml:"budget"`
+	Response   respond.Policy `toml:"response"`
+	Notify     Notify         `toml:"notify"`
+	Engine     Engine         `toml:"engine"`
+	Hub        Hub            `toml:"hub"`
+	Agents     Agents         `toml:"agents"`
+	Requests   Requests       `toml:"requests"`
+	CVEFeed    CVEFeed        `toml:"cve_feed"`
+	Upgrade    Upgrade        `toml:"upgrade"`
+	Cloudflare Cloudflare     `toml:"cloudflare"`
 	// ActionRules are the hub's per-action approval rules (see
 	// ActionRule). They come only from hub settings, never from this file.
 	ActionRules map[string]string `toml:"-"`
