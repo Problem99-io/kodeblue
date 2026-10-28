@@ -373,33 +373,128 @@ func (k *Engine) StartSession(ctx context.Context, agent, provider, model, messa
 	if err := k.do(ctx, http.MethodPost, "/v1/sessions", body, &sess); err != nil {
 		return nil, err
 	}
-	var run struct {
-		RunID string `json:"run_id"`
-		Error string `json:"error"`
-	}
-	if err := k.do(ctx, http.MethodPost, "/v1/sessions/"+sess.ID+"/messages", map[string]any{"content": message}, &run); err != nil {
+	runID, err := k.send(ctx, sess.ID, message)
+	if err != nil {
 		return nil, err
 	}
-	if run.RunID == "" {
-		return nil, fmt.Errorf("no run started: %s", run.Error)
-	}
-	return &Session{ID: sess.ID, RunID: run.RunID}, nil
+	return &Session{ID: sess.ID, RunID: runID}, nil
 }
 
 // FollowUp sends another user message into an existing session and returns
 // the new run (the engine keeps the whole conversation).
 func (k *Engine) FollowUp(ctx context.Context, s *Session, message string) (*Session, error) {
-	var run struct {
-		RunID string `json:"run_id"`
-		Error string `json:"error"`
-	}
-	if err := k.do(ctx, http.MethodPost, "/v1/sessions/"+s.ID+"/messages", map[string]any{"content": message}, &run); err != nil {
+	runID, err := k.send(ctx, s.ID, message)
+	if err != nil {
 		return nil, err
 	}
-	if run.RunID == "" {
-		return nil, fmt.Errorf("no run started: %s", run.Error)
+	return &Session{ID: s.ID, RunID: runID}, nil
+}
+
+// How long a message the engine accepted but could not dispatch at once may
+// wait for its run while the session runs nothing else (the engine retries a
+// missing provider for a minute before it pauses delivery), how long it may
+// wait behind another run, and how often it is checked. Variables for tests.
+var (
+	dispatchWait     = 2 * time.Minute
+	dispatchWaitBusy = 30 * time.Minute
+	dispatchPoll     = 2 * time.Second
+)
+
+// send delivers message to the session and returns the run that carries it.
+// The engine starts a run at once when it can. Otherwise it keeps the message
+// in the session inbox ("queued", no run_id) and dispatches it later: when
+// the run in progress ends, or when a failed launch (provider still
+// registering, database busy) succeeds on retry. send waits for that run
+// rather than calling the message lost, since the engine would run it anyway.
+// If delivery pauses or never comes, the message is taken back out of the
+// inbox so it cannot run after the caller was told it failed.
+func (k *Engine) send(ctx context.Context, sessionID, message string) (string, error) {
+	var run struct {
+		RunID  string `json:"run_id"`
+		Status string `json:"status"`
+		Error  string `json:"error"`
+		Item   *struct {
+			ID string `json:"id"`
+		} `json:"queue_item"`
 	}
-	return &Session{ID: s.ID, RunID: run.RunID}, nil
+	// resume: a new message lifts a pause left by an earlier failed delivery.
+	if err := k.do(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/messages", map[string]any{"content": message, "resume": true}, &run); err != nil {
+		return "", err
+	}
+	if run.RunID != "" {
+		return run.RunID, nil
+	}
+	itemID := ""
+	if run.Item != nil {
+		itemID = run.Item.ID
+	}
+	withdraw := func(reason string) (string, error) {
+		if itemID != "" {
+			_ = k.do(context.Background(), http.MethodDelete, "/v1/sessions/"+sessionID+"/queue/"+itemID, nil, nil)
+		}
+		return "", fmt.Errorf("no run started: %s", reason)
+	}
+	if run.Error != "" {
+		return withdraw(run.Error)
+	}
+	if itemID == "" {
+		return withdraw(fmt.Sprintf("the engine accepted the message without a run or queue entry (status %q)", run.Status))
+	}
+	idleSince, began := time.Now(), time.Now()
+	for {
+		var q struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+			Paused        bool   `json:"paused"`
+			FailureReason string `json:"failure_reason"`
+		}
+		var st struct {
+			IsRunning   bool   `json:"is_running"`
+			ActiveRunID string `json:"active_run_id"`
+			LatestRun   *struct {
+				ID string `json:"id"`
+			} `json:"latest_run"`
+		}
+		if err := k.do(ctx, http.MethodGet, "/v1/sessions/"+sessionID+"/queue", nil, &q); err == nil {
+			waiting := false
+			for _, it := range q.Items {
+				waiting = waiting || it.ID == itemID
+			}
+			switch {
+			case !waiting:
+				// Dispatched: the run that took it is the active one, or the
+				// latest if it already ended.
+				if err := k.do(ctx, http.MethodGet, "/v1/sessions/"+sessionID+"/status", nil, &st); err == nil {
+					if st.ActiveRunID != "" {
+						return st.ActiveRunID, nil
+					}
+					if st.LatestRun != nil && st.LatestRun.ID != "" {
+						return st.LatestRun.ID, nil
+					}
+				}
+			case q.Paused && q.FailureReason != "":
+				return withdraw(q.FailureReason)
+			case q.Paused:
+				return withdraw("delivery to this session is paused")
+			}
+		}
+		if err := k.do(ctx, http.MethodGet, "/v1/sessions/"+sessionID+"/status", nil, &st); err == nil && st.IsRunning {
+			idleSince = time.Now()
+		}
+		switch {
+		case ctx.Err() != nil:
+			return withdraw(ctx.Err().Error())
+		case time.Since(idleSince) > dispatchWait:
+			return withdraw(fmt.Sprintf("the engine accepted the message but did not start a run within %s", dispatchWait))
+		case time.Since(began) > dispatchWaitBusy:
+			return withdraw(fmt.Sprintf("the message waited %s behind the session's running turn", dispatchWaitBusy))
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(dispatchPoll):
+		}
+	}
 }
 
 // Steer hands a running session new input: the engine stops the current run
