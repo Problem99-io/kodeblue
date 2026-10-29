@@ -284,8 +284,18 @@ func (s *Store) ValidEnrollToken(token string) bool {
 }
 
 func (s *Store) Revoke(id string) error {
-	_, err := s.db.Exec(`UPDATE servers SET revoked=1, key_hash='', enroll_hash='', enroll_expires=0 WHERE id=?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE servers SET revoked=1, key_hash='', enroll_hash='', enroll_expires=0 WHERE id=?`, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM settings WHERE k IN (?,?)`, "cloudflare.token."+id, "cloudflare.zones."+id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteServer(id string) error {

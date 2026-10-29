@@ -71,6 +71,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS cloudflare_budget (id INTEGER PRIMARY KEY CHECK(id=1), bucket INTEGER NOT NULL, n INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS baseline (
   id TEXT PRIMARY KEY, collector TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL DEFAULT '',
@@ -977,4 +978,17 @@ func orDefault(s, d string) string {
 		return d
 	}
 	return s
+}
+
+// ReserveCloudflareLookup counts only validated requests, independently of the
+// security journal. A single upsert is atomic across concurrent MCP processes.
+func (s *Store) ReserveCloudflareLookup(now time.Time, limit int) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`INSERT INTO cloudflare_budget(id,bucket,n) VALUES(1,?,1)
+ ON CONFLICT(id) DO UPDATE SET bucket=excluded.bucket,n=CASE WHEN cloudflare_budget.bucket=excluded.bucket THEN n+1 ELSE 1 END
+ WHERE cloudflare_budget.bucket!=excluded.bucket OR n<? RETURNING n`, now.Unix()/60, limit).Scan(&n)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }

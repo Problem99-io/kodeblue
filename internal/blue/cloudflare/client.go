@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"time"
+	"unicode"
 )
 
 const Endpoint = "https://api.cloudflare.com/client/v4/graphql"
@@ -48,16 +49,17 @@ type BotGroup struct {
 }
 
 type Result struct {
-	Configured bool       `json:"configured"`
-	Zones      []string   `json:"zone_ids"`
-	IP         string     `json:"ip,omitempty"`
-	ZoneID     string     `json:"zone_id,omitempty"`
-	Since      string     `json:"since,omitempty"`
-	Until      string     `json:"until,omitempty"`
-	Events     []Event    `json:"security_events,omitempty"`
-	Bots       []BotGroup `json:"bot_traffic,omitempty"`
-	Truncated  bool       `json:"possibly_truncated"`
-	Notes      []string   `json:"notes"`
+	RetryableUpstream bool       `json:"-"`
+	Configured        bool       `json:"configured"`
+	Zones             []string   `json:"zone_ids"`
+	IP                string     `json:"ip,omitempty"`
+	ZoneID            string     `json:"zone_id,omitempty"`
+	Since             string     `json:"since,omitempty"`
+	Until             string     `json:"until,omitempty"`
+	Events            []Event    `json:"security_events,omitempty"`
+	Bots              []BotGroup `json:"bot_traffic,omitempty"`
+	Truncated         bool       `json:"possibly_truncated"`
+	Notes             []string   `json:"notes"`
 }
 
 func ValidToken(token string) bool { return tokenPattern.MatchString(token) }
@@ -160,12 +162,14 @@ func (c *Client) Lookup(ctx context.Context, q Query, zones []string) (*Result, 
 		if err != nil || ip.Unmap().String() != q.IP {
 			return nil, errors.New("Cloudflare returned an event for a different IP")
 		}
-		e.Path, e.UserAgent = bound(e.Path, 512), bound(e.UserAgent, 512)
+		e.Path, e.UserAgent = bound(e.Path, 256), bound(e.UserAgent, 256)
 		e.Action, e.Source, e.RuleID = bound(e.Action, 64), bound(e.Source, 64), bound(e.RuleID, 128)
 		e.Country, e.ClientASN, e.Time = bound(e.Country, 64), bound(e.ClientASN, 32), bound(e.Time, 64)
 	}
 	data, err = c.query(ctx, botQuery, vars)
 	if err != nil {
+		var upstream *HTTPError
+		r.RetryableUpstream = errors.As(err, &upstream) && upstream.Retryable()
 		r.Notes = append(r.Notes, "Bot-score analytics unavailable: check your plan, analytics permissions and dataset availability. No bot classification inferred.")
 	} else {
 		r.Bots = data.Bots
@@ -188,7 +192,12 @@ func (c *Client) Lookup(ctx context.Context, q Query, zones []string) (*Result, 
 }
 
 func bound(s string, n int) string {
-	r := []rune(s)
+	r := []rune{}
+	for _, c := range s {
+		if !unicode.Is(unicode.Cf, c) && !unicode.IsControl(c) {
+			r = append(r, c)
+		}
+	}
 	if len(r) > n {
 		r = r[:n]
 	}
@@ -215,7 +224,7 @@ func (c *Client) query(ctx context.Context, query string, variables map[string]a
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return empty, fmt.Errorf("Cloudflare returned HTTP %d; check analytics access, plan limits or retry later", resp.StatusCode)
+		return empty, &HTTPError{StatusCode: resp.StatusCode}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
 	if err != nil || len(raw) > 2<<20 {
@@ -246,3 +255,11 @@ func (c *Client) query(ctx context.Context, query string, variables map[string]a
 	}
 	return result.Data.Viewer.Zones[0], nil
 }
+
+// HTTPError exposes only the status; response bodies can contain credentials.
+type HTTPError struct{ StatusCode int }
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("Cloudflare returned HTTP %d; check analytics access, plan limits or retry later", e.StatusCode)
+}
+func (e *HTTPError) Retryable() bool { return e.StatusCode == 429 || e.StatusCode >= 500 }

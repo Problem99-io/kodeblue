@@ -3554,6 +3554,7 @@ function protectForm(cur, fleetCur) {
 
 // ----- per-server settings tab
 async function vServerSettings(srv, body) {
+ const cloudflare=h("div",{class:"narrow"},cloudflarePanel(srv));
   let paintApplied = null;
   const draw = async (flash) => {
     let d;
@@ -3681,8 +3682,8 @@ async function vServerSettings(srv, body) {
         h("div", { class: "note" }, "Override single values for this server. Empty fields inherit the fleet's value, or the server's own from its kodeblue.toml; “now” is what the server reports it runs."),
         tun.el), null, "purple"),
       panel("Protected users, IPs and services", h("div", { class: "bd stack" }, prot.el), null, "red"),
-      cloudflarePanel(srv),
       h("div", { class: "savebar" }, save, reset, msg.el)));
+    body.append(cloudflare);
     body.querySelector(".narrow").addEventListener("input", () => msg.say("Unsaved changes"));
     body.querySelector(".narrow").addEventListener("change", () => { msg.say("Unsaved changes"); placeholders(); });
     paintApplied(d);

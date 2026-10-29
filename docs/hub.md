@@ -265,7 +265,7 @@ keeps the existing secret; **Clear Cloudflare** removes it and its zone access.
 The hub never returns the token to browsers or agents. Each enrolled server
 queries through its existing authenticated outbound hub connection and can only
 access its own configured zones. Revoking or deleting a server removes access;
-deleting it also removes its Cloudflare credentials.
+revoking or deleting it also removes its Cloudflare credentials.
 
 The agent tool `cloudflare_context` accepts `ip`, optional `zone_id`, and `hours`
 (1–24, default 1). Call without `ip` to discover configured zones. When exactly
@@ -295,3 +295,13 @@ entire ASN from a bot score alone. The integration never changes Cloudflare rule
 Only the queried IP, zone and time range leave the hub; no incident summaries or
 host logs are uploaded. Request paths, user agents and provider fields remain
 untrusted model input.
+
+Cloudflare lookup limits are separate: 5 validated lookups/minute per server and
+25/minute across the hub. Each lookup makes at most two provider calls, leaving
+headroom under 300 calls per five minutes. HTTP 429/5xx failures refund hub
+reservations. Local accounting uses a dedicated counter, not the security journal.
+User agent and path fields are limited to 256 characters and stripped of invisible
+format/control characters. The learner does not receive this investigation tool.
+Standalone token files must be root-owned regular files under `/etc/kodeblue/`,
+with mode 0600 or 0640. Other kodeblue credentials cannot be reused. Inline tokens
+are accepted only from configuration files satisfying the same protection rules.

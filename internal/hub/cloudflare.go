@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -91,15 +92,34 @@ func (s *Server) handleCloudflareLookup(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if q.IP != "" && s.cfLimit.Reserve("all", id) == nil {
-		writeErr(w, 429, "Cloudflare lookup budget reached; wait a minute")
-		return
+	var local, global *reservation
+	if q.IP != "" {
+		local = s.cfLimit.Reserve(id)
+		if local != nil {
+			global = s.cfGlobal.Reserve("all")
+		}
+		if local == nil || global == nil {
+			if local != nil {
+				local.Refund()
+			}
+			writeErr(w, 429, "Cloudflare lookup budget reached; wait a minute")
+			return
+		}
 	}
 	client := cloudflare.Client{Token: s.st.Setting("cloudflare.token." + id), HTTP: s.models.client}
 	result, err := client.Lookup(r.Context(), q, settings.Zones)
 	if err != nil {
+		var upstream *cloudflare.HTTPError
+		if errors.As(err, &upstream) && upstream.Retryable() && local != nil {
+			local.Refund()
+			global.Refund()
+		}
 		writeErr(w, 502, err.Error())
 		return
+	}
+	if result.RetryableUpstream && local != nil {
+		local.Refund()
+		global.Refund()
 	}
 	writeJSON(w, 200, result)
 }

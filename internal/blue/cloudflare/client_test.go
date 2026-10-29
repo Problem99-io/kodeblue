@@ -138,3 +138,13 @@ func TestCredentialEchoAndRedirectAreSafe(t *testing.T) {
 		}
 	})
 }
+
+func TestCloudflareBoundsStripInvisibleCharacters(t *testing.T) {
+	input := "/etc/" + string(rune(0x200b)) + "passwd" + string(rune(0x202e)) + string(rune(0xe0001)) + "\n"
+	if got := bound(input, 256); got != "/etc/passwd" {
+		t.Fatalf("invisible data survived: %q", got)
+	}
+	if len([]rune(bound(strings.Repeat("a", 300), 256))) != 256 {
+		t.Fatal("field cap missing")
+	}
+}
