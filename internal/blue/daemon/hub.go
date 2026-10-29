@@ -189,8 +189,8 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 var operatorWaitTimeout = 20 * time.Minute
 
 // BeginOperatorMessage admits input in arrival order, then returns the wait for
-// its answer. A live session receives steering input without another waiter or
-// cost booking; its existing owner follows the session through the continuation.
+// its answer. Only sessions with an operator waiter receive steering; other
+// active waiters keep their own session and a separate operator chat is started.
 func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMessage) func() hubproto.MessageReply {
 	d.operatorMu.Lock()
 	defer d.operatorMu.Unlock()

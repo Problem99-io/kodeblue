@@ -103,7 +103,31 @@ func TestOperatorInputDoesNotSteerForeignWaiter(t *testing.T) {
 	defer done()
 	r := d.HandleOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Author: "alice", Body: "keep the process alive", IncidentID: in.ID})
 	if r.Status != "done" || r.SessionID == "responder" || len(f.steered) != 0 || f.n.Load() != 1 || f.follows != 0 || f.waits.Load() != 1 {
-		t.Fatalf("did not steer responder: %+v engine=%+v", r, f)
+		t.Fatalf("steered a foreign responder: %+v engine=%+v", r, f)
+	}
+	if rows := st.Incidents(`WHERE kind='operator'`); len(rows) != 1 {
+		t.Fatal("did not create a tracked operator session")
+	}
+}
+
+func TestOperatorInputAtResponderCompletionBoundary(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
+	f.alive.Store(true)
+	d.setEngine(f)
+	in := &store.Incident{Title: "intrusion", Kind: "incident", Severity: "high", Status: "needs_human", SessionID: "responder"}
+	if err := st.CreateIncident(in); err != nil {
+		t.Fatal(err)
+	}
+	// CreateIncident starts an incident in its default state.
+	in.Status = "needs_human"
+	in.SessionID = "responder"
+	_ = st.UpdateIncident(in)
+	done := d.track("responder", in.ID)
+	defer done()
+	r := d.HandleOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Author: "alice", Body: "keep the process alive", IncidentID: in.ID})
+	if r.Status != "done" || r.SessionID == "responder" || len(f.steered) != 0 || f.n.Load() != 1 || f.follows != 0 || f.waits.Load() != 1 {
+		t.Fatalf("resumed an idle responder owned by a finishing waiter: %+v engine=%+v", r, f)
 	}
 	if rows := st.Incidents(`WHERE kind='operator'`); len(rows) != 1 {
 		t.Fatal("did not create a tracked operator session")
