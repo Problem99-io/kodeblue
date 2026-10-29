@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -43,5 +44,17 @@ func TestCloudflareFileProtection(t *testing.T) {
 		if protectedCloudflareInfo(cfInfo{tc.mode, tc.uid}) != tc.ok {
 			t.Errorf("mode=%v uid=%d", tc.mode, tc.uid)
 		}
+	}
+}
+
+func TestLoadRefusesInspectableInlineCloudflareToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kodeblue.toml")
+	if err := os.WriteFile(path, []byte(`[cloudflare]
+api_token = "synthetic-cloudflare-secret-token"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("agents could start with an inspectable inline token")
 	}
 }

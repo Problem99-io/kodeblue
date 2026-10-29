@@ -281,6 +281,12 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
+	// Reject inspectable inline credentials before starting any agent or host tool.
+	if strings.TrimSpace(c.Cloudflare.APIToken) != "" {
+		if _, err := c.Cloudflare.Token(path); err != nil {
+			return c, err
+		}
+	}
 	if c.Server.Name == "" {
 		c.Server.Name, _ = os.Hostname()
 	}
