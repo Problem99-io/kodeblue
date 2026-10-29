@@ -99,6 +99,8 @@ incidents or verified attribution.
 
 ![War room map with source locations and activity](assets/war-room-map.jpg)
 
+![First-open enrichment consent, disabled by default](assets/war-room-consent.jpg)
+
 ![Selected location with source intelligence and linked incident context](assets/war-room-details.jpg)
 
 ### What operators can and cannot do from the hub

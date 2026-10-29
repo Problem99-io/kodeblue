@@ -46,6 +46,7 @@ function openWarRoom() {
   WAR.config = h("div", { class: "war-config", hidden: true });
   WAR.notice = h("div", { class: "war-notice", hidden: true, role: "status" });
   const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) paintWarSettings(); } } }, ic("sliders", 13), "Enrichment");
+  WAR.settingsButton = settings;
   WAR.shell.append(
     h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Source activity · fleet intelligence"))), h("div", { class: "sp" }), WAR.status, settings, close),
     h("div", { class: "war-filters" }, range, servers, severity, h("div", { class: "sp" }), query), WAR.config, WAR.notice, WAR.stats,
@@ -93,7 +94,7 @@ async function refreshWarRoom() {
     const data = await api("GET", `/api/war-room?hours=${enc(WAR.hours)}&server_id=${enc(WAR.server)}`);
     if (!WAR.open || request !== WAR.request) return;
     WAR.data = data;
- if (!data.settings.enabled && !WAR.consentShown) { WAR.consentShown=true; WAR.config.hidden=false; paintWarSettings(); }
+ if (!data.settings.enabled && !WAR.consentShown) { WAR.consentShown=true; WAR.config.hidden=false; WAR.settingsButton.setAttribute("aria-expanded","true"); paintWarSettings(); }
     WAR.status.textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     paintWarRoom();
     if (!WAR.land) {
