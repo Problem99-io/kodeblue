@@ -186,6 +186,8 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 	return d.BeginOperatorMessage(ctx, m)()
 }
 
+var operatorWaitTimeout = 20 * time.Minute
+
 // BeginOperatorMessage admits input in arrival order, then returns the wait for
 // its answer. A live session receives steering input without another waiter or
 // cost booking; its existing owner follows the session through the continuation.
@@ -214,7 +216,7 @@ func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMe
 		sid = d.st.Get(convKey)
 	}
 	if sid == "" {
-		if in := d.st.GetIncident(m.IncidentID); in != nil && in.SessionID != "" {
+		if in := d.st.GetIncident(m.IncidentID); in != nil && in.Kind == "incident" && in.Status != "investigating" && in.SessionID != "" {
 			sid = in.SessionID
 			rec = in
 		}
@@ -225,18 +227,29 @@ func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMe
 				rec = &inc[0]
 			}
 		}
-		if _, live := d.LiveSessions()[sid]; live {
+		if _, owned := d.operatorInputs[sid]; owned {
 			if err := kc.Steer(ctx, &runtime.Session{ID: sid}, body); err != nil {
 				return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not steer the agent: " + err.Error(), SessionID: sid})
 			}
-			if _, owned := d.operatorInputs[sid]; owned {
-				d.operatorInputs[sid]++
-			}
+			d.operatorInputs[sid]++
 			if m.ConversationID != "" {
 				_ = d.st.Set(convKey, sid)
 			}
 			return immediate(hubproto.MessageReply{Status: "done", Text: "Added to the running agent's context; its current action will finish before it continues with your message.", SessionID: sid})
 		}
+		if _, live := d.LiveSessions()[sid]; live || (rec != nil && rec.Kind != "operator" && rec.Kind != "incident") {
+			sid, rec = "", nil
+		}
+	}
+	if d.operatorSlots == nil {
+		d.operatorSlots = make(chan struct{}, 1)
+	}
+	select {
+	case d.operatorSlots <- struct{}{}:
+	default:
+		return immediate(hubproto.MessageReply{Status: "refused", Text: "Another operator conversation is running; wait for it to finish before starting another."})
+	}
+	if sid != "" {
 		if rec != nil && rec.Kind == "incident" {
 			body += fmt.Sprintf("\n\n(This concerns incident #%d, which you investigated in this session. If the operator's information changes your verdict, call mcp__kodeblue__incident_resolve again.)", rec.ID)
 		}
@@ -268,6 +281,7 @@ func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMe
 		}
 	}
 	if err != nil {
+		<-d.operatorSlots
 		return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not start an agent session: " + err.Error()})
 	}
 	if m.ConversationID != "" {
@@ -288,7 +302,8 @@ func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMe
 	started := time.Now().Add(-time.Second)
 	return func() hubproto.MessageReply {
 		defer release()
-		deadline := time.Now().Add(20 * time.Minute)
+		defer func() { <-d.operatorSlots }()
+		deadline := time.Now().Add(operatorWaitTimeout)
 		var out runtime.Outcome
 		for {
 			d.operatorMu.Lock()
@@ -303,9 +318,17 @@ func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMe
 		}
 		// Close tracking and book the final continuation before a later turn
 		// can acquire ownership of this session.
-		defer d.operatorMu.Unlock()
 		delete(d.operatorInputs, sess.ID)
 		done()
+		d.operatorMu.Unlock()
+		if ectx.Err() != nil || !time.Now().Before(deadline) {
+			abortCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = kc.Abort(abortCtx, sess.ID)
+			cancel()
+			if ectx.Err() == nil {
+				out.Status = "timeout"
+			}
+		}
 		if ectx.Err() != nil && ctx.Err() == nil {
 			out.Status = "failed"
 			out.Text = "The agent engine stopped while answering; it is being restarted. Ask again in a minute."

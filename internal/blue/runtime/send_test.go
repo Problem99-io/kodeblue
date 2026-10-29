@@ -111,3 +111,14 @@ func TestFollowUpTimesOutWithReason(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestSteerRejectsPausedDelivery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"paused","error":"provider unavailable"}`))
+	}))
+	defer srv.Close()
+	k := &Engine{baseURL: srv.URL, http: srv.Client()}
+	if err := k.Steer(context.Background(), &Session{ID: "one"}, "hello"); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+		t.Fatalf("paused steer accepted: %v", err)
+	}
+}

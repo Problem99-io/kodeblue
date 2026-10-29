@@ -474,7 +474,15 @@ func (l *Link) messageLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case m := <-queue:
-				l.answer(ctx, m)
+				if _, ok := l.agent.(operatorMessageStarter); ok && m.Decision == "" && m.Command == "" {
+					wait := l.beginChat(ctx, m)
+					go func(m hubproto.OperatorMessage, wait func() hubproto.MessageReply) {
+						l.sendReply(ctx, m.ID, wait())
+						l.Nudge()
+					}(m, wait)
+				} else {
+					l.answer(ctx, m)
+				}
 			}
 		}
 	}()
@@ -497,22 +505,14 @@ func (l *Link) messageLoop(ctx context.Context) {
 		}
 		backoff = 5 * time.Second
 		for _, m := range resp.Messages {
-			if m.Decision == "" && m.Command == "" {
-				if _, ok := l.agent.(operatorMessageStarter); ok {
-					wait := l.beginChat(ctx, m)
-					go func(m hubproto.OperatorMessage, wait func() hubproto.MessageReply) {
-						l.sendReply(ctx, m.ID, wait())
-						l.Nudge()
-					}(m, wait)
-					continue
-				}
-			}
 			if m.Decision != "" || m.Command == hubproto.CommandStop || m.Command == hubproto.CommandUpgrade || slices.Contains(hubproto.RuleCommands, m.Command) {
 				go l.answer(ctx, m)
 				continue
 			}
 			select {
 			case queue <- m:
+			default:
+				go l.sendReply(ctx, m.ID, hubproto.MessageReply{Status: "refused", Text: "Operator admission queue is full; try again later."})
 			case <-ctx.Done():
 				return
 			}

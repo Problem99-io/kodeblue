@@ -68,7 +68,8 @@ type Daemon struct {
 	cveClient      cvefeed.Client
 	wg             sync.WaitGroup
 	mu             sync.Mutex
-	operatorMu     sync.Mutex        // serialize session admission, never the running agent
+	operatorMu     sync.Mutex // serialize session admission, never the running agent
+	operatorSlots  chan struct{}
 	operatorInputs map[string]uint64 // admitted input version per operator session (operatorMu)
 	// eng is the running agent engine (nil: none). The engine supervisor
 	// replaces it while sessions and hub handlers use it: read it with

@@ -51,7 +51,7 @@ server (kodeblue, its own user)                          hub
 
 ### What operators can and cannot do from the hub
 
-Operators can **message** a server's agents. A message about an incident continues that incident's own agent session (full context); anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
+Operators can **message** a server's agents. A message about an idle incident can continue its session. Input to an operator-owned running session is steered between actions; live responder, learner, reviewer and decisions sessions keep their own waiters and receive questions through a separate operator-liaison session. Anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
 
 If the agent is already thinking or working, a new message steers that same
 session. Running tools finish before the new input is delivered at the next safe

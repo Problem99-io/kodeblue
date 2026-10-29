@@ -502,7 +502,20 @@ func (k *Engine) send(ctx context.Context, sessionID, message string) (string, e
 // When the session is idle it simply starts a run. Use WaitSession, not
 // Wait, on a session that may be steered: the steer starts a new run.
 func (k *Engine) Steer(ctx context.Context, s *Session, message string) error {
-	return k.do(ctx, http.MethodPost, "/v1/sessions/"+s.ID+"/messages", map[string]any{"content": message, "steer": true}, nil)
+	var result struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := k.do(ctx, http.MethodPost, "/v1/sessions/"+s.ID+"/messages", map[string]any{"content": message, "steer": true}, &result); err != nil {
+		return err
+	}
+	if result.Error != "" {
+		return fmt.Errorf("steering failed: %s", result.Error)
+	}
+	if result.Status == "paused" {
+		return fmt.Errorf("steering failed: delivery is paused")
+	}
+	return nil
 }
 
 // Abort stops a running session now: the engine ends the current run at its

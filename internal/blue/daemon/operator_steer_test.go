@@ -16,6 +16,7 @@ type operatorSteerEngine struct {
 	*fakeEngine
 	steered      []string
 	follows      int
+	aborts       atomic.Int32
 	waits        atomic.Int32
 	beforeReturn func()
 }
@@ -85,7 +86,7 @@ func TestOperatorInputSteersSameSession(t *testing.T) {
 	}
 }
 
-func TestOperatorInputSteersInvestigatingIncident(t *testing.T) {
+func TestOperatorInputDoesNotSteerForeignWaiter(t *testing.T) {
 	d, st, _, _ := newTestDaemon(t)
 	f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
 	f.alive.Store(true)
@@ -101,10 +102,83 @@ func TestOperatorInputSteersInvestigatingIncident(t *testing.T) {
 	done := d.track("responder", in.ID)
 	defer done()
 	r := d.HandleOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Author: "alice", Body: "keep the process alive", IncidentID: in.ID})
-	if r.Status != "done" || r.SessionID != "responder" || len(f.steered) != 1 || f.n.Load() != 0 || f.follows != 0 || f.waits.Load() != 0 {
+	if r.Status != "done" || r.SessionID == "responder" || len(f.steered) != 0 || f.n.Load() != 1 || f.follows != 0 || f.waits.Load() != 1 {
 		t.Fatalf("did not steer responder: %+v engine=%+v", r, f)
 	}
-	if rows := st.Incidents(`WHERE kind='operator'`); len(rows) != 0 {
-		t.Fatal("created an unrelated operator session")
+	if rows := st.Incidents(`WHERE kind='operator'`); len(rows) != 1 {
+		t.Fatal("did not create a tracked operator session")
+	}
+}
+
+func (f *operatorSteerEngine) Abort(context.Context, string) error { f.aborts.Add(1); return nil }
+
+func TestOperatorDoesNotResumeLearningOrReview(t *testing.T) {
+	for _, kind := range []string{"learning", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			d, st, _, _ := newTestDaemon(t)
+			f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
+			f.alive.Store(true)
+			d.setEngine(f)
+			in := &store.Incident{Title: kind, Kind: kind, Severity: "info"}
+			_ = st.CreateIncident(in)
+			in.SessionID = "foreign"
+			_ = st.UpdateIncident(in)
+			done := d.track("foreign", in.ID)
+			defer done()
+			r := d.HandleOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Body: "question", IncidentID: in.ID})
+			if r.SessionID == "foreign" || f.follows != 0 || len(f.steered) != 0 {
+				t.Fatalf("foreign waiter was steered: %+v", r)
+			}
+		})
+	}
+}
+
+func TestOperatorCancellationAbortsLateContinuation(t *testing.T) {
+	d, _, _, _ := newTestDaemon(t)
+	f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
+	f.alive.Store(true)
+	d.setEngine(f)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wait := d.BeginOperatorMessage(ctx, hubproto.OperatorMessage{ID: 1, Body: "work", ConversationID: "cancel"})
+	f.beforeReturn = func() {
+		_ = d.BeginOperatorMessage(ctx, hubproto.OperatorMessage{ID: 2, Body: "late", ConversationID: "cancel"})()
+		cancel()
+	}
+	_ = wait()
+	if f.aborts.Load() == 0 || len(d.LiveSessions()) != 0 {
+		t.Fatal("late continuation was not aborted and released")
+	}
+}
+
+func TestNewOperatorConversationHasConcurrencyLimit(t *testing.T) {
+	d, _, _, _ := newTestDaemon(t)
+	f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
+	f.alive.Store(true)
+	d.setEngine(f)
+	wait := d.BeginOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Body: "work", ConversationID: "first"})
+	r := d.BeginOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 2, Body: "work", ConversationID: "second"})()
+	if r.Status != "refused" || f.n.Load() != 1 {
+		t.Fatalf("unbounded operator sessions: %+v", r)
+	}
+	_ = wait()
+}
+
+func TestOperatorDeadlineAbortsChangedVersion(t *testing.T) {
+	old := operatorWaitTimeout
+	operatorWaitTimeout = time.Millisecond
+	t.Cleanup(func() { operatorWaitTimeout = old })
+	d, _, _, _ := newTestDaemon(t)
+	f := &operatorSteerEngine{fakeEngine: &fakeEngine{id: 1}}
+	f.alive.Store(true)
+	d.setEngine(f)
+	wait := d.BeginOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 1, Body: "work", ConversationID: "deadline"})
+	f.beforeReturn = func() {
+		_ = d.BeginOperatorMessage(context.Background(), hubproto.OperatorMessage{ID: 2, Body: "late", ConversationID: "deadline"})()
+		time.Sleep(3 * time.Millisecond)
+	}
+	r := wait()
+	if r.Status != "failed" || f.aborts.Load() == 0 || len(d.LiveSessions()) != 0 {
+		t.Fatalf("deadline left continuation: %+v aborts=%d", r, f.aborts.Load())
 	}
 }
