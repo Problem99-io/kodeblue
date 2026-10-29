@@ -280,8 +280,8 @@ function paintWarSettings() {
     } catch (e) { status.textContent = e.message; save.disabled = false; clearKey.disabled = false; }
   };
   save.addEventListener("click", () => persist(false)); clearKey.addEventListener("click", () => persist(true));
-  clear(WAR.config).append(h("label", { class: "war-enable" }, enabled, "Public IP enrichment"), h("span", { class: "small muted" }, current.pinned_off ? "Enrichment is disabled by the hub administrator." : "Off by default. Enabling sends public source IPs to ipapi.is, including legitimate users and fleet addresses. This reveals which IPs the hub investigates. Event details stay local."),
+  add(clear(WAR.config), [h("label", { class: "war-enable" }, enabled, "Public IP enrichment"), h("span", { class: "small muted" }, current.pinned_off ? "Enrichment is disabled by the hub administrator." : "Off by default. Enabling sends public source IPs to ipapi.is, including legitimate users and fleet addresses. This reveals which IPs the hub investigates. Event details stay local."),
     h("div", { class: "war-key-row" }, key, save, clearKey),
     current.paused_until ? h("div", { class: "small c-orange" }, "Provider lookups paused until " + when(current.paused_until)) : null,
-    h("div", { class: "small faint" }, `${current.used_today} / ${current.daily_limit} lookups reserved today · cached for 7 days. Anonymous results include ownership and location; an optional key adds network classification.`), status);
+    h("div", { class: "small faint" }, `${current.used_today} / ${current.daily_limit} lookups reserved today · cached for 7 days. Anonymous results include ownership and location; an optional key adds network classification.`), status]);
 }
