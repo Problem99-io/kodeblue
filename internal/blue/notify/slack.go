@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -111,17 +113,27 @@ func (s *Slack) Send(ctx context.Context, m Message) error {
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return errors.New("could not create Slack request")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.HTTP.Do(req)
+	client := s.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	safe := *client
+	safe.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := safe.Do(req)
 	if err != nil {
-		return err
+		var wrapped *url.Error
+		if errors.As(err, &wrapped) {
+			err = wrapped.Err
+		}
+		return fmt.Errorf("Slack request failed: %s", urlRe.ReplaceAllString(strings.ReplaceAll(err.Error(), s.URL, "[redacted]"), "[redacted URL]"))
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("slack webhook %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("slack webhook %d: %s", resp.StatusCode, strings.ReplaceAll(strings.TrimSpace(string(b)), s.URL, "[redacted]"))
 	}
 	return nil
 }

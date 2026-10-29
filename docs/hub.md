@@ -170,12 +170,15 @@ kodeblue-hub fleet set telegram-chat-id
 ```
 
 Telegram has its own minimum severity setting. Each destination retries independently
-(1 to 32 minutes, at most 8 attempts), so a Telegram failure does not resend a
+(exponential backoff, at most 8 attempts; permanent Telegram errors fail immediately and flood-control retry_after is honored), so a Telegram failure does not resend a
 successful Slack delivery. Notification history summarizes all destinations: it stays
 pending while any delivery is pending, then reports failure if any destination failed.
 Changing settings applies to pending and future notifications; historical skipped or
-completed deliveries are not replayed. Messages are one-way plain text with previews,
-links and mentions neutralized; Telegram replies cannot execute commands.
+completed deliveries are not replayed. Messages use an explicit preformatted entity with link previews disabled. IPs,
+paths and addresses remain copyable without inserted invisible characters.
+Standalone sends run destinations concurrently; acceptance by any destination
+counts as success, while other failures are logged. Use hub delivery when each
+destination needs durable independent retries.
 
 The hub exposes separate save, clear, minimum-severity and test-message controls
 for Telegram. This local preview has no bot token or chat configured.

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -25,8 +26,12 @@ func TestTelegramPayload(t *testing.T) {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
 		}
 		var payload struct {
-			ChatID    string `json:"chat_id"`
-			Text      string `json:"text"`
+			ChatID   string `json:"chat_id"`
+			Text     string `json:"text"`
+			Entities []struct {
+				Type           string
+				Offset, Length int
+			} `json:"entities"`
 			ParseMode string `json:"parse_mode"`
 			Preview   struct {
 				Disabled bool `json:"is_disabled"`
@@ -43,14 +48,17 @@ func TestTelegramPayload(t *testing.T) {
 				t.Errorf("missing %q in %q", want, payload.Text)
 			}
 		}
-		for _, bad := range []string{"@everyone", "https://evil", "tg://", "t.me"} {
-			if strings.Contains(payload.Text, bad) {
-				t.Errorf("unsafe text %q", payload.Text)
+		if len(payload.Entities) != 1 || payload.Entities[0].Type != "pre" || payload.Entities[0].Offset != 0 || payload.Entities[0].Length != len(utf16.Encode([]rune(payload.Text))) {
+			t.Fatal("missing copy-safe pre entity")
+		}
+		for _, indicator := range []string{"@everyone", "https://evil.example", "203.0.113.5", "/etc/cron.d/evil.sh", "root@host"} {
+			if !strings.Contains(payload.Text, indicator) {
+				t.Fatalf("indicator changed: %q", indicator)
 			}
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true,"result":{}}`)), Header: make(http.Header)}, nil
 	})
-	err := tg.Send(context.Background(), Message{Server: "web-1", Severity: "high", Title: "<b>attack</b>", Body: "@everyone https://evil.example tg://user?id=1 t.me/evil", Fields: map[string]string{"Incident": "#3"}})
+	err := tg.Send(context.Background(), Message{Server: "web-1", Severity: "high", Title: "<b>attack</b>", Body: "@everyone https://evil.example tg://user?id=1 t.me/evil 203.0.113.5 /etc/cron.d/evil.sh root@host 😀", Fields: map[string]string{"Incident": "#3"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,5 +140,19 @@ func TestTelegramUnicodeLimit(t *testing.T) {
 	text := telegramMessage(Message{Server: "server", Title: strings.Repeat("🚨", 5000), Body: string([]byte{0xff})})
 	if !utf8.ValidString(text) || len(utf16.Encode([]rune(text))) > 4096 || !strings.HasSuffix(text, "…") {
 		t.Fatalf("invalid or oversized message (%d bytes)", len(text))
+	}
+}
+
+func TestTelegramDescriptionsAndRetryPolicy(t *testing.T) {
+	for _, code := range []int{400, 401, 403, 404, 429} {
+		tg := TelegramFromConfig("123:secret", "", "-1", "")
+		tg.HTTP.Transport = telegramTransport(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(`{"ok":false,"description":"chat not found 123:secret","parameters":{"retry_after":123}}`)), Header: make(http.Header)}, nil
+		})
+		err := tg.Send(context.Background(), Message{Body: "203.0.113.5 /etc/cron.d/evil.sh root@host"})
+		var delivery *DeliveryError
+		if !errors.As(err, &delivery) || !strings.Contains(err.Error(), "chat not found") || strings.Contains(err.Error(), "123:secret") || delivery.Permanent() != (code != 429) || delivery.RetryAfter != 123*time.Second {
+			t.Fatalf("policy: %+v %v", delivery, err)
+		}
 	}
 }

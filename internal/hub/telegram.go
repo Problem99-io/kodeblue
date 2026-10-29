@@ -102,11 +102,22 @@ func (s *Server) handleTelegramPut(w http.ResponseWriter, r *http.Request, c *op
 		writeErr(w, http.StatusInternalServerError, "could not save Telegram settings")
 		return
 	}
-	s.st.Audit(c.user.Name, "telegram.settings", "", "updated", c.ip)
+	action := "unchanged"
+	if req.Token != nil {
+		action = "set"
+		if strings.TrimSpace(*req.Token) == "" {
+			action = "cleared"
+		}
+	}
+	s.st.Audit(c.user.Name, "telegram.settings", "", "token="+action, c.ip)
 	writeJSON(w, http.StatusOK, s.st.TelegramSettings())
 }
 
 func (s *Server) handleTelegramTest(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	if s.telegramTestLimit.Reserve(c.user.Name) == nil {
+		writeErr(w, http.StatusTooManyRequests, "Telegram test limit reached; wait a minute")
+		return
+	}
 	tg := s.telegram()
 	if tg == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Telegram is not configured"})

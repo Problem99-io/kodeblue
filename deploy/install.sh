@@ -322,8 +322,11 @@ putsecret() { # value file
 if [ -n "$KEYFILE" ] && [ ! -s /etc/kodeblue/inference.key ]; then putsecret "$(tr -d '\r\n' < "$KEYFILE")" /etc/kodeblue/inference.key; fi
 if [ -n "$SLACKFILE" ] && [ ! -s /etc/kodeblue/slack.webhook ]; then putsecret "$(tr -d '\r\n' < "$SLACKFILE")" /etc/kodeblue/slack.webhook; fi
 
-if [ -n "$TELEGRAMTOKENFILE" ] && [ ! -s /etc/kodeblue/telegram.token ]; then putsecret "$(tr -d '\r\n' < "$TELEGRAMTOKENFILE")" /etc/kodeblue/telegram.token; fi
-if [ -n "$TELEGRAMCHATFILE" ] && [ ! -s /etc/kodeblue/telegram.chat ]; then putsecret "$(tr -d '\r\n' < "$TELEGRAMCHATFILE")" /etc/kodeblue/telegram.chat; fi
+valid_telegram_token() { [ "$(printf %s "$1" | wc -l)" -eq 0 ] && printf %s "$1" | LC_ALL=C grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; }
+valid_telegram_chat() { [ "$(printf %s "$1" | wc -l)" -eq 0 ] && printf %s "$1" | LC_ALL=C grep -Eq '^(-?[1-9][0-9]*|@[A-Za-z][A-Za-z0-9_]{4,})$'; }
+
+if [ -n "$TELEGRAMTOKENFILE" ] && [ ! -s /etc/kodeblue/telegram.token ]; then k=$(sed 's/\r$//' "$TELEGRAMTOKENFILE"); valid_telegram_token "$k" || die "Invalid Telegram token file"; putsecret "$k" /etc/kodeblue/telegram.token; fi
+if [ -n "$TELEGRAMCHATFILE" ] && [ ! -s /etc/kodeblue/telegram.chat ]; then k=$(sed 's/\r$//' "$TELEGRAMCHATFILE"); valid_telegram_chat "$k" || die "Invalid Telegram chat file"; putsecret "$k" /etc/kodeblue/telegram.chat; fi
 
 # ---- enroll with the hub ----
 if [ -n "$TOKEN" ]; then
@@ -367,11 +370,11 @@ if [ -s /etc/kodeblue/hub.key ]; then
 elif [ "$UPGRADE" = 0 ]; then
   if [ ! -s /etc/kodeblue/telegram.token ]; then
     k=$(readsecret "Telegram bot token (optional, Enter to skip): ")
-    if [ -n "$k" ]; then putsecret "$k" /etc/kodeblue/telegram.token; fi
+    if [ -n "$k" ]; then valid_telegram_token "$k" || die "Invalid Telegram token"; putsecret "$k" /etc/kodeblue/telegram.token; fi
   fi
   if [ -s /etc/kodeblue/telegram.token ] && [ ! -s /etc/kodeblue/telegram.chat ]; then
     k=$(readline "Telegram chat ID or @channelusername: ")
-    if [ -n "$k" ]; then putsecret "$k" /etc/kodeblue/telegram.chat; fi
+    if [ -n "$k" ]; then valid_telegram_chat "$k" || die "Invalid Telegram chat ID"; putsecret "$k" /etc/kodeblue/telegram.chat; fi
   fi
 fi
 

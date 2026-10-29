@@ -3,6 +3,8 @@ package notify
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"time"
 )
 
 // Sender delivers notifications. With a hub, kodeblue queues them for the hub
@@ -39,13 +41,32 @@ func (o *Outbox) Async(m Message, onErr func(error)) {
 type multi []Sender
 
 func (ms multi) Send(ctx context.Context, m Message) error {
-	var first error
-	for _, s := range ms {
-		if err := s.Send(ctx, m); err != nil && first == nil {
-			first = err
+	// Start every provider before waiting, so one stalled destination cannot
+	// consume another destination's opportunity to deliver.
+	results := make(chan error, len(ms))
+	for _, sender := range ms {
+		go func(sender Sender) {
+			child, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			results <- sender.Send(child, m)
+		}(sender)
+	}
+	var failures []error
+	accepted := false
+	for range ms {
+		if err := <-results; err != nil {
+			failures = append(failures, err)
+		} else {
+			accepted = true
 		}
 	}
-	return first
+	if accepted {
+		for _, err := range failures {
+			slog.Warn("notification partially delivered", "error", err)
+		}
+		return nil
+	}
+	return errors.Join(failures...)
 }
 
 func (ms multi) Async(m Message, onErr func(error)) {

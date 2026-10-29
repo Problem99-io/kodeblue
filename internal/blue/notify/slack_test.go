@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,5 +35,13 @@ func TestSendPostsBlocks(t *testing.T) {
 	}
 	if got["text"] == nil || len(got["blocks"].([]any)) < 3 {
 		t.Fatalf("unexpected payload %v", got)
+	}
+}
+
+func TestSlackTransportErrorRedactsWebhook(t *testing.T) {
+	url := "https://hooks.slack.com/services/secret/webhook"
+	s := &Slack{URL: url, HTTP: &http.Client{Transport: telegramTransport(func(*http.Request) (*http.Response, error) { return nil, fmt.Errorf("network failure for %s", url) })}}
+	if err := s.Send(context.Background(), Message{}); err == nil || strings.Contains(err.Error(), url) || strings.Contains(err.Error(), "secret/webhook") {
+		t.Fatalf("webhook exposed: %v", err)
 	}
 }

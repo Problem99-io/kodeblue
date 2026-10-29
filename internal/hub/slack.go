@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
@@ -46,7 +47,14 @@ CREATE INDEX IF NOT EXISTS notification_deliveries_due ON notification_deliverie
 INSERT OR IGNORE INTO notification_deliveries(notification_id,provider,status,attempts,next_try,error,delivered_at)
   SELECT id,'slack',status,attempts,next_try,error,delivered_at FROM notifications;
 INSERT OR IGNORE INTO notification_deliveries(notification_id,provider)
-  SELECT id,'telegram' FROM notifications WHERE status='pending';`); err != nil {
+  SELECT id,'telegram' FROM notifications WHERE status='pending';
+UPDATE notification_deliveries SET
+ status=(SELECT status FROM notifications WHERE id=notification_id),
+ attempts=(SELECT attempts FROM notifications WHERE id=notification_id),
+ error=(SELECT error FROM notifications WHERE id=notification_id),
+ delivered_at=(SELECT delivered_at FROM notifications WHERE id=notification_id)
+WHERE provider='slack' AND status='pending' AND notification_id IN
+ (SELECT id FROM notifications WHERE status IN ('delivered','failed','skipped'));`); err != nil {
 		return err
 	}
 	// Earlier hubs kept a "fleet default" webhook to hand to servers; it is
@@ -228,60 +236,88 @@ func (s *Server) wakeSlack() {
 // "failed" after slackMaxAttempts. The server name comes from the hub, not
 // from the server's own data, so a server cannot post as another.
 func (s *Server) NotificationForwarder(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
-	defer t.Stop()
-	for {
-		s.forwardDue(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		case <-s.slackWake:
-		}
+	var workers sync.WaitGroup
+	for _, provider := range []string{"slack", "telegram"} {
+		workers.Add(1)
+		go func(provider string) {
+			defer workers.Done()
+			var resume time.Time
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				if !time.Now().Before(resume) {
+					resume = time.Now().Add(s.forwardProvider(ctx, provider))
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				case <-s.slackWake:
+				}
+			}
+		}(provider)
 	}
+	workers.Wait()
 }
 
 func (s *Server) forwardDue(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, provider := range []string{"slack", "telegram"} {
-		for _, n := range s.st.dueNotifications(provider, 50) {
-			if ctx.Err() != nil {
-				return
-			}
-			var sender notify.Sender
-			var minimum string
-			if provider == "slack" {
-				minimum = s.st.SlackSettings().MinSeverity
-				if sl := s.slackTo(s.st.Setting(settingSlackWebhook)); sl != nil {
-					sender = sl
-				}
-			} else {
-				minimum = s.st.TelegramSettings().MinSeverity
-				if tg := s.telegram(); tg != nil {
-					sender = tg
-				}
-			}
-			if sender == nil || sevRank[n.Severity] < sevRank[minimum] {
-				s.st.markNotification(provider, n.ID, "skipped", "", n.Attempts, time.Time{})
-				continue
-			}
-			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err := sender.Send(cctx, notify.Message{Server: n.ServerName, Kind: n.Kind, Severity: n.Severity, Title: n.Title, Body: n.Body, Fields: n.Fields, IncidentID: n.IncidentID})
-			cancel()
-			if err == nil {
-				s.st.markNotification(provider, n.ID, "delivered", "", n.Attempts+1, time.Time{})
-				continue
-			}
-			attempts := n.Attempts + 1
-			if attempts >= slackMaxAttempts {
-				s.st.markNotification(provider, n.ID, "failed", err.Error(), attempts, time.Time{})
-				s.log.Error("notification delivery failed for good", "provider", provider, "notification", n.ID, "error", err)
-				continue
-			}
-			backoff := time.Duration(30<<min(attempts, 6)) * time.Second
-			s.st.markNotification(provider, n.ID, "pending", err.Error(), attempts, time.Now().Add(backoff))
-			s.log.Warn("notification delivery failed; will retry", "provider", provider, "notification", n.ID, "attempt", attempts, "error", err)
-		}
+		wg.Add(1)
+		go func(p string) { defer wg.Done(); s.forwardProvider(ctx, p) }(provider)
 	}
+	wg.Wait()
+}
+func (s *Server) forwardProvider(ctx context.Context, provider string) time.Duration {
+	for _, n := range s.st.dueNotifications(provider, 50) {
+		if ctx.Err() != nil {
+			return 0
+		}
+		var sender notify.Sender
+		var minimum string
+		if provider == "slack" {
+			minimum = s.st.SlackSettings().MinSeverity
+			if sl := s.slackTo(s.st.Setting(settingSlackWebhook)); sl != nil {
+				sender = sl
+			}
+		} else {
+			minimum = s.st.TelegramSettings().MinSeverity
+			if tg := s.telegram(); tg != nil {
+				sender = tg
+			}
+		}
+		if sender == nil || sevRank[n.Severity] < sevRank[minimum] {
+			reason := "below minimum severity"
+			if sender == nil {
+				reason = map[string]string{"slack": "Slack", "telegram": "Telegram"}[provider] + " is not configured"
+			}
+			s.st.markNotification(provider, n.ID, "skipped", reason, n.Attempts, time.Time{})
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := sender.Send(cctx, notify.Message{Server: n.ServerName, Kind: n.Kind, Severity: n.Severity, Title: n.Title, Body: n.Body, Fields: n.Fields, IncidentID: n.IncidentID})
+		cancel()
+		if err == nil {
+			s.st.markNotification(provider, n.ID, "delivered", "", n.Attempts+1, time.Time{})
+			continue
+		}
+		attempts := n.Attempts + 1
+		var delivery *notify.DeliveryError
+		errors.As(err, &delivery)
+		if attempts >= slackMaxAttempts || (delivery != nil && delivery.Permanent()) {
+			s.st.markNotification(provider, n.ID, "failed", err.Error(), attempts, time.Time{})
+			s.log.Error("notification delivery failed for good", "provider", provider, "notification", n.ID, "error", err)
+			continue
+		}
+		backoff := time.Duration(30<<min(attempts, 6)) * time.Second
+		if delivery != nil && delivery.RetryAfter > backoff {
+			backoff = delivery.RetryAfter
+		}
+		s.st.markNotification(provider, n.ID, "pending", err.Error(), attempts, time.Now().Add(backoff))
+		s.log.Warn("notification delivery failed; will retry", "provider", provider, "notification", n.ID, "attempt", attempts, "error", err)
+		return backoff
+	}
+	return 0
 }
 
 // ---- operator API ----

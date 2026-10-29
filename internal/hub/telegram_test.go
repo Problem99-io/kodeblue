@@ -3,10 +3,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -188,5 +190,83 @@ func TestLegacyNotificationMigration(t *testing.T) {
 	due := st.dueNotifications("slack", 50)
 	if len(due) != 1 || due[0].Attempts != 3 || due[0].Status != "pending" {
 		t.Fatalf("legacy retry state lost: %+v", due)
+	}
+}
+
+func TestTelegramPermanentFailureAndRetryAfter(t *testing.T) {
+	for _, code := range []int{400, 429} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			srv, st, _ := newHub(t)
+			_ = st.SetSetting(settingTelegramToken, "123:secret")
+			_ = st.SetSetting(settingTelegramChat, "-1")
+			host, _, _ := st.CreateServer("test", "test", time.Hour)
+			if err := st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{note("1", "high", "alert")}}); err != nil {
+				t.Fatal(err)
+			}
+			srv.models.client = &http.Client{Transport: telegramTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":false,"description":"chat not found","parameters":{"retry_after":180}}`))}, nil
+			})}
+			srv.forwardDue(context.Background())
+			var status string
+			var next, attempts int64
+			_ = st.db.QueryRow(`SELECT status,next_try,attempts FROM notification_deliveries WHERE provider='telegram'`).Scan(&status, &next, &attempts)
+			if code == 400 && (status != "failed" || attempts != 1) {
+				t.Fatalf("permanent error retried: %s %d", status, attempts)
+			}
+			if code == 429 && (status != "pending" || next < time.Now().Add(170*time.Second).Unix()) {
+				t.Fatalf("retry_after ignored: %s %d", status, next)
+			}
+		})
+	}
+}
+
+func TestTelegramOutageDoesNotBlockNewSlackDelivery(t *testing.T) {
+	srv, st, _ := newHub(t)
+	_ = st.SetSetting(settingSlackWebhook, "https://hooks.slack.com/services/test")
+	_ = st.SetSetting(settingTelegramToken, "123:secret")
+	_ = st.SetSetting(settingTelegramChat, "-1")
+	var posts atomic.Int32
+	blocked := make(chan struct{}, 1)
+	delivered := make(chan struct{}, 2)
+	srv.models.client = &http.Client{Transport: telegramTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "api.telegram.org" {
+			select {
+			case blocked <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		posts.Add(1)
+		delivered <- struct{}{}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})}
+	host, _, _ := st.CreateServer("test", "test", time.Hour)
+	add := func(id string) {
+		if err := st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{note(id, "high", "alert")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("1")
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() { srv.NotificationForwarder(ctx); close(finished) }()
+	defer func() { cancel(); <-finished }()
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("Telegram did not start")
+	}
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("Slack was blocked")
+	}
+	add("2")
+	srv.wakeSlack()
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("outage blocked later Slack delivery")
 	}
 }

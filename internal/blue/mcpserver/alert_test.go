@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
@@ -109,5 +111,35 @@ func TestSendAlertRateLimitSurvivesRename(t *testing.T) {
 				t.Fatalf("rate-limited call queued another alert: %+v", queued)
 			}
 		})
+	}
+}
+
+type failedAlertDestination struct{}
+
+func (failedAlertDestination) Send(context.Context, notify.Message) error {
+	return errors.New("Telegram down")
+}
+func (failedAlertDestination) Async(notify.Message, func(error)) {}
+func TestPartialDeliveryIsJournaledAndRateLimited(t *testing.T) {
+	s, st := alertServer(t, 2)
+	good := &alertDestination{}
+	s.slack = notify.New(false, nil, "", "", false, good, failedAlertDestination{})
+	args := json.RawMessage(`{"severity":"high","title":"Alert","message":"A real security update needs attention.","incident_id":7}`)
+	for i := 0; i < 2; i++ {
+		if _, err := s.sendAlert(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.sendAlert(context.Background(), args); err == nil || len(good.messages) != 2 {
+		t.Fatalf("partial retries bypassed cap: %v posts=%d", err, len(good.messages))
+	}
+	n := 0
+	for _, entry := range st.JournalSince(time.Now().Add(-time.Hour), 20) {
+		if entry.Action == "alert.agent" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("accepted alerts not journaled: %d", n)
 	}
 }

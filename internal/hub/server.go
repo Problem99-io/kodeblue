@@ -73,10 +73,11 @@ type Server struct {
 	// trusted are the proxies whose X-Forwarded-For is believed.
 	trusted []netip.Prefix
 
-	mu        sync.Mutex
-	waiters   map[string]chan struct{} // server id -> wake long-poll
-	slackWake chan struct{}
-	models    modelCache
+	mu                sync.Mutex
+	waiters           map[string]chan struct{} // server id -> wake long-poll
+	slackWake         chan struct{}
+	models            modelCache
+	telegramTestLimit *limiter
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -98,6 +99,7 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 		loginUser: newLimiter(loginMaxPerUser, 15*time.Minute), hashCheck: make(chan struct{}, max(1, runtime.NumCPU()/2)), knownCheck: make(chan struct{}, 1),
 		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1)}
 	s.models.client = endpointClient(opt.EndpointAllow)
+	s.telegramTestLimit = newLimiter(3, time.Minute)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies

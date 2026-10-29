@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // Telegram sends one-way updates through the Bot API. It never reads commands.
@@ -22,7 +24,6 @@ type Telegram struct {
 }
 
 var telegramTokenRE = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
-var telegramLinkRE = regexp.MustCompile(`(?i)\btg://`)
 var telegramChatRE = regexp.MustCompile(`^(-?[1-9][0-9]*|@[A-Za-z][A-Za-z0-9_]{4,})$`)
 
 func ValidateTelegramToken(token string) error {
@@ -45,27 +46,41 @@ func TelegramFromConfig(token, file, chat, chatFile string) *Telegram {
 	if chat == "" && chatFile != "" {
 		if b, err := os.ReadFile(chatFile); err == nil {
 			chat = strings.TrimSpace(string(b))
+		} else if !os.IsNotExist(err) {
+			slog.Warn("could not read Telegram chat file")
 		}
 	}
 	if token == "" && file != "" {
 		if b, err := os.ReadFile(file); err == nil {
 			token = strings.TrimSpace(string(b))
+		} else if !os.IsNotExist(err) {
+			slog.Warn("could not read Telegram token file")
 		}
 	}
 	if ValidateTelegramToken(token) != nil || ValidateTelegramChat(chat) != nil {
+		if token != "" || chat != "" {
+			slog.Warn("Telegram configuration is incomplete or invalid; delivery disabled")
+		}
 		return nil
 	}
 	return &Telegram{Token: token, ChatID: chat, HTTP: &http.Client{Timeout: 15 * time.Second}}
 }
 
-// telegramText contains host data: no formatting, clickable URLs or mentions.
-func telegramText(s string) string {
-	s = strings.ToValidUTF8(s, "�")
-	s = strings.ReplaceAll(s, "@", "@\u200b")
-	s = urlRe.ReplaceAllStringFunc(s, func(v string) string { return strings.Replace(v, "://", "[:]//", 1) })
-	s = telegramLinkRE.ReplaceAllString(s, "tg[:]//")
-	// Break bare domain auto-links too (including t.me and www.example.com).
-	return strings.ReplaceAll(s, ".", ".\u200b")
+// Preserve copied indicators exactly. A pre entity prevents interpreting
+// host strings as links, mentions or formatting; no invisible separators.
+func telegramText(s string) string { return strings.ToValidUTF8(s, "�") }
+
+type DeliveryError struct {
+	Code        int
+	Description string
+	RetryAfter  time.Duration
+}
+
+func (e *DeliveryError) Error() string {
+	return fmt.Sprintf("Telegram API HTTP %d: %s", e.Code, e.Description)
+}
+func (e *DeliveryError) Permanent() bool {
+	return e.Code == 400 || e.Code == 401 || e.Code == 403 || e.Code == 404
 }
 
 func telegramMessage(m Message) string {
@@ -104,8 +119,10 @@ func (s *Telegram) Send(ctx context.Context, m Message) error {
 	if ValidateTelegramToken(s.Token) != nil || ValidateTelegramChat(s.ChatID) != nil {
 		return errors.New("invalid Telegram configuration")
 	}
+	text := telegramMessage(m)
 	payload, _ := json.Marshal(map[string]any{
-		"chat_id": s.ChatID, "text": telegramMessage(m),
+		"chat_id": s.ChatID, "text": text,
+		"entities":             []map[string]any{{"type": "pre", "offset": 0, "length": len(utf16.Encode([]rune(text)))}},
 		"link_preview_options": map[string]bool{"is_disabled": true},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+s.Token+"/sendMessage", bytes.NewReader(payload))
@@ -126,13 +143,36 @@ func (s *Telegram) Send(ctx context.Context, m Message) error {
 	}
 	defer resp.Body.Close()
 	var result struct {
-		OK bool `json:"ok"`
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Code        int    `json:"error_code"`
+		Parameters  struct {
+			Retry int `json:"retry_after"`
+		} `json:"parameters"`
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Telegram API returned HTTP %d", resp.StatusCode)
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result)
+	if resp.StatusCode != http.StatusOK || (decodeErr == nil && !result.OK) {
+		code := resp.StatusCode
+		if result.Code != 0 {
+			code = result.Code
+		}
+		description := strings.ReplaceAll(strings.TrimSpace(result.Description), s.Token, "[redacted]")
+		description = strings.Map(func(r rune) rune {
+			if r < ' ' || r == 127 {
+				return -1
+			}
+			return r
+		}, description)
+		if len([]rune(description)) > 256 {
+			description = string([]rune(description)[:256])
+		}
+		if description == "" {
+			description = "request rejected"
+		}
+		return &DeliveryError{Code: code, Description: description, RetryAfter: time.Duration(min(max(result.Parameters.Retry, 0), 86400)) * time.Second}
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil || !result.OK {
-		return errors.New("Telegram API rejected the message or returned an invalid response")
+	if decodeErr != nil {
+		return errors.New("Telegram API returned an invalid response")
 	}
 	return nil
 }
