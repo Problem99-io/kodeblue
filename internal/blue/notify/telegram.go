@@ -46,14 +46,14 @@ func TelegramFromConfig(token, file, chat, chatFile string) *Telegram {
 	if chat == "" && chatFile != "" {
 		if b, err := os.ReadFile(chatFile); err == nil {
 			chat = strings.TrimSpace(string(b))
-		} else if !os.IsNotExist(err) {
+		} else if !os.IsNotExist(err) || chatFile != "/etc/kodeblue/telegram.chat" {
 			slog.Warn("could not read Telegram chat file")
 		}
 	}
 	if token == "" && file != "" {
 		if b, err := os.ReadFile(file); err == nil {
 			token = strings.TrimSpace(string(b))
-		} else if !os.IsNotExist(err) {
+		} else if !os.IsNotExist(err) || file != "/etc/kodeblue/telegram.token" {
 			slog.Warn("could not read Telegram token file")
 		}
 	}

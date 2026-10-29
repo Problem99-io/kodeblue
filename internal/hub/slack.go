@@ -181,7 +181,7 @@ func (s *Store) markNotification(provider string, id int64, status, errText stri
 	_, err = tx.Exec(`UPDATE notifications SET
 status=(SELECT CASE WHEN SUM(status='pending')>0 THEN 'pending' WHEN SUM(status='failed')>0 THEN 'failed' WHEN SUM(status='delivered')>0 THEN 'delivered' ELSE 'skipped' END FROM notification_deliveries WHERE notification_id=?),
 attempts=(SELECT MAX(attempts) FROM notification_deliveries WHERE notification_id=?),
-error=COALESCE((SELECT GROUP_CONCAT(provider || ': ' || error, '; ') FROM notification_deliveries WHERE notification_id=? AND error!='' AND status IN ('pending','failed')),''),
+error=COALESCE((SELECT GROUP_CONCAT(provider || ': ' || error, '; ') FROM notification_deliveries WHERE notification_id=? AND error!='' AND status IN ('pending','failed','skipped')),''),
 delivered_at=(SELECT MAX(delivered_at) FROM notification_deliveries WHERE notification_id=?) WHERE id=?`, id, id, id, id, id)
 	if err == nil {
 		_ = tx.Commit()
@@ -232,7 +232,7 @@ func (s *Server) wakeSlack() {
 }
 
 // NotificationForwarder posts stored notifications to configured destinations
-// until ctx ends: at most one in flight, retries with backoff, and a final
+// until ctx ends: at most one in flight per provider, retries with backoff, and a final
 // "failed" after slackMaxAttempts. The server name comes from the hub, not
 // from the server's own data, so a server cannot post as another.
 func (s *Server) NotificationForwarder(ctx context.Context) {

@@ -270,3 +270,42 @@ func TestTelegramOutageDoesNotBlockNewSlackDelivery(t *testing.T) {
 		t.Fatal("outage blocked later Slack delivery")
 	}
 }
+
+func TestSkippedDeliveryReasonAndDowngradeMigration(t *testing.T) {
+	srv, st, _ := newHub(t)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	record := hubproto.Record{Kind: "notification", ID: "skip", UpdatedAt: time.Now(), Data: json.RawMessage(`{"kind":"agent","severity":"high","title":"test"}`)}
+	if err := st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{record}}); err != nil {
+		t.Fatal(err)
+	}
+	srv.forwardDue(context.Background())
+	notes := st.Notifications(host.ID, 1)
+	if len(notes) != 1 || notes[0].Status != "skipped" || !strings.Contains(notes[0].Error, "Slack is not configured") {
+		t.Fatalf("skipped reason lost: %+v", notes)
+	}
+	id := notes[0].ID
+	_, _ = st.db.Exec(`UPDATE notification_deliveries SET status='pending' WHERE notification_id=? AND provider='slack'`, id)
+	_, _ = st.db.Exec(`UPDATE notifications SET status='delivered',attempts=2,delivered_at=123 WHERE id=?`, id)
+	if err := st.migrateSlack(); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = st.db.QueryRow(`SELECT status FROM notification_deliveries WHERE notification_id=? AND provider='slack'`, id).Scan(&status)
+	if status != "delivered" {
+		t.Fatalf("downgrade delivery will replay: %s", status)
+	}
+}
+func TestTelegramTestEndpointRateLimit(t *testing.T) {
+	_, st, ts := newHub(t)
+	client, csrf := signIn(t, st, ts)
+	for i := 0; i < 4; i++ {
+		code, _ := do(t, client, "POST", ts.URL+"/api/settings/telegram/test", "", csrf, map[string]any{})
+		want := 200
+		if i == 3 {
+			want = 429
+		}
+		if code != want {
+			t.Fatalf("test %d status %d want %d", i, code, want)
+		}
+	}
+}
