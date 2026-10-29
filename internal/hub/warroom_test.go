@@ -30,7 +30,7 @@ func TestWarSourceExtractionAndPublicAddresses(t *testing.T) {
 	if len(ips) != 3 {
 		t.Fatalf("wrong source fields: %v", ips)
 	}
-	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "198.18.0.1", "255.255.255.255", "224.0.0.1", "::1", "fd00::1", "fe80::1", "2001:db8::1", "64:ff9b::a00:1", "4000::1"} {
+	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "198.18.0.1", "255.255.255.255", "224.0.0.1", "::1", "fd00::1", "fe80::1", "2001:db8::1", "64:ff9b::a00:1", "4000::1", "2002:0a00:0001::", "3fff::1", "192.88.99.1"} {
 		if publicSource(netip.MustParseAddr(raw)) {
 			t.Errorf("non-public IP eligible for lookup: %s", raw)
 		}
@@ -113,6 +113,7 @@ func TestWarIndexLinksContextAndRetainsOnlyExistingFindings(t *testing.T) {
 func TestWarLookupCacheQuotaAndPrivacy(t *testing.T) {
 	srv, st, _ := newHubWith(t, allowLoopback)
 	host, _, _ := st.CreateServer("web-1", "test", time.Hour)
+	_ = st.SetSetting("war_enabled", "true")
 	_ = st.SetSetting("war_api_key", "provider-secret")
 	if err := st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{warFinding("1", "8.8.8.8", 0), warFinding("2", "10.0.0.1", 0)}}); err != nil {
 		t.Fatal(err)
@@ -221,5 +222,72 @@ func TestWarRoomAccessAndSettings(t *testing.T) {
 	}
 	if code, body := do(t, c, "GET", ts.URL+"/api/war-room?hours=24", "", "", nil); code != 200 || !strings.Contains(string(body), `"sources":[]`) {
 		t.Fatalf("empty map: %d %s", code, body)
+	}
+}
+
+func TestWarOptInAndPinOff(t *testing.T) {
+	srv, st, _ := newHubWith(t, allowLoopback)
+	if st.warSettings()["enabled"] != false {
+		t.Fatal("enrichment must default off")
+	}
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{warFinding("1", "8.8.8.8", 0)}})
+	srv.models.client = &http.Client{Transport: warTransport(func(r *http.Request) (*http.Response, error) { t.Fatal("unexpected external request"); return nil, nil })}
+	srv.enrichNext(context.Background())
+	_ = st.SetSetting("war_enabled", "true")
+	srv.opt.DisableIPEnrichment = true
+	srv.enrichNext(context.Background())
+	if srv.warSettings()["enabled"] != false {
+		t.Fatal("pin-off bypassed")
+	}
+}
+func TestWarOverviewBoundsContext(t *testing.T) {
+	_, st, _ := newHubWith(t, allowLoopback)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	f := warFinding("1", "8.8.8.8", 1)
+	var data map[string]any
+	_ = json.Unmarshal(f.Data, &data)
+	data["detail"] = strings.Repeat("x", 4000)
+	f.Data, _ = json.Marshal(data)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{f, {Kind: "incident", ID: "1", UpdatedAt: time.Now(), Data: json.RawMessage(`{"summary":"sensitive full context"}`)}}})
+	sources, _, err := st.warSourcesView(time.Time{}, host.ID, true)
+	if err != nil || len(sources) != 1 || len(sources[0].Events[0].Detail) > 256 || sources[0].Events[0].Context != "" {
+		t.Fatalf("unbounded overview: %+v %v", sources, err)
+	}
+}
+func TestWarAnonymousOmitsKey(t *testing.T) {
+	srv, _, _ := newHubWith(t, allowLoopback)
+	srv.models.client = &http.Client{Transport: warTransport(func(r *http.Request) (*http.Response, error) {
+		var payload map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if _, ok := payload["key"]; ok {
+			t.Fatal("empty key was sent")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ip":"8.8.8.8"}`))}, nil
+	})}
+	_, _, _, err := srv.lookupSource(context.Background(), "8.8.8.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWarBackfillPlanUsesRowid(t *testing.T) {
+	_, st, _ := newHubWith(t, allowLoopback)
+	rows, err := st.db.Query(`EXPLAIN QUERY PLAN SELECT rowid,server_id,rid,data,kind FROM records WHERE rowid>? ORDER BY rowid LIMIT 200`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail
+	}
+	if strings.Contains(plan, "TEMP B-TREE") || !strings.Contains(plan, "INTEGER PRIMARY KEY") {
+		t.Fatalf("nonlinear backfill plan: %s", plan)
 	}
 }

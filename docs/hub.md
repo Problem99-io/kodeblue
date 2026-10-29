@@ -69,13 +69,20 @@ Raw sensor events that never become findings are not uploaded by the existing
 sync protocol and are not shown. The latest 5,000 source/finding associations are
 returned per view; a notice asks for narrower filters if this limit is reached.
 
-Public IPv4 and IPv6 addresses are enriched on the hub through
+Enrichment is **off by default**, including after upgrades. Opening the drawer
+shows a consent notice. No external lookup happens until an operator enables it
+and confirms. Public source IPs may belong to legitimate users, administrators,
+or the fleet. The provider learns which IPs this hub investigates. Pin lookups
+off with `--disable-ip-enrichment` or `KODEBLUE_HUB_DISABLE_IP_ENRICHMENT=1`;
+console settings cannot override this.
+
+After consent, public IPv4 and IPv6 addresses are enriched on the hub through
 [ipapi.is](https://ipapi.is/developers.html); only the source IP and an optional
 provider key leave the hub. Logs, incident details, server names and private or
 reserved addresses are never sent. The bundled public-domain Natural Earth map
 uses no external tiles, scripts, fonts, or browser geolocation.
 
-Open **Enrichment** inside the drawer to disable lookups or save/clear an optional
+Open **Enrichment** inside the drawer to enable or disable lookups or save/clear an optional
 API key. Keys stay on the hub and are never returned to the browser or enrolled
 servers. Anonymous lookups provide ownership and approximate location, with a
 local ceiling of 30 attempts per UTC day. A key enables network classification
@@ -297,3 +304,11 @@ Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+The overview refreshes once a minute with 256-character finding previews. Full
+finding and incident context loads on demand. Historical indexing runs in
+background batches using rowid pagination. Unlocated results are cached for
+seven days; lookup failures emit rate-limited warnings.
+
+Map provenance: `world-land.json` is public-domain Natural Earth `ne_110m_land`
+GeoJSON geometry, rounded to three decimal places and compact JSON encoded.

@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 	if err := s.migrateWarRoom(); err != nil {
 		return err
 	}
-	return s.backfillWarRoom()
+	return nil
 }
 
 func (s *Store) addColumn(table, col, def string) error {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,7 +26,7 @@ var nonPublicSources = []netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("2001::/23"),
 	netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
-	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("100::/64"), netip.MustParsePrefix("3fff::/20"), netip.MustParsePrefix("192.88.99.0/24"),
 }
 
 func canonicalSource(raw string) string {
@@ -38,6 +39,12 @@ func canonicalSource(raw string) string {
 
 func publicSource(ip netip.Addr) bool {
 	ip = ip.Unmap()
+	if netip.MustParsePrefix("2002::/16").Contains(ip) {
+		b := ip.As16()
+		if !publicSource(netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})) {
+			return false
+		}
+	}
 	if ip.Is6() && !netip.MustParsePrefix("2000::/3").Contains(ip) {
 		return false
 	}
@@ -130,21 +137,21 @@ func (s *Store) backfillWarRoom() error {
 	if s.Setting("war_index_v1") == "done" {
 		return nil
 	}
-	var cursor int64
+	cursor, _ := strconv.ParseInt(s.Setting("war_index_cursor"), 10, 64)
 	for {
-		rows, err := s.db.Query(`SELECT rowid,server_id,rid,data FROM records WHERE kind='finding' AND rowid>? ORDER BY rowid LIMIT 200`, cursor)
+		rows, err := s.db.Query(`SELECT rowid,server_id,rid,data,kind FROM records WHERE rowid>? ORDER BY rowid LIMIT 200`, cursor)
 		if err != nil {
 			return err
 		}
 		type entry struct {
-			row        int64
-			server, id string
-			data       string
+			row              int64
+			server, id, kind string
+			data             string
 		}
 		batch := []entry{}
 		for rows.Next() {
 			var e entry
-			if err := rows.Scan(&e.row, &e.server, &e.id, &e.data); err != nil {
+			if err := rows.Scan(&e.row, &e.server, &e.id, &e.data, &e.kind); err != nil {
 				rows.Close()
 				return err
 			}
@@ -163,12 +170,18 @@ func (s *Store) backfillWarRoom() error {
 			return err
 		}
 		for _, e := range batch {
-			if err = indexWarFinding(tx, e.server, e.id, json.RawMessage(e.data)); err != nil {
-				break
+			if e.kind == "finding" {
+				if err = indexWarFinding(tx, e.server, e.id, json.RawMessage(e.data)); err != nil {
+					break
+				}
 			}
 			cursor = e.row
 		}
 		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO settings(k,v) VALUES('war_index_cursor',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, strconv.FormatInt(cursor, 10)); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -219,7 +232,15 @@ type WarSource struct {
 }
 
 func (s *Store) warSources(since time.Time, server string) ([]WarSource, bool, error) {
-	q := `SELECT w.ip,p.public,p.status,p.data,p.looked_at,w.server_id,h.name,w.finding_id,f.data,COALESCE(i.data,'{}')
+	return s.warSourcesView(since, server, false)
+}
+func (s *Store) warSourcesView(since time.Time, server string, overview bool) ([]WarSource, bool, error) {
+	finding, incident := "f.data", "COALESCE(i.data,'{}')"
+	if overview {
+		finding = "json_set(f.data,'$.detail',substr(json_extract(f.data,'$.detail'),1,256))"
+		incident = "json_remove(COALESCE(i.data,'{}'),'$.summary')"
+	}
+	q := `SELECT w.ip,p.public,p.status,p.data,p.looked_at,w.server_id,h.name,w.finding_id,` + finding + `,` + incident + `
 FROM war_events w JOIN war_sources p ON p.ip=w.ip
 JOIN records f ON f.server_id=w.server_id AND f.kind='finding' AND f.rid=w.finding_id
 JOIN servers h ON h.id=w.server_id
@@ -306,12 +327,12 @@ func (s *Store) warSettings() map[string]any {
 	if until, err := strconv.ParseInt(s.Setting("war_pause_until"), 10, 64); err == nil && until > time.Now().Unix() {
 		pause = time.Unix(until, 0).UTC().Format(time.RFC3339)
 	}
-	return map[string]any{"enabled": s.Setting("war_enabled") != "false", "key_configured": s.Setting("war_api_key") != "", "provider": "ipapi.is", "daily_limit": limit, "used_today": used, "paused_until": pause}
+	return map[string]any{"enabled": s.Setting("war_enabled") == "true", "key_configured": s.Setting("war_api_key") != "", "provider": "ipapi.is", "daily_limit": limit, "used_today": used, "paused_until": pause}
 }
 
 func (s *Server) warRoutes() {
 	s.mux.HandleFunc("GET /api/war-room", s.op(s.handleWarRoom))
-	s.mux.HandleFunc("GET /api/settings/war-room", s.op(func(w http.ResponseWriter, r *http.Request, c *opCtx) { writeJSON(w, 200, s.st.warSettings()) }))
+	s.mux.HandleFunc("GET /api/settings/war-room", s.op(func(w http.ResponseWriter, r *http.Request, c *opCtx) { writeJSON(w, 200, s.warSettings()) }))
 	s.mux.HandleFunc("PUT /api/settings/war-room", s.op(s.handleWarSettings))
 }
 
@@ -325,12 +346,12 @@ func (s *Server) handleWarRoom(w http.ResponseWriter, r *http.Request, c *opCtx)
 		}
 		hours = v
 	}
-	sources, truncated, err := s.st.warSources(time.Now().Add(-time.Duration(hours)*time.Hour), r.URL.Query().Get("server_id"))
+	sources, truncated, err := s.st.warSourcesView(time.Now().Add(-time.Duration(hours)*time.Hour), r.URL.Query().Get("server_id"), true)
 	if err != nil {
 		writeErr(w, 500, "could not load source activity")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"sources": sources, "truncated": truncated, "limit": warEventLimit, "hours": hours, "settings": s.st.warSettings()})
+	writeJSON(w, 200, map[string]any{"sources": sources, "truncated": truncated, "limit": warEventLimit, "hours": hours, "settings": s.warSettings()})
 }
 
 func (s *Server) handleWarSettings(w http.ResponseWriter, r *http.Request, c *opCtx) {
@@ -340,6 +361,10 @@ func (s *Server) handleWarSettings(w http.ResponseWriter, r *http.Request, c *op
 	}
 	if readJSON(w, r, 4096, &req) != nil {
 		writeErr(w, 400, "bad request")
+		return
+	}
+	if req.Enabled != nil && *req.Enabled && s.opt.DisableIPEnrichment {
+		writeErr(w, 403, "IP enrichment is disabled by the hub administrator")
 		return
 	}
 	if req.Key != nil && (len(*req.Key) > 512 || strings.ContainsAny(*req.Key, "\r\n\x00")) {
@@ -379,8 +404,9 @@ func (s *Server) handleWarSettings(w http.ResponseWriter, r *http.Request, c *op
 		writeErr(w, 500, "could not save settings")
 		return
 	}
-	s.st.Audit(c.user.Name, "war.settings", "", "updated", c.ip)
-	writeJSON(w, 200, s.st.warSettings())
+	s.st.Audit(c.user.Name, "war.settings", "", fmt.Sprintf("enabled=%s key=%s", s.st.Setting("war_enabled"), keyChange(req.Key)), c.ip)
+	s.startWarEnrichment()
+	writeJSON(w, 200, s.warSettings())
 }
 
 // EnrichSources sends only a validated public IP to the fixed provider. Lookups
@@ -399,10 +425,10 @@ func (s *Server) EnrichSources(ctx context.Context) {
 }
 
 func (s *Server) enrichNext(ctx context.Context) {
-	if ctx.Err() != nil || s.st.Setting("war_enabled") == "false" {
+	if ctx.Err() != nil || s.opt.DisableIPEnrichment || s.st.Setting("war_enabled") != "true" {
 		return
 	}
-	settings := s.st.warSettings()
+	settings := s.warSettings()
 	used := settings["used_today"].(int)
 	if used >= settings["daily_limit"].(int) || settings["paused_until"].(string) != "" {
 		return
@@ -439,15 +465,22 @@ WHERE p.public=1 AND p.next_try<=? ORDER BY e.latest DESC,p.looked_at,p.ip LIMIT
 	if err != nil {
 		status = "unavailable"
 		next = time.Now().Add(time.Hour)
+		if !quota {
+			_ = s.st.SetSetting("war_pause_until", fmt.Sprint(time.Now().Add(time.Minute).Unix()))
+		}
 	}
 	if quota {
 		next = time.Now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 		_ = s.st.SetSetting("war_pause_until", fmt.Sprint(next.Unix()))
 	}
-	if status == "unlocated" {
-		next = time.Now().Add(24 * time.Hour)
-	}
+
 	if err != nil {
+		s.war.mu.Lock()
+		if time.Since(s.war.lastWarning) >= time.Minute {
+			s.log.Warn("IP enrichment lookup failed", "error", err, "paused_until", s.st.Setting("war_pause_until"))
+			s.war.lastWarning = time.Now()
+		}
+		s.war.mu.Unlock()
 		_, _ = s.st.db.Exec(`UPDATE war_sources SET status='unavailable',next_try=? WHERE ip=?`, next.Unix(), ip)
 		return
 	}
@@ -457,7 +490,11 @@ WHERE p.public=1 AND p.next_try<=? ORDER BY e.latest DESC,p.looked_at,p.ip LIMIT
 
 func (s *Server) lookupSource(ctx context.Context, ip string) (IPIntel, string, bool, error) {
 	var result IPIntel
-	body, _ := json.Marshal(map[string]string{"q": ip, "key": s.st.Setting("war_api_key")})
+	payload := map[string]string{"q": ip}
+	if key := s.st.Setting("war_api_key"); key != "" {
+		payload["key"] = key
+	}
+	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.ipapi.is/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	client := *s.models.client
@@ -543,4 +580,52 @@ func (s *Server) lookupSource(ctx context.Context, ip string) (IPIntel, string, 
 		return result, "unlocated", false, nil
 	}
 	return result, "ready", false, nil
+}
+
+// StartWarRoom indexes historical records in the background. The provider worker
+// is created only after explicit consent, and can be pinned off by the operator.
+func (s *Server) StartWarRoom(ctx context.Context) {
+	s.war.mu.Lock()
+	s.war.ctx = ctx
+	s.war.mu.Unlock()
+	go func() {
+		if err := s.st.backfillWarRoom(); err != nil && ctx.Err() == nil {
+			s.log.Warn("War room backfill failed", "error", err)
+		}
+	}()
+	s.startWarEnrichment()
+}
+
+type warLifecycle struct {
+	mu          sync.Mutex
+	ctx         context.Context
+	running     bool
+	lastWarning time.Time
+}
+
+func (s *Server) startWarEnrichment() {
+	s.war.mu.Lock()
+	defer s.war.mu.Unlock()
+	if s.war.running || s.war.ctx == nil || s.war.ctx.Err() != nil || s.opt.DisableIPEnrichment || s.st.Setting("war_enabled") != "true" {
+		return
+	}
+	s.war.running = true
+	go s.EnrichSources(s.war.ctx)
+}
+func (s *Server) warSettings() map[string]any {
+	out := s.st.warSettings()
+	out["pinned_off"] = s.opt.DisableIPEnrichment
+	if s.opt.DisableIPEnrichment {
+		out["enabled"] = false
+	}
+	return out
+}
+func keyChange(key *string) string {
+	if key == nil {
+		return "unchanged"
+	}
+	if strings.TrimSpace(*key) == "" {
+		return "cleared"
+	}
+	return "set"
 }

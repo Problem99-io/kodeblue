@@ -60,7 +60,7 @@ function openWarRoom() {
   requestAnimationFrame(() => { if (WAR.open) drawer.classList.add("on"); });
   close.focus();
   refreshWarRoom();
-  WAR.timer = setInterval(() => { if (!document.hidden && WAR.open) refreshWarRoom(); }, 10000);
+  WAR.timer = setInterval(() => { if (!document.hidden && WAR.open) refreshWarRoom(); }, 60000);
 }
 
 function closeWarRoom() {
@@ -93,6 +93,7 @@ async function refreshWarRoom() {
     const data = await api("GET", `/api/war-room?hours=${enc(WAR.hours)}&server_id=${enc(WAR.server)}`);
     if (!WAR.open || request !== WAR.request) return;
     WAR.data = data;
+ if (!data.settings.enabled && !WAR.consentShown) { WAR.consentShown=true; WAR.config.hidden=false; paintWarSettings(); }
     WAR.status.textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     paintWarRoom();
     if (!WAR.land) {
@@ -239,6 +240,19 @@ function paintWarInspector(groups, selected) {
       event.first_at !== event.last_at ? h("div", { class: "small faint" }, "Last updated " + when(event.last_at)) : null,
       h("p", { class: "war-context" }, event.detail || event.title),
       event.context ? h("p", { class: "war-context muted" }, event.context) : null,
+      h("button", {class:"btn small",type:"button",on:{click:async(e)=>{
+        const button=e.currentTarget;button.disabled=true;
+        try {
+          const finding=await api("GET",`/api/servers/${enc(event.server_id)}/records/finding/${enc(event.finding_id)}`);
+          let context="";
+          if(event.incident_id){
+            WAR.contextCache ||= new Map();const id=event.server_id+":"+event.incident_id;
+            if(!WAR.contextCache.has(id)) WAR.contextCache.set(id,api("GET",`/api/servers/${enc(event.server_id)}/records/incident/${enc(event.incident_id)}`).catch(error=>{WAR.contextCache.delete(id);throw error;}));
+            const incident=await WAR.contextCache.get(id);context=(incident.data || incident).summary || "";
+          }
+          button.replaceWith(h("div",null,h("p",{class:"war-context"},(finding.data || finding).detail || event.detail),h("p",{class:"war-context muted"},context)));
+        }catch(error){button.textContent=error.message;button.disabled=false;}
+      }}},"Load full context"),
       h("div", { class: "war-evidence small mono faint" }, Object.entries(event.evidence || {}).map(([k, v]) => h("div", null, k, ": ", v))),
       h("div", { class: "small faint" }, event.rule, event.occurrences > 1 ? " · " + event.occurrences + " occurrences" : "")));
   }
@@ -250,21 +264,23 @@ function paintWarSettings() {
   if (!WAR.data) return;
   const current = WAR.data.settings;
   const enabled = h("input", { type: "checkbox", checked: current.enabled });
-  const key = h("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: current.key_configured ? "Leave blank to keep the stored key" : "Optional ipapi.is API key", "aria-label": "IP enrichment API key" });
+  enabled.disabled = !!current.pinned_off;
+ const key = h("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: current.key_configured ? "Leave blank to keep the stored key" : "Optional ipapi.is API key", "aria-label": "IP enrichment API key" });
   const status = h("span", { class: "small faint", role: "status" });
   const save = h("button", { class: "btn small primary", type: "button" }, "Save");
   const clearKey = h("button", { class: "btn small", type: "button", hidden: !current.key_configured }, "Clear key");
   const persist = async (clear) => {
     save.disabled = true; clearKey.disabled = true;
     try {
-      const values = { enabled: enabled.checked };
+      if (enabled.checked && !current.enabled && !confirm("Enable third-party enrichment? Public source IPs, including legitimate users and fleet addresses, will be sent to ipapi.is. The provider learns which IPs this hub investigates.")) { save.disabled=false; clearKey.disabled=false; return; }
+ const values = { enabled: enabled.checked };
       if (clear) values.api_key = ""; else if (key.value.trim()) values.api_key = key.value.trim();
       WAR.data.settings = await api("PUT", "/api/settings/war-room", values);
       key.value = ""; paintWarSettings();
     } catch (e) { status.textContent = e.message; save.disabled = false; clearKey.disabled = false; }
   };
   save.addEventListener("click", () => persist(false)); clearKey.addEventListener("click", () => persist(true));
-  clear(WAR.config).append(h("label", { class: "war-enable" }, enabled, "Public IP enrichment"), h("span", { class: "small muted" }, "Only public source IPs are sent to ipapi.is. Event details stay on this hub."),
+  clear(WAR.config).append(h("label", { class: "war-enable" }, enabled, "Public IP enrichment"), h("span", { class: "small muted" }, current.pinned_off ? "Enrichment is disabled by the hub administrator." : "Off by default. Enabling sends public source IPs to ipapi.is, including legitimate users and fleet addresses. This reveals which IPs the hub investigates. Event details stay local."),
     h("div", { class: "war-key-row" }, key, save, clearKey),
     current.paused_until ? h("div", { class: "small c-orange" }, "Provider lookups paused until " + when(current.paused_until)) : null,
     h("div", { class: "small faint" }, `${current.used_today} / ${current.daily_limit} lookups reserved today · cached for 7 days. Anonymous results include ownership and location; an optional key adds network classification.`), status);
