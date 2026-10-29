@@ -42,3 +42,34 @@ func TestSocketCollectorsSkipKodeblue(t *testing.T) {
 		t.Fatalf("outbound: %s", got)
 	}
 }
+
+// A process running from a replaced binary carries the service it runs in,
+// so the detector can tell kodeblue's own upgrade from anything else.
+func TestProcessCollectorDeletedUnit(t *testing.T) {
+	root := t.TempDir()
+	proc := func(pid, exe, cgroup string) {
+		d := filepath.Join(root, "proc", pid)
+		writeFile(t, filepath.Join(d, "cmdline"), exe+"\x00upgrade\x00")
+		writeFile(t, filepath.Join(d, "status"), "State:\tS (sleeping)\nPPid:\t1\nUid:\t0\t0\t0\t0\n")
+		writeFile(t, filepath.Join(d, "cgroup"), cgroup)
+		if err := os.Symlink(exe, filepath.Join(d, "exe")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proc("100", "/usr/local/bin/kodeblue (deleted)", "0::/system.slice/kodeblue-upgrade.service\n")
+	proc("200", "/usr/sbin/sshd", "0::/system.slice/ssh.service\n")
+	items, _, err := processCollector{}.Collect(context.Background(), &Env{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]map[string]string{}
+	for _, it := range items {
+		got[it.Attrs["pid"]] = it.Attrs
+	}
+	if a := got["100"]; a["deleted"] != "true" || a["unit"] != "kodeblue-upgrade.service" {
+		t.Errorf("deleted process: %v", a)
+	}
+	if a := got["200"]; a["deleted"] != "" || a["unit"] != "" {
+		t.Errorf("a live binary gets no unit (only deleted ones are looked up): %v", a)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -610,5 +611,69 @@ func TestSelfExemptionByInode(t *testing.T) {
 	gone := sensors.Item{Collector: "process", Key: "/opt/kb/kodeblue@kodeblue", Attrs: map[string]string{"pid": "999"}}
 	if d.isSelf(gone) {
 		t.Error("unresolvable pid must not be exempt")
+	}
+}
+
+// A hub-started upgrade runs `kodeblue upgrade` as root in its own unit, and
+// the installer swaps the binary under it. That process is kodeblue, not a
+// "process running from a deleted executable"; the same thing anywhere else
+// still is.
+func TestUpgradeProcessFromReplacedBinary(t *testing.T) {
+	_, env, st, _, _ := setup(t)
+	opts := DefaultOptions()
+	opts.SelfExes = []string{"/usr/local/bin/kodeblue"}
+	d := New(st, env, opts)
+	item := func(key, unit string, extra ...string) sensors.Item {
+		a := map[string]string{"deleted": "true", "pid": "4242", "ppid": "1"}
+		if unit != "" {
+			a["unit"] = unit
+		}
+		for i := 0; i+1 < len(extra); i += 2 {
+			a[extra[i]] = extra[i+1]
+		}
+		return sensors.Item{Collector: "process", Key: key, Attrs: a}
+	}
+	upgrading := item("/usr/local/bin/kodeblue@root", "kodeblue-upgrade.service")
+	cases := []struct {
+		name string
+		it   sensors.Item
+		self bool
+	}{
+		{"the upgrade", upgrading, true},
+		{"no unit", item("/usr/local/bin/kodeblue@root", ""), false},
+		{"another unit", item("/usr/local/bin/kodeblue@root", "kodeblue.service"), false},
+		{"a look-alike unit", item("/usr/local/bin/kodeblue@root", "kodeblue-upgrade.service.evil"), false},
+		{"not root", item("/usr/local/bin/kodeblue@kodeblue", "kodeblue-upgrade.service"), false},
+		{"another binary", item("/usr/bin/nc@root", "kodeblue-upgrade.service"), false},
+		{"a look-alike path", item("/usr/local/bin/kodeblue2@root", "kodeblue-upgrade.service"), false},
+		{"suspicious location", item("/usr/local/bin/kodeblue@root", "kodeblue-upgrade.service", "suspicious_location", "memfd"), false},
+		{"not deleted", sensors.Item{Collector: "process", Key: "/usr/local/bin/kodeblue@root", Attrs: map[string]string{"unit": "kodeblue-upgrade.service"}}, false},
+	}
+	for _, c := range cases {
+		if got := d.isSelfUpgrade(c.it); got != c.self {
+			t.Errorf("%s: isSelfUpgrade(%q %v) = %v, want %v", c.name, c.it.Key, c.it.Attrs, got, c.self)
+		}
+	}
+
+	// End to end: the upgrade is absorbed and journaled; a deleted kodeblue
+	// outside the unit is still a critical finding.
+	r, err := d.Process(sensors.Snapshot{Ran: []string{"process"}, Items: []sensors.Item{upgrading}}, ModeDetect)
+	if err != nil || len(r.New) != 0 {
+		t.Fatalf("the upgrade process was reported: %v %+v", err, r.New)
+	}
+	journaled := false
+	for _, j := range st.JournalSince(time.Now().Add(-time.Minute), 50) {
+		if j.Action == "absorb.upgrade" && strings.Contains(j.Detail, "kodeblue-upgrade.service") {
+			journaled = true
+		}
+	}
+	if !journaled {
+		t.Error("absorbing the upgrade process is not journaled")
+	}
+	_, env2, st2, _, _ := setup(t)
+	d2 := New(st2, env2, opts)
+	r, err = d2.Process(sensors.Snapshot{Ran: []string{"process"}, Items: []sensors.Item{item("/usr/local/bin/kodeblue@root", "sshd.service")}}, ModeDetect)
+	if err != nil || len(r.New) != 1 || r.New[0].Rule != "process.deleted_exe" {
+		t.Fatalf("a deleted kodeblue outside the upgrade unit must be reported: %v %+v", err, r.New)
 	}
 }
