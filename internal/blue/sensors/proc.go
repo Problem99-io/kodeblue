@@ -118,6 +118,11 @@ func (processCollector) Collect(ctx context.Context, env *Env) ([]Item, []Event,
 		}
 		if p.Deleted {
 			attrs["deleted"] = "true"
+			// Which service runs it: kodeblue's own upgrade replaces the
+			// binary its `kodeblue upgrade` process runs from.
+			if unit := systemUnit(readCgroup(env.Path(filepath.Join("/proc", strconv.Itoa(p.PID))))); unit != "" {
+				attrs["unit"] = unit
+			}
 		}
 		if loc := suspiciousExeLocation(p.Exe); loc != "" {
 			attrs["suspicious_location"] = loc

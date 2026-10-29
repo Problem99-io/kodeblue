@@ -42,6 +42,13 @@ Notes:
 - The integrity baseline keeps the old hash until a finding is resolved, so a
   second change the same day reports against the original value. Line the values
   up before concluding there was only one change.
+- A finding on kodeblue's binaries that is still open, waiting for an operator or
+  resolved `inconclusive` keeps those paths out of maintenance absorption: until
+  the operator acks it, every later upgrade alerts again. Say so when you ask for
+  the ack, and check for such an older finding when an upgrade alerted.
+- `kodeblue upgrade` itself runs as root from the binary its installer replaces
+  (in the `kodeblue-upgrade.service` unit), which kodeblue recognises and
+  journals as `absorb.upgrade` instead of reporting a deleted executable.
 - A gap finding ("kodeblue was not running for …") is the same question: was it
   a planned restart or upgrade, or did something stop it?
 
