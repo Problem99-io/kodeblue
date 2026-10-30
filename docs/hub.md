@@ -312,3 +312,5 @@ so an optional integration cannot disable containment, undo or enrollment.
 Local lookup accounting uses a sliding 60-second window. Zone entries can include
 an optional domain/label after the ID (one zone per line); metadata returns these
 labels without additional Cloudflare requests.
+
+![Configured zone labels using synthetic credentials](assets/cloudflare-zone-labels.jpg)
