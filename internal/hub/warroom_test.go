@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/netip"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -273,7 +276,7 @@ func TestWarAnonymousOmitsKey(t *testing.T) {
 
 func TestWarBackfillPlanUsesRowid(t *testing.T) {
 	_, st, _ := newHubWith(t, allowLoopback)
-	rows, err := st.db.Query(`EXPLAIN QUERY PLAN SELECT rowid,server_id,rid,data,kind FROM records WHERE rowid>? ORDER BY rowid LIMIT 200`, 0)
+	rows, err := st.db.Query(`EXPLAIN QUERY PLAN `+warBackfillQuery, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,5 +292,149 @@ func TestWarBackfillPlanUsesRowid(t *testing.T) {
 	}
 	if strings.Contains(plan, "TEMP B-TREE") || !strings.Contains(plan, "INTEGER PRIMARY KEY") {
 		t.Fatalf("nonlinear backfill plan: %s", plan)
+	}
+}
+
+func TestWarPinnedPutRejectsEnable(t *testing.T) {
+	srv, st, ts := newHubWith(t, allowLoopback)
+	srv.opt.DisableIPEnrichment = true
+	client, csrf := signIn(t, st, ts)
+	if code, _ := do(t, client, "PUT", ts.URL+"/api/settings/war-room", "", csrf, map[string]any{"enabled": true}); code != 403 {
+		t.Fatalf("pin off bypassed: %d", code)
+	}
+	if st.Setting("war_enabled") == "true" {
+		t.Fatal("pinned setting persisted enable")
+	}
+}
+func TestWarWorkerConsentAndDisableCancellation(t *testing.T) {
+	srv, st, _ := newHubWith(t, allowLoopback)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{warFinding("1", "8.8.8.8", 0)}})
+	started, canceled := make(chan struct{}, 1), make(chan struct{}, 1)
+	var calls atomic.Int32
+	srv.models.client = &http.Client{Transport: warTransport(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-r.Context().Done()
+		canceled <- struct{}{}
+		return nil, r.Context().Err()
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.StartWarRoom(ctx)
+	srv.war.mu.Lock()
+	running := srv.war.running
+	srv.war.mu.Unlock()
+	if running || calls.Load() != 0 {
+		t.Fatal("worker started without consent")
+	}
+	_ = st.SetSetting("war_enabled", "true")
+	srv.startWarEnrichment()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("consented worker did not start")
+	}
+	_ = st.SetSetting("war_enabled", "false")
+	srv.startWarEnrichment()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("disable did not cancel in-flight lookup")
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for {
+		srv.war.mu.Lock()
+		running = srv.war.running
+		srv.war.mu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("disabled worker did not stop")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	srv.enrichNext(context.Background())
+	if calls.Load() != 1 {
+		t.Fatal("disabled worker made another lookup")
+	}
+}
+func TestWarFailureBackoffAndUnlocatedCache(t *testing.T) {
+	srv, st, _ := newHubWith(t, allowLoopback)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{warFinding("1", "8.8.8.8", 0)}})
+	_ = st.SetSetting("war_enabled", "true")
+	calls, status := 0, 503
+	srv.models.client = &http.Client{Transport: warTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"ip":"8.8.8.8"}`))}, nil
+	})}
+	for i := 0; i < 3; i++ {
+		before := time.Now()
+		srv.enrichNext(context.Background())
+		until, _ := strconv.ParseInt(st.Setting("war_pause_until"), 10, 64)
+		delay := time.Unix(until, 0).Sub(before)
+		want := time.Minute * time.Duration(1<<i)
+		if delay < want-time.Second || delay > want+time.Second {
+			t.Fatalf("failure %d pause %v want %v", i, delay, want)
+		}
+		srv.enrichNext(context.Background())
+		if calls != i+1 {
+			t.Fatal("pause ignored")
+		}
+		_ = st.SetSetting("war_pause_until", "0")
+		_, _ = st.db.Exec(`UPDATE war_sources SET next_try=0`)
+	}
+	status = 200
+	srv.enrichNext(context.Background())
+	var next int64
+	var state string
+	_ = st.db.QueryRow(`SELECT status,next_try FROM war_sources WHERE ip='8.8.8.8'`).Scan(&state, &next)
+	if state != "unlocated" || time.Until(time.Unix(next, 0)) < 7*24*time.Hour-time.Minute || st.Setting("war_failure_streak") != "0" {
+		t.Fatalf("cache/backoff reset: %s %d", state, next)
+	}
+	srv.enrichNext(context.Background())
+	if calls != 4 {
+		t.Fatal("unlocated cache re-queried")
+	}
+}
+func TestWarBackfillSerializesRetention(t *testing.T) {
+	_, st, _ := newHubWith(t, allowLoopback)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	records := []hubproto.Record{}
+	for i := 0; i < 600; i++ {
+		r := warFinding(strconv.Itoa(i), "8.8.8.8", 0)
+		r.UpdatedAt = time.Now().Add(-100 * 24 * time.Hour)
+		records = append(records, r)
+	}
+	if err := st.ApplySync(host.ID, &hubproto.SyncRequest{Records: records}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.db.Exec(`DELETE FROM war_events`)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := st.backfillWarRoom(); err != nil {
+			t.Error(err)
+		}
+	}()
+	go func() { defer wg.Done(); st.Prune(90 * 24 * time.Hour) }()
+	wg.Wait()
+	var n int
+	_ = st.db.QueryRow(`SELECT COUNT(*) FROM war_events`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("retained %d orphan associations", n)
+	}
+}
+func TestWarOverviewShowsLoadOnlyForAdditionalContext(t *testing.T) {
+	_, st, _ := newHubWith(t, allowLoopback)
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{warFinding("1", "8.8.8.8", 0)}})
+	sources, _, err := st.warSourcesView(time.Time{}, host.ID, true)
+	if err != nil || sources[0].Events[0].HasMore {
+		t.Fatalf("empty expansion advertised: %+v %v", sources, err)
 	}
 }

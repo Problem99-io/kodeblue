@@ -131,65 +131,71 @@ func indexWarFinding(tx *sql.Tx, server, id string, data json.RawMessage) error 
 	return nil
 }
 
-// Backfill existing findings in bounded batches without holding the single
-// SQLite connection while writing. New syncs are indexed in their transaction.
-func (s *Store) backfillWarRoom() error {
+const warBackfillQuery = `SELECT rowid,server_id,rid,data,kind FROM records WHERE rowid>? ORDER BY rowid LIMIT 200`
+
+// Each bounded batch reads and indexes one transaction snapshot, so sync,
+// retention and server deletion cannot interleave between those operations.
+func (s *Store) backfillWarRoom() error { return s.backfillWarRoomContext(context.Background()) }
+func (s *Store) backfillWarRoomContext(ctx context.Context) error {
 	if s.Setting("war_index_v1") == "done" {
 		return nil
 	}
 	cursor, _ := strconv.ParseInt(s.Setting("war_index_cursor"), 10, 64)
 	for {
-		rows, err := s.db.Query(`SELECT rowid,server_id,rid,data,kind FROM records WHERE rowid>? ORDER BY rowid LIMIT 200`, cursor)
+		next, done, err := s.backfillWarBatch(ctx, cursor)
 		if err != nil {
 			return err
 		}
-		type entry struct {
-			row              int64
-			server, id, kind string
-			data             string
+		if done {
+			return nil
 		}
-		batch := []entry{}
-		for rows.Next() {
-			var e entry
-			if err := rows.Scan(&e.row, &e.server, &e.id, &e.data, &e.kind); err != nil {
-				rows.Close()
-				return err
-			}
-			batch = append(batch, e)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		for _, e := range batch {
-			if e.kind == "finding" {
-				if err = indexWarFinding(tx, e.server, e.id, json.RawMessage(e.data)); err != nil {
-					break
-				}
-			}
-			cursor = e.row
-		}
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		if _, err = tx.Exec(`INSERT INTO settings(k,v) VALUES('war_index_cursor',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, strconv.FormatInt(cursor, 10)); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err = tx.Commit(); err != nil {
-			return err
-		}
+		cursor = next
 	}
-	return s.SetSetting("war_index_v1", "done")
+}
+func (s *Store) backfillWarBatch(ctx context.Context, cursor int64) (int64, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return cursor, false, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, warBackfillQuery, cursor)
+	if err != nil {
+		return cursor, false, err
+	}
+	type entry struct {
+		row                    int64
+		server, id, data, kind string
+	}
+	batch := []entry{}
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.row, &e.server, &e.id, &e.data, &e.kind); err != nil {
+			rows.Close()
+			return cursor, false, err
+		}
+		batch = append(batch, e)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return cursor, false, err
+	}
+	for _, e := range batch {
+		if e.kind == "finding" {
+			if err := indexWarFinding(tx, e.server, e.id, json.RawMessage(e.data)); err != nil {
+				return cursor, false, err
+			}
+		}
+		cursor = e.row
+	}
+	key, value := "war_index_cursor", strconv.FormatInt(cursor, 10)
+	if len(batch) == 0 {
+		key, value = "war_index_v1", "done"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, key, value); err != nil {
+		return cursor, false, err
+	}
+	return cursor, len(batch) == 0, tx.Commit()
 }
 
 type IPIntel struct {
@@ -204,6 +210,8 @@ type IPIntel struct {
 }
 
 type WarEvent struct {
+	HasMore        bool              `json:"has_more"`
+	Revision       string            `json:"revision"`
 	ServerID       string            `json:"server_id"`
 	ServerName     string            `json:"server_name"`
 	FindingID      string            `json:"finding_id"`
@@ -237,10 +245,10 @@ func (s *Store) warSources(since time.Time, server string) ([]WarSource, bool, e
 func (s *Store) warSourcesView(since time.Time, server string, overview bool) ([]WarSource, bool, error) {
 	finding, incident := "f.data", "COALESCE(i.data,'{}')"
 	if overview {
-		finding = "json_set(f.data,'$.detail',substr(json_extract(f.data,'$.detail'),1,256))"
+		finding = "json_set(f.data,'$.detail',substr(json_extract(f.data,'$.detail'),1,256),'$.war_has_more',json(CASE WHEN length(json_extract(f.data,'$.detail'))>256 OR length(COALESCE(json_extract(i.data,'$.summary'),''))>0 THEN 'true' ELSE 'false' END))"
 		incident = "json_remove(COALESCE(i.data,'{}'),'$.summary')"
 	}
-	q := `SELECT w.ip,p.public,p.status,p.data,p.looked_at,w.server_id,h.name,w.finding_id,` + finding + `,` + incident + `
+	q := `SELECT w.ip,p.public,p.status,p.data,p.looked_at,w.server_id,h.name,w.finding_id,` + finding + `,` + incident + `,CAST(f.updated_at AS TEXT)||':'||COALESCE(i.updated_at,0)
 FROM war_events w JOIN war_sources p ON p.ip=w.ip
 JOIN records f ON f.server_id=w.server_id AND f.kind='finding' AND f.rid=w.finding_id
 JOIN servers h ON h.id=w.server_id
@@ -266,7 +274,7 @@ WHERE f.updated_at>=?`
 		var pub bool
 		var looked int64
 		var ev WarEvent
-		if err := rows.Scan(&ip, &pub, &status, &raw, &looked, &ev.ServerID, &ev.ServerName, &ev.FindingID, &finding, &incident); err != nil {
+		if err := rows.Scan(&ip, &pub, &status, &raw, &looked, &ev.ServerID, &ev.ServerName, &ev.FindingID, &finding, &incident, &ev.Revision); err != nil {
 			return nil, false, err
 		}
 		count++
@@ -274,6 +282,7 @@ WHERE f.updated_at>=?`
 			break
 		}
 		var f struct {
+			HasMore                               bool `json:"war_has_more"`
 			Title, Detail, Severity, Rule, Status string
 			IncidentID                            int64     `json:"incident_id"`
 			CreatedAt                             time.Time `json:"created_at"`
@@ -297,6 +306,7 @@ WHERE f.updated_at>=?`
 		}
 		var in struct{ Title, Status, Summary string }
 		_ = json.Unmarshal([]byte(incident), &in)
+		ev.HasMore = f.HasMore || len([]rune(f.Detail)) > 256 || in.Summary != ""
 		ev.IncidentTitle, ev.IncidentStatus, ev.Context = trim(in.Title, 300), in.Status, trim(in.Summary, 4000)
 		i, ok := index[ip]
 		if !ok {
@@ -461,12 +471,19 @@ WHERE p.public=1 AND p.next_try<=? ORDER BY e.latest DESC,p.looked_at,p.ip LIMIT
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	intel, status, quota, err := s.lookupSource(cctx, ip)
+	if ctx.Err() != nil {
+		return
+	}
 	next := time.Now().Add(7 * 24 * time.Hour)
 	if err != nil {
 		status = "unavailable"
 		next = time.Now().Add(time.Hour)
 		if !quota {
-			_ = s.st.SetSetting("war_pause_until", fmt.Sprint(time.Now().Add(time.Minute).Unix()))
+			failures, _ := strconv.Atoi(s.st.Setting("war_failure_streak"))
+			failures = min(failures+1, 12)
+			_ = s.st.SetSetting("war_failure_streak", strconv.Itoa(failures))
+			pause := min(time.Minute*time.Duration(1<<min(failures-1, 10)), 6*time.Hour)
+			_ = s.st.SetSetting("war_pause_until", fmt.Sprint(time.Now().Add(pause).Unix()))
 		}
 	}
 	if quota {
@@ -484,6 +501,7 @@ WHERE p.public=1 AND p.next_try<=? ORDER BY e.latest DESC,p.looked_at,p.ip LIMIT
 		_, _ = s.st.db.Exec(`UPDATE war_sources SET status='unavailable',next_try=? WHERE ip=?`, next.Unix(), ip)
 		return
 	}
+	_ = s.st.SetSetting("war_failure_streak", "0")
 	data, _ := json.Marshal(intel)
 	_, _ = s.st.db.Exec(`UPDATE war_sources SET status=?,data=?,looked_at=?,next_try=? WHERE ip=?`, status, string(data), time.Now().Unix(), next.Unix(), ip)
 }
@@ -589,7 +607,7 @@ func (s *Server) StartWarRoom(ctx context.Context) {
 	s.war.ctx = ctx
 	s.war.mu.Unlock()
 	go func() {
-		if err := s.st.backfillWarRoom(); err != nil && ctx.Err() == nil {
+		if err := s.st.backfillWarRoomContext(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("War room backfill failed", "error", err)
 		}
 	}()
@@ -600,18 +618,36 @@ type warLifecycle struct {
 	mu          sync.Mutex
 	ctx         context.Context
 	running     bool
+	cancel      context.CancelFunc
 	lastWarning time.Time
 }
 
 func (s *Server) startWarEnrichment() {
 	s.war.mu.Lock()
 	defer s.war.mu.Unlock()
-	if s.war.running || s.war.ctx == nil || s.war.ctx.Err() != nil || s.opt.DisableIPEnrichment || s.st.Setting("war_enabled") != "true" {
+	if s.opt.DisableIPEnrichment || s.st.Setting("war_enabled") != "true" {
+		if s.war.cancel != nil {
+			s.war.cancel()
+		}
 		return
 	}
+	if s.war.running || s.war.ctx == nil || s.war.ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(s.war.ctx)
+	s.war.cancel = cancel
 	s.war.running = true
-	go s.EnrichSources(s.war.ctx)
+	go func() {
+		defer cancel()
+		s.EnrichSources(ctx)
+		s.war.mu.Lock()
+		s.war.running = false
+		s.war.cancel = nil
+		s.war.mu.Unlock()
+		s.startWarEnrichment()
+	}()
 }
+
 func (s *Server) warSettings() map[string]any {
 	out := s.st.warSettings()
 	out["pinned_off"] = s.opt.DisableIPEnrichment

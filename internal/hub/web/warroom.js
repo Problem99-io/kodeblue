@@ -239,21 +239,7 @@ function paintWarInspector(groups, selected) {
       h("div", { class: "small faint" }, event.server_name, event.incident_id ? " · Incident #" + event.incident_id : " · Finding #" + event.finding_id),
       h("div", { class: "war-event-time small mono" }, h("time", { datetime: event.first_at }, when(event.first_at))),
       event.first_at !== event.last_at ? h("div", { class: "small faint" }, "Last updated " + when(event.last_at)) : null,
-      h("p", { class: "war-context" }, event.detail || event.title),
-      event.context ? h("p", { class: "war-context muted" }, event.context) : null,
-      h("button", {class:"btn small",type:"button",on:{click:async(e)=>{
-        const button=e.currentTarget;button.disabled=true;
-        try {
-          const finding=await api("GET",`/api/servers/${enc(event.server_id)}/records/finding/${enc(event.finding_id)}`);
-          let context="";
-          if(event.incident_id){
-            WAR.contextCache ||= new Map();const id=event.server_id+":"+event.incident_id;
-            if(!WAR.contextCache.has(id)) WAR.contextCache.set(id,api("GET",`/api/servers/${enc(event.server_id)}/records/incident/${enc(event.incident_id)}`).catch(error=>{WAR.contextCache.delete(id);throw error;}));
-            const incident=await WAR.contextCache.get(id);context=(incident.data || incident).summary || "";
-          }
-          button.replaceWith(h("div",null,h("p",{class:"war-context"},(finding.data || finding).detail || event.detail),h("p",{class:"war-context muted"},context)));
-        }catch(error){button.textContent=error.message;button.disabled=false;}
-      }}},"Load full context"),
+      warEventContext(event),
       h("div", { class: "war-evidence small mono faint" }, Object.entries(event.evidence || {}).map(([k, v]) => h("div", null, k, ": ", v))),
       h("div", { class: "small faint" }, event.rule, event.occurrences > 1 ? " · " + event.occurrences + " occurrences" : "")));
   }
@@ -285,4 +271,29 @@ function paintWarSettings() {
     h("div", { class: "war-key-row" }, key, save, clearKey),
     current.paused_until ? h("div", { class: "small c-orange" }, "Provider lookups paused until " + when(current.paused_until)) : null,
     h("div", { class: "small faint" }, `${current.used_today} / ${current.daily_limit} lookups reserved today · cached for 7 days. Anonymous results include ownership and location; an optional key adds network classification.`), status]);
+}
+
+function warEventContext(event){
+ WAR.details ||= new Map();
+ const id=event.server_id+":"+event.finding_id+":"+event.revision;
+ const loaded=WAR.details.get(id);
+ const view=h("div",null,h("p",{class:"war-context"},loaded?.detail || event.detail || event.title),
+   loaded?.context ? h("p",{class:"war-context muted"},loaded.context) : null);
+ if(loaded || !event.has_more)return view;
+ const button=h("button",{class:"btn small",type:"button"},"Load full context");view.append(button);
+ button.addEventListener("click",async()=>{
+  button.disabled=true;
+  try{
+   const finding=await api("GET",`/api/servers/${enc(event.server_id)}/records/finding/${enc(event.finding_id)}`);
+   let context="";
+   if(event.incident_id){
+    WAR.contextCache ||= new Map();const key=event.server_id+":"+event.incident_id+":"+event.revision.split(":")[1];
+    if(!WAR.contextCache.has(key))WAR.contextCache.set(key,api("GET",`/api/servers/${enc(event.server_id)}/records/incident/${enc(event.incident_id)}`).catch(e=>{WAR.contextCache.delete(key);throw e}));
+    const incident=await WAR.contextCache.get(key);context=(incident.data || incident).summary || "";
+   }
+   WAR.details.set(id,{detail:(finding.data || finding).detail || event.detail,context});
+   for(const cache of [WAR.details,WAR.contextCache])while(cache?.size>256)cache.delete(cache.keys().next().value);
+   view.replaceWith(warEventContext(event));
+  }catch(error){button.textContent=error.message;button.disabled=false}
+ });return view;
 }

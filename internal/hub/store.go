@@ -722,6 +722,7 @@ func (s *Store) Prune(keep time.Duration) {
 	_, _ = s.db.Exec(`DELETE FROM web_sessions WHERE expires_at<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<?`, time.Now().Add(-365*24*time.Hour).Unix())
 	_, _ = s.db.Exec(`DELETE FROM notifications WHERE at<?`, cut)
+	_, _ = s.db.Exec(`DELETE FROM war_events WHERE NOT EXISTS (SELECT 1 FROM records f WHERE f.server_id=war_events.server_id AND f.kind='finding' AND f.rid=war_events.finding_id)`)
 	_, _ = s.db.Exec(`DELETE FROM war_sources WHERE looked_at<? AND NOT EXISTS(SELECT 1 FROM war_events WHERE war_events.ip=war_sources.ip)`, time.Now().Add(-7*24*time.Hour).Unix())
 }
 

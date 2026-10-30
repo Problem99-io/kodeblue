@@ -300,7 +300,7 @@ kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-prov
 kodeblue-hub pin [--tls-cert f]                          # the self-signed certificate's pin, or f's
 ```
 
-Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
+Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`, `DISABLE_IP_ENRICHMENT=1`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
 
 Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
@@ -314,3 +314,8 @@ seven days; lookup failures emit rate-limited warnings.
 
 Map provenance: `world-land.json` is public-domain Natural Earth `ne_110m_land`
 GeoJSON geometry, rounded to three decimal places and compact JSON encoded.
+
+Backfill batches read and write in one transaction, serializing with sync and
+retention. Non-quota enrichment failures back off exponentially from one minute
+to six hours. Expanded context survives refreshes while its record revision is
+unchanged; findings without additional detail do not show a load button.
