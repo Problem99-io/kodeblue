@@ -181,7 +181,7 @@ func (s *Store) markNotification(provider string, id int64, status, errText stri
 	_, err = tx.Exec(`UPDATE notifications SET
 status=(SELECT CASE WHEN SUM(status='pending')>0 THEN 'pending' WHEN SUM(status='failed')>0 THEN 'failed' WHEN SUM(status='delivered')>0 THEN 'delivered' ELSE 'skipped' END FROM notification_deliveries WHERE notification_id=?),
 attempts=(SELECT MAX(attempts) FROM notification_deliveries WHERE notification_id=?),
-error=COALESCE((SELECT GROUP_CONCAT(provider || ': ' || error, '; ') FROM notification_deliveries WHERE notification_id=? AND error!='' AND status IN ('pending','failed','skipped')),''),
+error=COALESCE((SELECT GROUP_CONCAT(provider || ': ' || error, '; ') FROM notification_deliveries WHERE notification_id=? AND error!='' AND (status IN ('pending','failed') OR (status='skipped' AND NOT EXISTS(SELECT 1 FROM notification_deliveries d2 WHERE d2.notification_id=notification_deliveries.notification_id AND d2.status<>'skipped')))),''),
 delivered_at=(SELECT MAX(delivered_at) FROM notification_deliveries WHERE notification_id=?) WHERE id=?`, id, id, id, id, id)
 	if err == nil {
 		_ = tx.Commit()
@@ -224,40 +224,61 @@ func (s *Server) slackTo(hook string) *notify.Slack {
 	return sl
 }
 
-func (s *Server) wakeSlack() {
+func signalNotification(ch chan struct{}) {
 	select {
-	case s.slackWake <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
 	}
 }
-
-// NotificationForwarder posts stored notifications to configured destinations
-// until ctx ends: at most one in flight per provider, retries with backoff, and a final
-// "failed" after slackMaxAttempts. The server name comes from the hub, not
-// from the server's own data, so a server cannot post as another.
-func (s *Server) NotificationForwarder(ctx context.Context) {
-	var workers sync.WaitGroup
-	for _, provider := range []string{"slack", "telegram"} {
-		workers.Add(1)
-		go func(provider string) {
-			defer workers.Done()
-			var resume time.Time
-			t := time.NewTicker(5 * time.Second)
-			defer t.Stop()
-			for {
-				if !time.Now().Before(resume) {
-					resume = time.Now().Add(s.forwardProvider(ctx, provider))
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-				case <-s.slackWake:
-				}
-			}
-		}(provider)
+func (s *Server) wakeSlack() { signalNotification(s.slackWake); signalNotification(s.telegramWake) }
+func (s *Server) resetNotificationProvider(provider string) {
+	_, _ = s.st.db.Exec(`UPDATE notification_deliveries SET next_try=0 WHERE provider=? AND status='pending'`, provider)
+	if provider == "slack" {
+		signalNotification(s.slackReset)
+	} else {
+		signalNotification(s.telegramReset)
 	}
-	workers.Wait()
+}
+
+// Each provider owns its wake/reset channels and schedule. Item retry times
+// are durable; a provider transport pause is short and independent of them.
+func (s *Server) NotificationForwarder(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, provider := range []string{"slack", "telegram"} {
+		wg.Add(1)
+		go func(provider string) { defer wg.Done(); s.forwardNotifications(ctx, provider) }(provider)
+	}
+	wg.Wait()
+}
+func (s *Server) forwardNotifications(ctx context.Context, provider string) {
+	wake, reset := s.slackWake, s.slackReset
+	if provider == "telegram" {
+		wake, reset = s.telegramWake, s.telegramReset
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	var resume time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		case <-wake:
+		case <-reset:
+			_, _ = s.st.db.Exec(`UPDATE notification_deliveries SET next_try=0 WHERE provider=? AND status='pending'`, provider)
+			resume = time.Time{}
+		}
+		if time.Now().Before(resume) {
+			timer.Reset(time.Until(resume))
+			continue
+		}
+		delay := s.forwardProvider(ctx, provider)
+		resume = time.Now().Add(delay)
+		if delay <= 0 {
+			delay = 5 * time.Second
+		}
+		timer.Reset(delay)
+	}
 }
 
 func (s *Server) forwardDue(ctx context.Context) {
@@ -287,7 +308,7 @@ func (s *Server) forwardProvider(ctx context.Context, provider string) time.Dura
 			}
 		}
 		if sender == nil || sevRank[n.Severity] < sevRank[minimum] {
-			reason := "below minimum severity"
+			reason := "below minimum severity (" + minimum + ")"
 			if sender == nil {
 				reason = map[string]string{"slack": "Slack", "telegram": "Telegram"}[provider] + " is not configured"
 			}
@@ -315,7 +336,22 @@ func (s *Server) forwardProvider(ctx context.Context, provider string) time.Dura
 		}
 		s.st.markNotification(provider, n.ID, "pending", err.Error(), attempts, time.Now().Add(backoff))
 		s.log.Warn("notification delivery failed; will retry", "provider", provider, "notification", n.ID, "attempt", attempts, "error", err)
-		return backoff
+		var httpFailure interface {
+			HTTPStatus() int
+			RetryDelay() time.Duration
+		}
+		if errors.As(err, &httpFailure) {
+			if httpFailure.HTTPStatus() == 429 {
+				if delay := httpFailure.RetryDelay(); delay > 0 {
+					return delay
+				}
+				return 30 * time.Second
+			}
+			if httpFailure.HTTPStatus() < 500 {
+				continue
+			}
+		}
+		return min(backoff, time.Second)
 	}
 	return 0
 }
@@ -375,6 +411,7 @@ func (s *Server) handleSlackPut(w http.ResponseWriter, r *http.Request, c *opCtx
 		_ = s.st.SetSetting(settingSlackMinSev, *req.MinSeverity)
 		s.st.Audit(c.user.Name, "slack.min_severity", "", *req.MinSeverity, c.ip)
 	}
+	s.resetNotificationProvider("slack")
 	writeJSON(w, http.StatusOK, s.st.SlackSettings())
 }
 

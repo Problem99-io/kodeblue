@@ -109,6 +109,10 @@ func (s *Server) handleTelegramPut(w http.ResponseWriter, r *http.Request, c *op
 			action = "cleared"
 		}
 	}
+	s.resetNotificationProvider("telegram")
+	if settings := s.st.TelegramSettings(); !settings.Configured && (s.st.Setting(settingTelegramToken) != "" || settings.ChatID != "") {
+		s.log.Warn("Telegram configuration is incomplete; delivery disabled")
+	}
 	s.st.Audit(c.user.Name, "telegram.settings", "", "token="+action, c.ip)
 	writeJSON(w, http.StatusOK, s.st.TelegramSettings())
 }

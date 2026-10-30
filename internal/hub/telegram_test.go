@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -307,5 +308,90 @@ func TestTelegramTestEndpointRateLimit(t *testing.T) {
 		if code != want {
 			t.Fatalf("test %d status %d want %d", i, code, want)
 		}
+	}
+}
+
+func TestHighAttemptFailureDoesNotDelayFreshCriticalAlert(t *testing.T) {
+	srv, st, _ := newHub(t)
+	_ = st.SetSetting(settingSlackWebhook, "https://hooks.slack.com/services/test")
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{note("old", "high", "old alert")}})
+	_, _ = st.db.Exec(`UPDATE notification_deliveries SET attempts=6 WHERE provider='slack'`)
+	failed, delivered := make(chan struct{}, 1), make(chan struct{}, 1)
+	var calls atomic.Int32
+	srv.models.client = &http.Client{Transport: telegramTransport(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			failed <- struct{}{}
+			return nil, errors.New("brief transport failure")
+		}
+		delivered <- struct{}{}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { srv.NotificationForwarder(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-failed:
+	case <-time.After(time.Second):
+		t.Fatal("first delivery not attempted")
+	}
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{note("fresh", "critical", "new critical alert")}})
+	srv.wakeSlack()
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old item's backoff blocked a new critical alert")
+	}
+	var next int64
+	_ = st.db.QueryRow(`SELECT d.next_try FROM notification_deliveries d JOIN notifications n ON n.id=d.notification_id WHERE n.rid='old' AND d.provider='slack'`).Scan(&next)
+	if next < time.Now().Add(30*time.Minute).Unix() {
+		t.Fatal("item backoff was lost")
+	}
+	notes := st.Notifications(host.ID, 2)
+	for _, n := range notes {
+		if n.Status == "failed" && strings.Contains(n.Error, "Telegram is not configured") {
+			t.Fatal("unconfigured Telegram polluted a Slack failure")
+		}
+	}
+}
+func TestSavingTelegramSettingsResets429Pause(t *testing.T) {
+	srv, st, ts := newHub(t)
+	client, csrf := signIn(t, st, ts)
+	_ = st.SetSetting(settingTelegramToken, "123:secret")
+	_ = st.SetSetting(settingTelegramChat, "-1")
+	host, _, _ := st.CreateServer("host", "test", time.Hour)
+	_ = st.ApplySync(host.ID, &hubproto.SyncRequest{Records: []hubproto.Record{note("1", "high", "test")}})
+	failed, delivered := make(chan struct{}, 1), make(chan struct{}, 1)
+	var calls atomic.Int32
+	srv.models.client = &http.Client{Transport: telegramTransport(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			failed <- struct{}{}
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(`{"ok":false,"error_code":429,"description":"limited","parameters":{"retry_after":3600}}`))}, nil
+		}
+		delivered <- struct{}{}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { srv.NotificationForwarder(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-failed:
+	case <-time.After(time.Second):
+		t.Fatal("Telegram not attempted")
+	}
+	select {
+	case <-delivered:
+		t.Fatal("429 pause ignored")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if code, _ := do(t, client, "PUT", ts.URL+"/api/settings/telegram", "", csrf, map[string]any{"bot_token": "123:replacement"}); code != 200 {
+		t.Fatalf("save status %d", code)
+	}
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("saved config did not reset provider/item pause")
 	}
 }

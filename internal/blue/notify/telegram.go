@@ -42,24 +42,33 @@ func ValidateTelegramChat(chat string) error {
 
 // TelegramFromConfig prefers an inline token, otherwise reading the secret file.
 func TelegramFromConfig(token, file, chat, chatFile string) *Telegram {
+	return TelegramFromConfigWithLogger(nil, token, file, chat, chatFile)
+}
+
+func TelegramFromConfigWithLogger(logger *slog.Logger, token, file, chat, chatFile string) *Telegram {
+	warn := func(message string) {
+		if logger != nil {
+			logger.Warn(message)
+		}
+	}
 	token, chat = strings.TrimSpace(token), strings.TrimSpace(chat)
 	if chat == "" && chatFile != "" {
 		if b, err := os.ReadFile(chatFile); err == nil {
 			chat = strings.TrimSpace(string(b))
 		} else if !os.IsNotExist(err) || chatFile != "/etc/kodeblue/telegram.chat" {
-			slog.Warn("could not read Telegram chat file")
+			warn("could not read Telegram chat file")
 		}
 	}
 	if token == "" && file != "" {
 		if b, err := os.ReadFile(file); err == nil {
 			token = strings.TrimSpace(string(b))
 		} else if !os.IsNotExist(err) || file != "/etc/kodeblue/telegram.token" {
-			slog.Warn("could not read Telegram token file")
+			warn("could not read Telegram token file")
 		}
 	}
 	if ValidateTelegramToken(token) != nil || ValidateTelegramChat(chat) != nil {
 		if token != "" || chat != "" {
-			slog.Warn("Telegram configuration is incomplete or invalid; delivery disabled")
+			warn("Telegram configuration is incomplete or invalid; delivery disabled")
 		}
 		return nil
 	}
@@ -189,3 +198,6 @@ func (s *Telegram) Async(m Message, onErr func(error)) {
 		}
 	}()
 }
+
+func (e *DeliveryError) HTTPStatus() int           { return e.Code }
+func (e *DeliveryError) RetryDelay() time.Duration { return e.RetryAfter }

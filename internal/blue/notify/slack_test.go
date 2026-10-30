@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,3 +46,18 @@ func TestSlackTransportErrorRedactsWebhook(t *testing.T) {
 		t.Fatalf("webhook exposed: %v", err)
 	}
 }
+
+func TestSlackRedactsDifferentErrorURL(t *testing.T) {
+	slack := FromConfig("https://hooks.slack.com/services/configured-secret", "")
+	slack.HTTP = &http.Client{Transport: redactionTransport(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("failed at https://alternate.example/another-secret")
+	})}
+	err := slack.Send(context.Background(), Message{Title: "test"})
+	if err == nil || strings.Contains(err.Error(), "alternate.example") || strings.Contains(err.Error(), "another-secret") {
+		t.Fatalf("incomplete URL redaction: %v", err)
+	}
+}
+
+type redactionTransport func(*http.Request) (*http.Response, error)
+
+func (f redactionTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -247,3 +247,8 @@ kodeblue-hub pin [--tls-cert f]                          # the self-signed certi
 ```
 
 Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
+
+Provider transport/5xx failures pause that worker for at most one second, while
+each failed item keeps its own durable exponential retry delay. A 429 pauses the
+provider for Retry-After. Provider wake channels are separate; saving settings
+clears its in-memory pause and makes pending items due again.
