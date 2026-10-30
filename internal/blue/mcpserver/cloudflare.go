@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/cloudflare"
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
@@ -35,7 +34,7 @@ func (s *Server) cloudflareContext(ctx context.Context, args json.RawMessage) (s
 	if err = s.reserveCloudflare(q); err != nil {
 		return "", err
 	}
-	result, err := (&cloudflare.Client{Token: token}).Lookup(ctx, q, s.cfg.Cloudflare.ZoneIDs)
+	result, err := (&cloudflare.Client{Token: token, ZoneLabels: s.cfg.Cloudflare.ZoneLabels}).Lookup(ctx, q, s.cfg.Cloudflare.ZoneIDs)
 	if err != nil {
 		return "", err
 	}
@@ -47,6 +46,9 @@ func (s *Server) cloudflareViaHub(ctx context.Context, q cloudflare.Query) (stri
 		metadata, err := s.cloudflareHubRequest(ctx, cloudflare.Query{})
 		if err != nil {
 			return "", err
+		}
+		if !metadata.Configured {
+			return "", errors.New("Cloudflare is not configured for this server")
 		}
 		q, err = cloudflare.Normalize(q, metadata.Zones)
 		if err != nil {
@@ -109,16 +111,7 @@ func (s *Server) cloudflareHubRequest(ctx context.Context, q cloudflare.Query) (
 			Error string `json:"error"`
 		}
 		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&message) == nil && message.Error != "" {
-			safe := strings.ReplaceAll(message.Error, key, "[redacted]")
-			safe = strings.Map(func(r rune) rune {
-				if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-					return -1
-				}
-				return r
-			}, safe)
-			if len(safe) > 512 {
-				safe = safe[:512]
-			}
+			safe := cloudflare.Sanitize(message.Error, key, 512)
 			return nil, fmt.Errorf("Cloudflare context: %s", safe)
 		}
 		return nil, errors.New("Cloudflare context unavailable: check settings and lookup budget on the hub")
@@ -127,11 +120,13 @@ func (s *Server) cloudflareHubRequest(ctx context.Context, q cloudflare.Query) (
 	if err != nil || len(data) > 2<<20 {
 		return nil, errors.New("invalid Cloudflare hub response")
 	}
+	data, err = cloudflare.SanitizeJSON(data, key)
+	if err != nil {
+		return nil, errors.New("invalid Cloudflare hub response")
+	}
 	var result cloudflare.Result
 	if json.Unmarshal(data, &result) != nil {
 		return nil, errors.New("invalid Cloudflare hub response")
 	}
-	safe := strings.ReplaceAll(jsonOut(result), key, "[redacted]")
-	_ = json.Unmarshal([]byte(safe), &result)
 	return &result, nil
 }

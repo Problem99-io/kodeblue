@@ -91,6 +91,12 @@ func main() {
 		fatal(err)
 	}
 
+	if cmd == "run" || cmd == "mcp" {
+		if err := cfg.ValidateAgentCredentials(); err != nil {
+			fatal(err)
+		}
+	}
+
 	// Settings from the hub apply to the daemon, the agents' MCP server and
 	// status. The root response helper (respond) reads only the root-owned
 	// config.

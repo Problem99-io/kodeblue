@@ -298,10 +298,17 @@ untrusted model input.
 
 Cloudflare lookup limits are separate: 5 validated lookups/minute per server and
 25/minute across the hub. Each lookup makes at most two provider calls, leaving
-headroom under 300 calls per five minutes. HTTP 429/5xx failures refund hub
-reservations. Local accounting uses a dedicated counter, not the security journal.
+headroom under 300 calls per five minutes. Only event-query failures returning no data can refund hub reservations;
+429 retains the global charge. Optional bot failures never refund delivered evidence. Local accounting uses a dedicated counter, not the security journal.
 User agent and path fields are limited to 256 characters and stripped of invisible
 format/control characters. The learner does not receive this investigation tool.
 Standalone token files must be root-owned regular files under `/etc/kodeblue/`,
-with mode 0600 or 0640. Other kodeblue credentials cannot be reused. Inline tokens
-are accepted only from configuration files satisfying the same protection rules.
+with group kodeblue and mode 0640 so the daemon can read them. Mode 0600 is
+usable only by root. Token filenames must begin with cloudflare and end in
+.token or .key; other kodeblue credentials cannot be reused. Inline tokens
+require protected configuration files; only run/mcp reject unsafe inline secrets,
+so an optional integration cannot disable containment, undo or enrollment.
+
+Local lookup accounting uses a sliding 60-second window. Zone entries can include
+an optional domain/label after the ID (one zone per line); metadata returns these
+labels without additional Cloudflare requests.

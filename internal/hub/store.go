@@ -292,7 +292,7 @@ func (s *Store) Revoke(id string) error {
 	if _, err = tx.Exec(`UPDATE servers SET revoked=1, key_hash='', enroll_hash='', enroll_expires=0 WHERE id=?`, id); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`DELETE FROM settings WHERE k IN (?,?)`, "cloudflare.token."+id, "cloudflare.zones."+id); err != nil {
+	if _, err = tx.Exec(`DELETE FROM settings WHERE k IN (?,?,?)`, "cloudflare.token."+id, "cloudflare.zones."+id, "cloudflare.labels."+id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -307,7 +307,7 @@ func (s *Store) DeleteServer(id string) error {
 	if _, err := tx.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM settings WHERE k IN (?,?,?)`, settingServerPrefix+id, "cloudflare.token."+id, "cloudflare.zones."+id); err != nil {
+	if _, err := tx.Exec(`DELETE FROM settings WHERE k IN (?,?,?,?)`, settingServerPrefix+id, "cloudflare.token."+id, "cloudflare.zones."+id, "cloudflare.labels."+id); err != nil {
 		return err
 	}
 	return tx.Commit()

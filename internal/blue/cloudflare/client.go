@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -49,17 +50,17 @@ type BotGroup struct {
 }
 
 type Result struct {
-	RetryableUpstream bool       `json:"-"`
-	Configured        bool       `json:"configured"`
-	Zones             []string   `json:"zone_ids"`
-	IP                string     `json:"ip,omitempty"`
-	ZoneID            string     `json:"zone_id,omitempty"`
-	Since             string     `json:"since,omitempty"`
-	Until             string     `json:"until,omitempty"`
-	Events            []Event    `json:"security_events,omitempty"`
-	Bots              []BotGroup `json:"bot_traffic,omitempty"`
-	Truncated         bool       `json:"possibly_truncated"`
-	Notes             []string   `json:"notes"`
+	ZoneLabels map[string]string `json:"zone_labels,omitempty"`
+	Configured bool              `json:"configured"`
+	Zones      []string          `json:"zone_ids"`
+	IP         string            `json:"ip,omitempty"`
+	ZoneID     string            `json:"zone_id,omitempty"`
+	Since      string            `json:"since,omitempty"`
+	Until      string            `json:"until,omitempty"`
+	Events     []Event           `json:"security_events,omitempty"`
+	Bots       []BotGroup        `json:"bot_traffic,omitempty"`
+	Truncated  bool              `json:"possibly_truncated"`
+	Notes      []string          `json:"notes"`
 }
 
 func ValidToken(token string) bool { return tokenPattern.MatchString(token) }
@@ -104,8 +105,9 @@ func Normalize(q Query, zones []string) (Query, error) {
 }
 
 type Client struct {
-	Token string
-	HTTP  *http.Client
+	ZoneLabels map[string]string
+	Token      string
+	HTTP       *http.Client
 }
 
 const eventQuery = `query SecurityContext($zone: string, $filter: FirewallEventsAdaptiveFilter_InputObject) {
@@ -125,12 +127,21 @@ type zoneData struct {
 
 // Lookup never accepts a provider URL or arbitrary GraphQL from the caller.
 func (c *Client) Lookup(ctx context.Context, q Query, zones []string) (*Result, error) {
+	if q.IP != "" && (!ValidToken(c.Token) || len(zones) == 0) {
+		return nil, errors.New("Cloudflare is not configured for this server")
+	}
 	q, err := Normalize(q, zones)
 	if err != nil {
 		return nil, err
 	}
 	configured := ValidToken(c.Token) && len(zones) > 0
-	r := &Result{Configured: configured, Zones: slices.Clone(zones), Notes: []string{
+	labels := map[string]string{}
+	for _, zone := range zones {
+		if label := c.ZoneLabels[zone]; label != "" {
+			labels[zone] = Sanitize(label, c.Token, 128)
+		}
+	}
+	r := &Result{Configured: configured, Zones: slices.Clone(zones), ZoneLabels: labels, Notes: []string{
 		"Read-only supporting evidence, not permission to block. Correlate with local findings and protected IP policy.",
 		"Adaptive datasets may be sampled; event counts and empty results are not complete traffic counts or proof of safety.",
 		"Bot score 0 is not computed; missing scores are unknown. Automation alone does not imply malicious activity; verified bots can be legitimate.",
@@ -168,8 +179,6 @@ func (c *Client) Lookup(ctx context.Context, q Query, zones []string) (*Result, 
 	}
 	data, err = c.query(ctx, botQuery, vars)
 	if err != nil {
-		var upstream *HTTPError
-		r.RetryableUpstream = errors.As(err, &upstream) && upstream.Retryable()
 		r.Notes = append(r.Notes, "Bot-score analytics unavailable: check your plan, analytics permissions and dataset availability. No bot classification inferred.")
 	} else {
 		r.Bots = data.Bots
@@ -194,7 +203,7 @@ func (c *Client) Lookup(ctx context.Context, q Query, zones []string) (*Result, 
 func bound(s string, n int) string {
 	r := []rune{}
 	for _, c := range s {
-		if !unicode.Is(unicode.Cf, c) && !unicode.IsControl(c) {
+		if !unicode.Is(unicode.Cf, c) && !unicode.IsControl(c) && c != 0x2028 && c != 0x2029 && !(c >= 0xfe00 && c <= 0xfe0f) && !(c >= 0xe0100 && c <= 0xe01ef) {
 			r = append(r, c)
 		}
 	}
@@ -231,7 +240,10 @@ func (c *Client) query(ctx context.Context, query string, variables map[string]a
 		return empty, errors.New("Cloudflare response could not be read or exceeded its limit")
 	}
 	// Never expose the configured credential even if an upstream echoes it.
-	raw = bytes.ReplaceAll(raw, []byte(c.Token), []byte("[redacted]"))
+	raw, err = SanitizeJSON(raw, c.Token)
+	if err != nil {
+		return empty, errors.New("Cloudflare returned malformed analytics")
+	}
 	var result struct {
 		Errors []json.RawMessage `json:"errors"`
 		Data   struct {
@@ -240,13 +252,6 @@ func (c *Client) query(ctx context.Context, query string, variables map[string]a
 			} `json:"viewer"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(raw, &result) != nil {
-		return empty, errors.New("Cloudflare returned malformed analytics")
-	}
-	// Normalize JSON escapes before redaction as well: a provider can echo
-	// an ASCII token using Unicode escapes inside an otherwise valid field.
-	raw, _ = json.Marshal(result)
-	raw = bytes.ReplaceAll(raw, []byte(c.Token), []byte("[redacted]"))
 	if json.Unmarshal(raw, &result) != nil {
 		return empty, errors.New("Cloudflare returned malformed analytics")
 	}
@@ -263,3 +268,42 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("Cloudflare returned HTTP %d; check analytics access, plan limits or retry later", e.StatusCode)
 }
 func (e *HTTPError) Retryable() bool { return e.StatusCode == 429 || e.StatusCode >= 500 }
+
+// Sanitize removes invisible characters before redaction and truncates only at
+// rune boundaries. Cleaning first prevents reassembling an echoed credential.
+func Sanitize(s, secret string, limit int) string {
+	s = bound(s, len([]rune(s)))
+	if secret != "" {
+		s = strings.ReplaceAll(s, secret, "[redacted]")
+	}
+	runes := []rune(s)
+	if len(runes) > limit {
+		runes = runes[:limit]
+	}
+	return string(runes)
+}
+func SanitizeJSON(data []byte, secret string) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+	var clean func(any) any
+	clean = func(v any) any {
+		switch v := v.(type) {
+		case string:
+			return Sanitize(v, secret, len([]rune(v)))
+		case []any:
+			for i := range v {
+				v[i] = clean(v[i])
+			}
+		case map[string]any:
+			out := map[string]any{}
+			for k, x := range v {
+				out[Sanitize(k, secret, len([]rune(k)))] = clean(x)
+			}
+			return out
+		}
+		return v
+	}
+	return json.Marshal(clean(value))
+}

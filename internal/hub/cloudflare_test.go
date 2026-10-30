@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -30,12 +32,12 @@ func TestCloudflareSettingsStayOnHubAndAreServerScoped(t *testing.T) {
 	if code, _ := do(t, client, "PUT", path, "", "", map[string]any{"api_token": secret}); code != 403 {
 		t.Fatal("settings lack CSRF protection")
 	}
-	code, body := do(t, client, "PUT", path, "", csrf, map[string]any{"api_token": secret, "zone_ids": []string{zone}})
+	code, body := do(t, client, "PUT", path, "", csrf, map[string]any{"api_token": secret, "zone_ids": []string{zone}, "zone_labels": map[string]string{zone: "example.test"}})
 	if code != 200 || strings.Contains(string(body), secret) {
 		t.Fatalf("settings leaked or failed: %d %s", code, body)
 	}
 	_, body = do(t, client, "GET", path, "", "", nil)
-	if strings.Contains(string(body), secret) || !strings.Contains(string(body), zone) {
+	if strings.Contains(string(body), secret) || !strings.Contains(string(body), zone) || !strings.Contains(string(body), "example.test") {
 		t.Fatalf("unsafe settings: %s", body)
 	}
 	_, _ = do(t, client, "PUT", path, "", csrf, map[string]any{"zone_ids": []string{zone}})
@@ -139,5 +141,64 @@ func TestCloudflareBudgetsAreIndependentAndRefundTransient(t *testing.T) {
 	status = 200
 	if code, _ := do(t, ts.Client(), "POST", ts.URL+cloudflare.HubPath, keys[1], "", query); code != 200 {
 		t.Fatalf("server remained rate limited: %d", code)
+	}
+}
+
+func TestCloudflarePartialDataKeepsBudgetAnd429RetainsGlobal(t *testing.T) {
+	for _, status := range []int{429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			s, st, ts := newHub(t)
+			host, token, _ := st.CreateServer("host", "test", time.Hour)
+			_, key, _ := st.Enroll(token, "host", "test")
+			_ = st.SetSetting("cloudflare.token."+host.ID, "synthetic-cloudflare-secret-token")
+			_ = st.SetSetting("cloudflare.zones."+host.ID, strings.Repeat("a", 32))
+			calls := 0
+			s.models.client = &http.Client{Transport: cloudflareTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				var request struct{ Query string }
+				_ = json.NewDecoder(r.Body).Decode(&request)
+				code := 200
+				if strings.Contains(request.Query, "BotContext") {
+					code = status
+				}
+				return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(`{"data":{"viewer":{"zones":[{}]}}}`))}, nil
+			})}
+			for i := 0; i < 40; i++ {
+				code, _ := do(t, ts.Client(), "POST", ts.URL+cloudflare.HubPath, key, "", map[string]any{"ip": "192.0.2.1"})
+				want := 429
+				if i < 5 {
+					want = 200
+				}
+				if code != want {
+					t.Fatalf("lookup %d code=%d want=%d", i, code, want)
+				}
+			}
+			if calls != 10 {
+				t.Fatalf("partial responses bypassed budget: %d calls", calls)
+			}
+		})
+	}
+	s, st, ts := newHub(t)
+	host, token, _ := st.CreateServer("rate", "test", time.Hour)
+	_, key, _ := st.Enroll(token, "rate", "test")
+	_ = st.SetSetting("cloudflare.token."+host.ID, "synthetic-cloudflare-secret-token")
+	_ = st.SetSetting("cloudflare.zones."+host.ID, strings.Repeat("a", 32))
+	calls := 0
+	s.models.client = &http.Client{Transport: cloudflareTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	for i := 0; i < 40; i++ {
+		code, _ := do(t, ts.Client(), "POST", ts.URL+cloudflare.HubPath, key, "", map[string]any{"ip": "192.0.2.1"})
+		want := 429
+		if i < 25 {
+			want = 502
+		}
+		if code != want {
+			t.Fatalf("rate-limit lookup %d code=%d", i, code)
+		}
+	}
+	if calls != 25 {
+		t.Fatalf("429 global budget bypassed: %d", calls)
 	}
 }

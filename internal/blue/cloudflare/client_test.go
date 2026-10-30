@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const testZone = "0123456789abcdef0123456789abcdef"
@@ -146,5 +147,32 @@ func TestCloudflareBoundsStripInvisibleCharacters(t *testing.T) {
 	}
 	if len([]rune(bound(strings.Repeat("a", 300), 256))) != 256 {
 		t.Fatal("field cap missing")
+	}
+}
+
+func TestRedactionAfterInvisibleNormalization(t *testing.T) {
+	echoed := testToken[:10] + "\u200b" + testToken[10:]
+	client := tlsClient(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.ReplaceAll(eventsJSON, "<script>untrusted</script>", echoed))
+	})
+	result, err := client.Lookup(context.Background(), Query{IP: "192.0.2.1"}, []string{testZone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(result)
+	if strings.Contains(string(data), testToken) || !strings.Contains(string(data), "[redacted]") {
+		t.Fatalf("echoed credential not redacted: %s", data)
+	}
+	if got := bound("a\ufe0f\U000e0100\u2028\u2029b", 256); got != "ab" {
+		t.Fatalf("invisible characters survived: %q", got)
+	}
+}
+
+func TestSanitizeRedactsBeforeRuneTruncation(t *testing.T) {
+	secret := "synthetic-server-token"
+	text := strings.Replace(secret, "server", "ser\u200bver", 1) + strings.Repeat("界", 600)
+	clean := Sanitize(text, secret, 512)
+	if !utf8.ValidString(clean) || strings.Contains(clean, secret) || !strings.HasPrefix(clean, "[redacted]") || len([]rune(clean)) != 512 {
+		t.Fatalf("unsafe normalized text: %q", clean)
 	}
 }

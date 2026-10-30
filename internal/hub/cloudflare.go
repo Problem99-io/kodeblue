@@ -1,21 +1,32 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/cloudflare"
 )
 
 type cloudflareSettings struct {
-	Configured bool     `json:"configured"`
-	Zones      []string `json:"zone_ids"`
+	Configured bool              `json:"configured"`
+	Zones      []string          `json:"zone_ids"`
+	Labels     map[string]string `json:"zone_labels"`
 }
 
 func (s *Store) cloudflareSettings(id string) cloudflareSettings {
 	zones := strings.Fields(s.Setting("cloudflare.zones." + id))
-	return cloudflareSettings{Configured: s.Setting("cloudflare.token."+id) != "" && len(zones) > 0, Zones: zones}
+	var saved map[string]string
+	_ = json.Unmarshal([]byte(s.Setting("cloudflare.labels."+id)), &saved)
+	labels := map[string]string{}
+	for _, zone := range zones {
+		if label := saved[zone]; label != "" {
+			labels[zone] = label
+		}
+	}
+	return cloudflareSettings{Labels: labels, Configured: s.Setting("cloudflare.token."+id) != "" && len(zones) > 0, Zones: zones}
 }
 
 func (s *Server) cloudflareRoutes() {
@@ -38,8 +49,9 @@ func (s *Server) handleCloudflarePut(w http.ResponseWriter, r *http.Request, c *
 		return
 	}
 	var req struct {
-		Token *string   `json:"api_token"`
-		Zones *[]string `json:"zone_ids"`
+		Token  *string            `json:"api_token"`
+		Zones  *[]string          `json:"zone_ids"`
+		Labels *map[string]string `json:"zone_labels"`
 	}
 	if readJSON(w, r, 8<<10, &req) != nil {
 		writeErr(w, 400, "bad Cloudflare settings")
@@ -60,6 +72,22 @@ func (s *Server) handleCloudflarePut(w http.ResponseWriter, r *http.Request, c *
 			return
 		}
 		values["cloudflare.zones."+host.ID] = strings.Join(*req.Zones, " ")
+	}
+	if req.Labels != nil {
+		zones := s.st.cloudflareSettings(host.ID).Zones
+		if req.Zones != nil {
+			zones = *req.Zones
+		}
+		labels := map[string]string{}
+		for zone, label := range *req.Labels {
+			if !slices.Contains(zones, zone) || len([]rune(label)) > 128 {
+				writeErr(w, 400, "zone labels must name configured zones and contain at most 128 characters")
+				return
+			}
+			labels[zone] = cloudflare.Sanitize(label, "", 128)
+		}
+		data, _ := json.Marshal(labels)
+		values["cloudflare.labels."+host.ID] = string(data)
 	}
 	tx, err := s.st.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -88,6 +116,10 @@ func (s *Server) handleCloudflareLookup(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	settings := s.st.cloudflareSettings(id)
+	if q.IP != "" && !settings.Configured {
+		writeErr(w, 400, "Cloudflare is not configured for this server")
+		return
+	}
 	if _, err := cloudflare.Normalize(q, settings.Zones); err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -106,20 +138,18 @@ func (s *Server) handleCloudflareLookup(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	client := cloudflare.Client{Token: s.st.Setting("cloudflare.token." + id), HTTP: s.models.client}
+	client := cloudflare.Client{Token: s.st.Setting("cloudflare.token." + id), HTTP: s.models.client, ZoneLabels: settings.Labels}
 	result, err := client.Lookup(r.Context(), q, settings.Zones)
 	if err != nil {
 		var upstream *cloudflare.HTTPError
 		if errors.As(err, &upstream) && upstream.Retryable() && local != nil {
 			local.Refund()
-			global.Refund()
+			if upstream.StatusCode != 429 {
+				global.Refund()
+			}
 		}
 		writeErr(w, 502, err.Error())
 		return
-	}
-	if result.RetryableUpstream && local != nil {
-		local.Refund()
-		global.Refund()
 	}
 	writeJSON(w, 200, result)
 }

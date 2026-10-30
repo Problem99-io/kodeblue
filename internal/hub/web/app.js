@@ -3700,7 +3700,7 @@ async function vServerSettings(srv, body) {
 // ---------- audit ----------
 function cloudflarePanel(srv) {
   const token = h("input", {type:"password", class:"full", autocomplete:"off", spellcheck:"false", "aria-label":"Cloudflare API token", placeholder:"Read-only analytics API token"});
-  const zones = h("textarea", {class:"ta", rows:3, spellcheck:"false", "aria-label":"Cloudflare zone IDs", placeholder:"One zone ID per line"});
+  const zones = h("textarea", {class:"ta", rows:3, spellcheck:"false", "aria-label":"Cloudflare zone IDs", placeholder:"One zone ID per line, optionally followed by a domain or label"});
   const state = h("span", {class:"badge"}, "Loading…");
   const message = statusLine();
   const save = h("button", {class:"btn primary", type:"button"}, "Save Cloudflare");
@@ -3709,19 +3709,22 @@ function cloudflarePanel(srv) {
   const paint = (s) => {
     state.textContent = s.configured ? "configured" : "not configured";
     state.className = "badge" + (s.configured ? " b-ok" : "");
-    zones.value = (s.zone_ids || []).join("\n");
+    zones.value = (s.zone_ids || []).map(id=>id+(s.zone_labels?.[id] ? " "+s.zone_labels[id] : "")).join("\n");
     token.value = "";
     token.placeholder = s.configured ? "Leave blank to keep the stored token" : "Read-only analytics API token";
   };
   save.addEventListener("click", () => busyBtn(save, message, async () => {
-    const data = {zone_ids:zones.value.split(/[\s,]+/).filter(Boolean)};
+    const data = {zone_ids:[],zone_labels:{}};
+    for(const line of zones.value.split(/\n/).map(s=>s.trim()).filter(Boolean)){
+      const [id,...label]=line.split(/\s+/);data.zone_ids.push(id);if(label.length)data.zone_labels[id]=label.join(" ");
+    }
     if (token.value.trim()) data.api_token = token.value.trim();
     paint(await api("PUT", path, data));
     message.say("Cloudflare settings saved.", "ok");
   }));
   clear.addEventListener("click", () => busyBtn(clear, message, async () => {
     if (!(await ask("Clear Cloudflare", "Remove this server's stored token and zone access?", "Clear", true))) return;
-    paint(await api("PUT", path, {api_token:"", zone_ids:[]}));
+    paint(await api("PUT", path, {api_token:"", zone_ids:[],zone_labels:{}}));
     message.say("Cloudflare access cleared.", "ok");
   }));
   api("GET", path).then(paint).catch((e) => {state.textContent="unavailable";message.say(e.message,"bad");});

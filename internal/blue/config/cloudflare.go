@@ -4,15 +4,18 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
 
 type Cloudflare struct {
-	APIToken     string   `toml:"api_token"`
-	APITokenFile string   `toml:"api_token_file"`
-	ZoneIDs      []string `toml:"zone_ids"`
+	ZoneLabels   map[string]string `toml:"zone_labels"`
+	APIToken     string            `toml:"api_token"`
+	APITokenFile string            `toml:"api_token_file"`
+	ZoneIDs      []string          `toml:"zone_ids"`
 }
 
 func (c Cloudflare) Token(configPath ...string) (string, error) {
@@ -62,20 +65,35 @@ func openCloudflareSecret(path string, config bool) (*os.File, error) {
 	}
 	f := os.NewFile(uintptr(fd), resolved)
 	info, err := f.Stat()
-	if err != nil || !protectedCloudflareInfo(info) {
+	group, gerr := user.LookupGroup("kodeblue")
+	var gid uint64
+	if gerr == nil {
+		gid, gerr = strconv.ParseUint(group.Gid, 10, 32)
+	}
+	if err != nil || gerr != nil || !protectedCloudflareInfo(info, uint32(gid)) {
 		f.Close()
-		return nil, errors.New("Cloudflare credentials require a root-owned regular file with permissions 0600 or 0640")
+		return nil, errors.New("Cloudflare credentials require a root:kodeblue regular file (0640 for the daemon, 0600 for root only)")
 	}
 	return f, nil
 }
 func forbiddenCloudflareFile(path string) bool {
 	name := strings.ToLower(filepath.Base(path))
-	return name == "hub.key" || name == "inference.key" || name == "kodeblue.toml" || name == "telegram.token" || name == "telegram.chat" || strings.HasSuffix(name, ".webhook")
+	return !strings.HasPrefix(name, "cloudflare") || !(strings.HasSuffix(name, ".token") || strings.HasSuffix(name, ".key")) || name == "im.key" || name == "hub.key" || name == "inference.key" || name == "kodeblue.toml" || name == "telegram.token" || name == "telegram.chat" || strings.HasSuffix(name, ".webhook")
 }
-func protectedCloudflareInfo(info os.FileInfo) bool {
-	if info == nil || !info.Mode().IsRegular() || info.Mode().Perm()&0037 != 0 {
+func protectedCloudflareInfo(info os.FileInfo, gid uint32) bool {
+	if info == nil || !info.Mode().IsRegular() || info.Mode().Perm()&0137 != 0 {
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == 0
+	return ok && stat.Uid == 0 && stat.Gid == gid
+}
+
+// Only commands capable of starting agents must reject inspectable inline
+// credentials. Optional analytics must never disable containment or undo.
+func (c Config) ValidateAgentCredentials() error {
+	if strings.TrimSpace(c.Cloudflare.APIToken) == "" {
+		return nil
+	}
+	_, err := c.Cloudflare.Token(c.Path())
+	return err
 }
