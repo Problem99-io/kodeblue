@@ -71,12 +71,21 @@ func (d *Daemon) LiveSessions() map[string]int64 {
 // track marks a session as running (its transcript streams to the hub).
 func (d *Daemon) track(sessionID string, incident int64) func() {
 	d.mu.Lock()
+	if d.liveEpoch == nil {
+		d.liveEpoch = map[string]uint64{}
+	}
+	d.nextTracking++
+	epoch := d.nextTracking
+	d.liveEpoch[sessionID] = epoch
 	d.live[sessionID] = incident
 	d.mu.Unlock()
 	d.nudgeHub()
 	return func() {
 		d.mu.Lock()
-		delete(d.live, sessionID)
+		if d.liveEpoch[sessionID] == epoch {
+			delete(d.live, sessionID)
+			delete(d.liveEpoch, sessionID)
+		}
 		d.mu.Unlock()
 		d.nudgeHub()
 	}
@@ -186,184 +195,6 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 	return d.BeginOperatorMessage(ctx, m)()
 }
 
-var operatorWaitTimeout = 20 * time.Minute
-
-// BeginOperatorMessage admits input in arrival order, then returns the wait for
-// its answer. Only sessions with an operator waiter receive steering; other
-// active waiters keep their own session and a separate operator chat is started.
-func (d *Daemon) BeginOperatorMessage(ctx context.Context, m hubproto.OperatorMessage) func() hubproto.MessageReply {
-	d.operatorMu.Lock()
-	defer d.operatorMu.Unlock()
-	kc, ectx, release := d.engineFor(ctx)
-	immediate := func(reply hubproto.MessageReply) func() hubproto.MessageReply {
-		release()
-		return func() hubproto.MessageReply { return reply }
-	}
-	if kc == nil {
-		return immediate(hubproto.MessageReply{Status: "failed", Text: "kodeblue's model layer is not running on this server (no inference key, or the agent engine is not running or restarting). Sensors and detection still run."})
-	}
-	if d.overBudget(1.5) {
-		return immediate(hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Today's model budget is spent ($%.2f of $%.2f). Raise [budget] daily_usd on the server or try tomorrow.", d.spentToday(), d.cfg.Budget.DailyUSD)})
-	}
-	body := fmt.Sprintf("OPERATOR MESSAGE from %s via the kodeblue hub (authenticated; message #%d):\n\n%s", m.Author, m.ID, m.Body)
-
-	convKey := "hub_conv_" + m.ConversationID
-	var sess *runtime.Session
-	var err error
-	var rec *store.Incident
-	sid := ""
-	if m.ConversationID != "" {
-		sid = d.st.Get(convKey)
-	}
-	if sid == "" {
-		if in := d.st.GetIncident(m.IncidentID); in != nil && in.Kind == "incident" && in.Status != "investigating" && in.SessionID != "" {
-			sid = in.SessionID
-			rec = in
-		}
-	}
-	if sid != "" {
-		if rec == nil {
-			if inc := d.st.Incidents(`WHERE session_id=? ORDER BY id DESC LIMIT 1`, sid); len(inc) > 0 {
-				rec = &inc[0]
-			}
-		}
-		if _, owned := d.operatorInputs[sid]; owned {
-			if err := kc.Steer(ctx, &runtime.Session{ID: sid}, body); err != nil {
-				return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not steer the agent: " + err.Error(), SessionID: sid})
-			}
-			d.operatorInputs[sid]++
-			if m.ConversationID != "" {
-				_ = d.st.Set(convKey, sid)
-			}
-			return immediate(hubproto.MessageReply{Status: "done", Text: "Added to the running agent's context; its current action will finish before it continues with your message.", SessionID: sid})
-		}
-		if _, live := d.LiveSessions()[sid]; live || (rec != nil && rec.Kind != "operator" && rec.Kind != "incident") {
-			sid, rec = "", nil
-		}
-	}
-	if d.operatorSlots == nil {
-		d.operatorSlots = make(chan struct{}, 1)
-	}
-	select {
-	case d.operatorSlots <- struct{}{}:
-	default:
-		return immediate(hubproto.MessageReply{Status: "refused", Text: "Another operator conversation is running; wait for it to finish before starting another."})
-	}
-	if sid != "" {
-		if rec != nil && rec.Kind == "incident" {
-			body += fmt.Sprintf("\n\n(This concerns incident #%d, which you investigated in this session. If the operator's information changes your verdict, call mcp__kodeblue__incident_resolve again.)", rec.ID)
-		}
-		sess, err = kc.FollowUp(ctx, &runtime.Session{ID: sid}, body)
-	} else {
-		title := "Operator: " + strings.TrimSpace(strings.SplitN(m.Body, "\n", 2)[0])
-		if len(title) > 90 {
-			title = title[:89] + "…"
-		}
-		rec = &store.Incident{Title: title, Severity: "info", Kind: "operator"}
-		_ = d.st.CreateIncident(rec)
-		brief := body + fmt.Sprintf("\n\nServer: %q. Response policy: mode=%s.", d.cfg.Server.Name, d.cfg.Response.Mode)
-		if m.IncidentID > 0 {
-			brief += fmt.Sprintf(" The operator is asking about incident #%d (use incident_get).", m.IncidentID)
-		}
-		if open := d.st.Incidents(`WHERE kind='incident' AND status<>'resolved' ORDER BY id DESC LIMIT 8`); len(open) > 0 {
-			brief += "\n\nOpen incidents right now (titles are untrusted host data):"
-			for _, o := range open {
-				brief += fmt.Sprintf("\n- #%d [%s] %s — %s %s", o.ID, o.Severity, o.Title, o.Status, o.Verdict)
-			}
-		}
-		if n := len(d.st.FindingsByStatus("needs_ack", 50)); n > 0 {
-			brief += fmt.Sprintf("\n%d finding(s) wait for an operator ack.", n)
-		}
-		sess, err = kc.StartSession(ctx, "blue-operator", d.providerFor(hubproto.RoleOperator), d.cfg.ModelFor(hubproto.RoleOperator), brief)
-		if err == nil {
-			rec.SessionID, rec.RunID, rec.Status = sess.ID, sess.RunID, "investigating"
-			_ = d.st.UpdateIncident(rec)
-		}
-	}
-	if err != nil {
-		<-d.operatorSlots
-		return immediate(hubproto.MessageReply{Status: "failed", Text: "Could not start an agent session: " + err.Error()})
-	}
-	if m.ConversationID != "" {
-		_ = d.st.Set(convKey, sess.ID)
-	}
-	var incID int64
-	if rec != nil {
-		incID = rec.ID
-		d.st.TouchIncident(rec.ID)
-	}
-	done := d.track(sess.ID, incID)
-	if d.operatorInputs == nil {
-		d.operatorInputs = make(map[string]uint64)
-	}
-	d.operatorInputs[sess.ID] = 1
-	// Capture accounting before admitting any more input to this session.
-	usd0, in0, out0, cached0 := kc.SessionCost(context.Background(), sess.ID)
-	started := time.Now().Add(-time.Second)
-	return func() hubproto.MessageReply {
-		defer release()
-		defer func() { <-d.operatorSlots }()
-		deadline := time.Now().Add(operatorWaitTimeout)
-		var out runtime.Outcome
-		for {
-			d.operatorMu.Lock()
-			version := d.operatorInputs[sess.ID]
-			d.operatorMu.Unlock()
-			out = kc.WaitSession(ectx, sess, time.Until(deadline))
-			d.operatorMu.Lock()
-			if version == d.operatorInputs[sess.ID] || ectx.Err() != nil || !time.Now().Before(deadline) {
-				break
-			}
-			d.operatorMu.Unlock()
-		}
-		// Close tracking and book the final continuation before a later turn
-		// can acquire ownership of this session.
-		delete(d.operatorInputs, sess.ID)
-		done()
-		d.operatorMu.Unlock()
-		if ectx.Err() != nil || !time.Now().Before(deadline) {
-			abortCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_ = kc.Abort(abortCtx, sess.ID)
-			cancel()
-			if ectx.Err() == nil {
-				out.Status = "timeout"
-			}
-		}
-		if ectx.Err() != nil && ctx.Err() == nil {
-			out.Status = "failed"
-			out.Text = "The agent engine stopped while answering; it is being restarted. Ask again in a minute."
-		}
-		d.reportRemoteChanges(m, started)
-		// The engine that replaced a dead one reads the same session store; with
-		// none running, book nothing rather than a negative delta.
-		usd, tin, tout, cached := d.sessionCost(sess.ID)
-		if tin < in0 || tout < out0 {
-			usd, tin, tout, cached = usd0, in0, out0, cached0
-		}
-		spent := d.st.Spend("operator", d.cfg.ModelFor(hubproto.RoleOperator), tin-in0, tout-out0, cached-cached0, usd-usd0)
-		if rec != nil {
-			if cur := d.st.GetIncident(rec.ID); cur != nil {
-				if cur.Kind == "operator" {
-					cur.Status, cur.Report, cur.Summary = "resolved", out.Text, "operator conversation "+out.Status
-				}
-				cur.CostUSD += spent
-				_ = d.st.UpdateIncident(cur)
-			}
-		}
-		status := "done"
-		if out.Status != "completed" {
-			status = "failed"
-		}
-		text := strings.TrimSpace(out.Text)
-		if text == "" && out.Status == "aborted" {
-			text = "(stopped before the agent replied)"
-		} else if text == "" {
-			text = "(the agent finished without a reply; status " + out.Status + ")"
-		}
-		return hubproto.MessageReply{Status: status, Text: text, SessionID: sess.ID, CostUSD: spent}
-	}
-}
-
 // StopSession aborts a running agent session on the operator's request. The
 // session's own Wait loop then books it and marks its incident resolved.
 func (d *Daemon) StopSession(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply {
@@ -383,6 +214,11 @@ func (d *Daemon) StopSession(ctx context.Context, m hubproto.OperatorMessage) hu
 	if _, ok := d.LiveSessions()[sid]; !ok {
 		return hubproto.MessageReply{Status: "refused", Text: "session " + sid + " is not running here"}
 	}
+	d.operatorMu.Lock()
+	if turn := d.operatorSessions[sid]; turn != nil && turn.cancel != nil {
+		turn.cancel()
+	}
+	d.operatorMu.Unlock()
 	d.st.Journal("hub:"+m.Author, "session.stop", sid)
 	if err := kc.Abort(ctx, sid); err != nil {
 		return hubproto.MessageReply{Status: "failed", Text: "abort failed: " + err.Error()}

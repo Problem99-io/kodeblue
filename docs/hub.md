@@ -53,7 +53,7 @@ server (kodeblue, its own user)                          hub
 
 Operators can **message** a server's agents. A message about an idle incident can continue its session. Input to an operator-owned running session is steered between actions; live responder, learner, reviewer and decisions sessions keep their own waiters and receive questions through a separate operator-liaison session. Anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
 
-If the agent is already thinking or working, a new message steers that same
+If this conversation's operator agent is thinking or working, a new message steers that same
 session. Running tools finish before the new input is delivered at the next safe
 boundary; the agent then continues with the updated context. Rapid messages are
 admitted in order, and the conversation remains active until its continuation
@@ -258,3 +258,9 @@ Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+Operator turns are queued in admission order, including input arriving during
+usage booking. Only the owning conversation can steer its session. Ownership is
+retained through abort and accounting, and new turns check the booked budget
+before launching. Engine I/O runs outside the admission mutex. Decisions claims
+reserve their sessions before dispatch and recheck after semaphore admission.
