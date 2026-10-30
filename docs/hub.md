@@ -319,3 +319,5 @@ Backfill batches read and write in one transaction, serializing with sync and
 retention. Non-quota enrichment failures back off exponentially from one minute
 to six hours. Expanded context survives refreshes while its record revision is
 unchanged; findings without additional detail do not show a load button.
+
+![Expanded synthetic context retained after a refresh](assets/war-room-retained-context.jpg)
