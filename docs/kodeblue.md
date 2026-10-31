@@ -225,7 +225,9 @@ Notifications raised while the hub is unreachable wait in the outbox. A server's
 
 **Without a hub,** put the webhook URL in `/etc/kodeblue/slack.webhook` (root:kodeblue 0640) and the server posts directly.
 
-**Agents post themselves** with the `notify_slack` tool. Their instructions require it for:
+**Agents post themselves** with the provider-independent `send_alert` tool. It uses
+the configured notification destinations (Slack, Telegram, or both), with no separate
+tool per provider. Their instructions require it for:
 - every `true_positive` or `inconclusive` verdict, and anything suspicious
 - every containment action they executed or requested (with the undo or approve command)
 - pre-existing compromise or serious risk found while learning

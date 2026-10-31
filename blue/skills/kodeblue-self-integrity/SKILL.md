@@ -54,7 +54,7 @@ Notes:
 
 ## Verdict
 Never `benign_change` on your own judgement, even when the pattern looks exactly
-like an upgrade. Resolve `inconclusive`, ask on Slack whether someone deployed a
+like an upgrade. Resolve `inconclusive`, send an alert asking whether someone deployed a
 build at that time, and let the operator acknowledge it with
 `kodeblue ack <finding id>`.
 Without that answer, treat a change during attacker activity as a true_positive.

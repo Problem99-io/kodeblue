@@ -153,7 +153,7 @@ A confirmed escape is a root compromise of the host. Act in this order:
    accounts, `stop_unit` on planted units. Block the C2 with `block_ip` (it
    applies to kodeblue's network namespace; see `containment-verification`).
 3. **The container itself is for a human.** kodeblue cannot stop or remove a
-   container (`docker` is read-only for it). Say in the report and on Slack
+   container (`docker` is read-only for it). Say in the report and in an alert
    that the operator must **stop** it now (`docker stop <name>`, or scale the
    deployment to 0) and must **not restart** it: a restart keeps the writable
    layer and the same misconfiguration. Capture `docker inspect` and
@@ -170,7 +170,7 @@ A confirmed escape is a root compromise of the host. Act in this order:
    mount, the host mounts or the extra capabilities; turn seccomp/AppArmor
    back on; enable user-namespace remapping or rootless mode; patch runc and
    the kernel.
-7. `notify_slack` severity `critical`, with the container name, the route, the
+7. `send_alert` severity `critical`, with the container name, the route, the
    one host-side effect that proves the escape, what kodeblue did, and what the
    human must do (stop the container, rotate, rebuild). Then check every action
    held (`containment-verification`).

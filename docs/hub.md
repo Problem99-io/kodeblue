@@ -146,6 +146,45 @@ The hub owns the fleet's Slack channel. Set it in **Settings** or with `kodeblue
 
 Servers never receive the webhook. A server that should also post on its own, as an independent channel, can set `[notify] direct = true`.
 
+### Telegram
+
+Telegram can be used instead of Slack or alongside it. In **Settings → Telegram**,
+enter a bot token and destination chat ID, save, and send a test message.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and keep its token secret.
+2. For private messages, open the bot and press **Start**. For a group, add the bot;
+   for a channel, add it as an administrator with permission to post messages.
+3. Use the numeric destination chat ID (groups often start with `-100`), or the
+   `@channelusername` of a public channel. For a private chat or group, send a
+   message there and inspect `getUpdates` using the official
+   [Bot API](https://core.telegram.org/bots/api#getupdates) from a trusted local
+   client. Do not paste a token into a third-party chat-ID lookup service.
+
+The token is stored only on the hub and never returned by the settings API,
+shown in the console, or handed to enrolled servers. CLI setup is also available;
+values are read from stdin without echo:
+
+```bash
+kodeblue-hub fleet set telegram-bot-token
+kodeblue-hub fleet set telegram-chat-id
+```
+
+Telegram has its own minimum severity setting. Each destination retries independently
+(exponential backoff, at most 8 attempts; permanent Telegram errors fail immediately and flood-control retry_after is honored), so a Telegram failure does not resend a
+successful Slack delivery. Notification history summarizes all destinations: it stays
+pending while any delivery is pending, then reports failure if any destination failed.
+Changing settings applies to pending and future notifications; historical skipped or
+completed deliveries are not replayed. Messages use an explicit preformatted entity with link previews disabled. IPs,
+paths and addresses remain copyable without inserted invisible characters.
+Standalone sends run destinations concurrently; acceptance by any destination
+counts as success, while other failures are logged. Use hub delivery when each
+destination needs durable independent retries.
+
+The hub exposes separate save, clear, minimum-severity and test-message controls
+for Telegram. This local preview has no bot token or chat configured.
+
+![Telegram notification settings in the hub](assets/telegram-settings.jpg)
+
 ### Fleet defaults
 
 So a server can be installed with one command, the hub hands the fleet's default model, its connection and that connection's key to new servers at enrollment. The other roles' models follow on the first sync. Set them in **Settings**, or set one connection (it appears as "Default") on the hub host:
@@ -189,6 +228,7 @@ Useful flags:
 | `--inference-url`, `--model` | the model endpoint (any OpenAI-compatible API) and model |
 | `--inference-key-file` | read the endpoint's API key from a file |
 | `--slack-webhook-file` | only for servers without a hub |
+| `--telegram-bot-token-file`, `--telegram-chat-id-file` | only for servers without a hub |
 | `--no-start` | install without starting |
 | `--uninstall [--purge]` | remove kodeblue |
 
@@ -202,8 +242,13 @@ kodeblue-hub serve [--data /var/lib/kodeblue-hub] [--listen :8443] (--tls-cert f
                    [--console-allow CIDR,…] [--trusted-proxy CIDR,…]    # --trusted-proxy needs --behind-proxy
 kodeblue-hub user add|del|list <name>
 kodeblue-hub server add <name> --public-url https://…    # install command from the CLI; pinned only if serve last ran --self-signed
-kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook
+kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook|telegram-bot-token|telegram-chat-id
 kodeblue-hub pin [--tls-cert f]                          # the self-signed certificate's pin, or f's
 ```
 
 Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
+
+Provider transport/5xx failures pause that worker for at most one second, while
+each failed item keeps its own durable exponential retry delay. A 429 pauses the
+provider for Retry-After. Provider wake channels are separate; saving settings
+clears its in-memory pause and makes pending items due again.

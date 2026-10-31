@@ -73,10 +73,14 @@ type Server struct {
 	// trusted are the proxies whose X-Forwarded-For is believed.
 	trusted []netip.Prefix
 
-	mu        sync.Mutex
-	waiters   map[string]chan struct{} // server id -> wake long-poll
-	slackWake chan struct{}
-	models    modelCache
+	mu                sync.Mutex
+	waiters           map[string]chan struct{} // server id -> wake long-poll
+	slackWake         chan struct{}
+	telegramWake      chan struct{}
+	slackReset        chan struct{}
+	telegramReset     chan struct{}
+	models            modelCache
+	telegramTestLimit *limiter
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -96,8 +100,9 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 	}
 	s := &Server{opt: opt, st: st, log: logger, mux: http.NewServeMux(), login: newLimiter(loginMaxPerAddr, 15*time.Minute),
 		loginUser: newLimiter(loginMaxPerUser, 15*time.Minute), hashCheck: make(chan struct{}, max(1, runtime.NumCPU()/2)), knownCheck: make(chan struct{}, 1),
-		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1)}
+		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1), telegramWake: make(chan struct{}, 1), slackReset: make(chan struct{}, 1), telegramReset: make(chan struct{}, 1)}
 	s.models.client = endpointClient(opt.EndpointAllow)
+	s.telegramTestLimit = newLimiter(3, time.Minute)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -652,7 +657,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, c *opCtx) 
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": c.user, "csrf": c.csrf, "pin": s.opt.Pin,
-		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured, "version": hubproto.Version})
+		"fleet_model": s.fleetModelName(), "slack": s.st.SlackSettings().Configured, "telegram": s.st.TelegramSettings().Configured, "version": hubproto.Version})
 }
 
 type fleetRow struct {
