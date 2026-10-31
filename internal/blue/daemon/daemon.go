@@ -58,7 +58,8 @@ type Daemon struct {
 	incSem   chan struct{}
 	// software is set while the daily software check runs (software.go);
 	// cveClient fetches its feeds (tests point it at a fake).
-	software atomic.Bool
+	researchBusy atomic.Bool
+	software     atomic.Bool
 	// ruleRun carries out what an approved containment rule asks for (the
 	// root helper; tests replace it).
 	ruleRun containment.Invoker

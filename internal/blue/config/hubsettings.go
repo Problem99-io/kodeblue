@@ -262,7 +262,7 @@ func (c Config) ActionRule(action string) string {
 // "<connection>/<model>" for hub connections.
 func (c Config) EffectiveModels() map[string]string {
 	out := map[string]string{}
-	for _, role := range []string{hubproto.RoleTriage, hubproto.RoleLearner, hubproto.RoleResponder, hubproto.RoleReviewer, hubproto.RoleOperator, hubproto.RoleCritical} {
+	for _, role := range []string{hubproto.RoleTriage, hubproto.RoleLearner, hubproto.RoleResponder, hubproto.RoleReviewer, hubproto.RoleInvestigator, hubproto.RoleOperator, hubproto.RoleCritical} {
 		r := c.ModelRef(role)
 		if r.Model == "" {
 			continue

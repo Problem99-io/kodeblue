@@ -14,3 +14,8 @@ This product includes third-party material under its own license:
   (internal/hub/web/JetBrainsMono-OFL.txt).
 
 Go module dependencies are listed in go.mod; each carries its own license.
+
+The bundled world coastline (internal/hub/web/world-land.json) is derived from
+Natural Earth ne_110m_land, public domain. Coordinates rounded to 3 decimals.
+Source: https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson
+Terms: https://www.naturalearthdata.com/about/terms-of-use/

@@ -117,7 +117,7 @@ type Inference struct {
 	EscalationProvider string `toml:"escalation_provider"`
 	EscalationModel    string `toml:"escalation_model"`
 	// AgentModels overrides agent_model per role: learner, responder,
-	// reviewer, operator.
+	// reviewer, investigator, operator.
 	AgentModels map[string]string `toml:"agent_models"`
 
 	// Set from hub settings, never from the file: the hub's connections
