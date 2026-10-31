@@ -139,6 +139,7 @@ type Report struct {
 	Start               time.Time `json:"start"`
 	End                 time.Time `json:"end"`
 	Hours               []Hour    `json:"hours"`
+	SensitiveRequests   int64     `json:"sensitive_requests"`
 	Requests            int64     `json:"requests"`
 	Pageviews           int64     `json:"pageviews"`
 	Interactions        int64     `json:"interactions"`
@@ -200,6 +201,7 @@ FROM buckets WHERE site=? AND hour>=? AND hour<? GROUP BY (hour/3600) ORDER BY (
 		r.Errors += h.Errors
 		sensitive += n
 	}
+	r.SensitiveRequests = sensitive
 	if sensitive >= 20 {
 		r.Findings = append(r.Findings, Finding{Rule: "sensitive-route-volume-v1", Conclusion: "needs_review", Count: sensitive, Identity: "not_established", Explanation: "At least 20 producer-reported requests targeted sensitive route categories. This is observed volume, not proof of one actor or compromise. Inspect retained evidence and authorized tests before escalating."})
 	}

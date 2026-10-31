@@ -89,6 +89,7 @@ type Server struct {
 	researchPublicLimit *limiter
 	researchGlobalLimit *limiter
 	researchSlots       chan struct{}
+	researchAutoWake    chan struct{}
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -115,6 +116,7 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 	s.researchPublicLimit = newLimiter(120, time.Minute)
 	s.researchGlobalLimit = newLimiter(600, time.Minute)
 	s.researchSlots = make(chan struct{}, 4)
+	s.researchAutoWake = make(chan struct{}, 1)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies

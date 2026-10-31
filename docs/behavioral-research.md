@@ -237,7 +237,9 @@ mutation, raw container-control or secret-reading tools.
 - Advisory ballots, admin proposal-version approval and existing-policy handoff.
 - Validated sequence/recurrence rules, comparable-day baselines, query usefulness
   measurement and precision/abstention evaluation on held-out scenarios.
-- Scheduled daily delivery, coalesced traffic triggers and model-budget controls.
+- Broader, validated behavioral trigger rules beyond sensitive-route volume;
+  the native investigator already has opt-in bounded investigation triggers and
+  deterministic daily notification delivery.
 - Capture-point-specific passive fingerprint sensors and provider capability checks.
 - Production load/storage tests and a broader privacy/security review.
 

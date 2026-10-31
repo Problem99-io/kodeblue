@@ -31,9 +31,50 @@ Asking a follow-up from a research case's normal chat box opens the same War roo
 and copies the question into its form. Select the intended site/day/worker and
 submit a fresh grant; the operator liaison cannot adopt the research session.
 
-This version runs on explicit admin requests, including requests for a daily report
-or deeper review of a traffic finding. Passive ingestion never wakes a model.
-Automatic suspicious-traffic triggers and scheduled delivery are separate work.
+Manual questions remain available. Two independent, opt-in automation settings
+are described below. Passive ingestion itself never calls a model.
+
+## Automation settings
+
+Open **Settings > Agent models > Investigator automation settings in War room**,
+or expand **Investigator automation settings** in War room's Research layer.
+Choose the site first. Policies apply only to that site and both switches default
+to off. The independent Save button does not alter agent model settings.
+
+- **Automatically investigate potential suspicious traffic:** select an updated
+  worker accepting hub messages. A deterministic check of received counters runs
+  about every five minutes. At least 20 additional producer-reported sensitive-route
+  requests must arrive after the enable-time baseline or preceding queued investigation.
+  Browser pageview claims cannot satisfy that condition. The hub permits at most
+  four automatic jobs per site/calendar day, with at least one hour between job admissions,
+  including across midnight. These are research leads, not maliciousness or actor
+  verdicts, and they cannot authorize blocking. Jobs use the same grant limits,
+  message rate limits, semaphore, model budget and Stop path as manual requests.
+- **Send a daily traffic and suspicious-activity overview:** choose an enrolled
+  site source for attribution and a delivery hour, default 08:00 in the site's
+  IANA timezone. The hub queues the previous calendar day's request/pageview/
+  interaction/error counts, research leads and coverage caveats through the normal
+  notification outbox. It uses **no model**, works without a running model, and
+  reports empty days too without claiming that unobserved traffic was safe.
+  Normal notification destinations and severity filters apply; overviews are
+  `info` and always remain available in notification history. On startup or enable,
+  only the most recent due day is considered, without a backlog flood.
+
+Enabling automatic investigation does not replay traffic already recorded before
+enablement. Late-arriving records for the current site day count as new received
+evidence, with event/receipt times kept distinct. Configuration
+and durable cursors live in the hub control database, not the model-free analytics
+store. Daily delivery is deduplicated by site/day and suspicious-job reservations
+commit atomically with their native messages, so restarts do not reissue work.
+Unsuccessful admission waits five minutes and exposes a reason in settings;
+repeated identical reasons are not logged on every check. Counter losses reset
+the baseline without a model call; coverage losses remain explicit.
+
+Changing a site's sources, collection scope or timezone pauses automation until an
+operator saves the policy again, approving the current scope. Disabling automatic
+investigation withdraws queued automatic jobs; delivered/running jobs remain under
+the normal live-session Stop control. Manual investigations are unaffected.
+Each site has one bounded configuration/state row (at most 64 site policies).
 
 ## UI examples
 
@@ -44,6 +85,8 @@ accounting, Stop and notifications are exercised with fake engine/HTTP fixtures.
 ![Investigator question form inside War room](assets/behavioral-investigator.png)
 
 ![Investigator in the normal agent model settings](assets/behavioral-investigator-model.png)
+
+![Independent opt-in automation toggles, shown off in the synthetic preview](assets/behavioral-investigator-automation.png)
 
 ## Read scope and budgets
 

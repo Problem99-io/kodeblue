@@ -15,107 +15,133 @@ import (
 )
 
 func (s *Server) researchAgentRoutes() {
+	s.researchAutoRoutes()
 	s.mux.HandleFunc("POST /api/research/sites/{site}/investigate", s.op(s.handleInvestigate))
 	s.mux.HandleFunc("GET /api/research/sites/{site}/investigations", s.op(s.handleInvestigations))
 	s.mux.HandleFunc("POST "+hubproto.PathPrefix+"research-job/{job}", s.agent(s.handleResearchEvidence))
+}
+
+type investigationRequest struct {
+	Server   string `json:"server_id"`
+	Day      string `json:"date"`
+	Question string `json:"question"`
+}
+
+type researchDispatchError struct {
+	status  int
+	message string
+}
+
+func (e *researchDispatchError) Error() string { return e.message }
+func researchDispatchProblem(status int, message string) error {
+	return &researchDispatchError{status, message}
 }
 
 func (s *Server) handleInvestigate(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	if !s.researchEnabled(w) {
 		return
 	}
-	var req struct {
-		Server   string `json:"server_id"`
-		Day      string `json:"date"`
-		Question string `json:"question"`
-	}
+	var req investigationRequest
 	if researchJSON(w, r, 8<<10, &req) != nil {
 		writeErr(w, 400, "invalid investigation request")
 		return
 	}
-	req.Question = strings.TrimSpace(req.Question)
-	if req.Question == "" || len(req.Question) > 4000 {
-		writeErr(w, 400, "question must be 1-4000 bytes")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	site, err := s.opt.Research.Site(ctx, r.PathValue("site"))
+	job, err := s.queueResearchInvestigation(ctx, r.PathValue("site"), req, c.user.Name, c.ip, nil)
 	if err != nil {
-		s.researchError(w, err)
+		if problem, ok := err.(*researchDispatchError); ok {
+			writeErr(w, problem.status, problem.message)
+		} else {
+			s.researchError(w, err)
+		}
 		return
+	}
+	writeJSON(w, 200, job)
+}
+
+// Manual and automatic jobs use exactly the same admission and native message path.
+func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, req investigationRequest, author, ip string, claim *researchAutoClaim) (*Message, error) {
+	req.Question = strings.TrimSpace(req.Question)
+	if req.Question == "" || len(req.Question) > 4000 {
+		return nil, researchDispatchProblem(400, "question must be 1-4000 bytes")
+	}
+	site, err := s.opt.Research.Site(ctx, siteID)
+	if err != nil {
+		return nil, err
 	}
 	worker := s.st.GetServer(req.Server)
 	if worker == nil || worker.Revoked || !worker.Enrolled || !slices.Contains(site.Servers, req.Server) {
-		writeErr(w, 403, "select an enrolled worker from this site's sources")
-		return
+		return nil, researchDispatchProblem(403, "select an enrolled worker from this site's sources")
 	}
 	var capability hubproto.Status
 	_ = json.Unmarshal(worker.Status, &capability)
 	if !capability.SupportsInvestigator || !capability.AcceptsMessages || !capability.ModelsEnabled {
-		writeErr(w, 409, "worker needs an updated investigator-capable agent, accepted messages and a running model")
-		return
+		return nil, researchDispatchProblem(409, "worker needs an updated investigator-capable agent, accepted messages and a running model")
 	}
 	report, err := s.opt.Research.Daily(ctx, site.ID, req.Day)
 	if err != nil {
-		s.researchError(w, err)
-		return
+		return nil, err
 	}
 	through, err := s.opt.Research.LastSequence(ctx, site.ID)
 	if err != nil {
-		s.researchError(w, err)
-		return
+		return nil, err
 	}
 	encoded, _ := json.Marshal(report)
 	sources, _ := json.Marshal(site.Servers)
-	m := &Message{ServerID: worker.ID, Author: c.user.Name, Body: req.Question, Command: hubproto.CommandInvestigate, RequestID: site.ID, ConversationID: "c_" + NewToken("")[:12]}
-	// Admission is durable and bounded. A worker may have only one outstanding
-	// research job, preventing a burst from reserving unbooked model spend.
+	m := &Message{ServerID: worker.ID, Author: author, Body: req.Question, Command: hubproto.CommandInvestigate, RequestID: site.ID, ConversationID: "c_" + NewToken("")[:12]}
 	tx, err := s.st.db.BeginTx(ctx, nil)
 	if err != nil {
-		writeErr(w, 503, "investigation admission unavailable")
-		return
+		return nil, err
 	}
 	defer tx.Rollback()
 	now := time.Now()
 	if _, err = tx.ExecContext(ctx, "DELETE FROM research_jobs WHERE expires<?", now.Unix()); err != nil {
-		writeErr(w, 503, "investigation admission unavailable")
-		return
+		return nil, err
 	}
 	var fleet, own int
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN m.server_id=? THEN 1 ELSE 0 END),0) FROM research_jobs j JOIN messages m ON m.id=j.message_id WHERE m.status IN ('queued','delivered')`, worker.ID).Scan(&fleet, &own)
 	if err != nil {
-		writeErr(w, 503, "investigation admission unavailable")
-		return
+		return nil, err
 	}
 	if fleet >= 32 || own > 0 {
-		writeErr(w, 409, "an investigation is already queued/running on this worker, or fleet capacity is reached")
-		return
+		return nil, researchDispatchProblem(409, "an investigation is already queued/running on this worker, or fleet capacity is reached")
 	}
 	var grants int
-	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM research_jobs").Scan(&grants); err != nil || grants >= 128 {
-		writeErr(w, 429, "research grant capacity reached; retry after existing grants expire")
-		return
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM research_jobs").Scan(&grants); err != nil {
+		return nil, err
+	}
+	if grants >= 128 {
+		return nil, researchDispatchProblem(429, "research grant capacity reached; retry after existing grants expire")
+	}
+	if claim != nil {
+		claim.Count = report.SensitiveRequests
+		if err = s.reserveResearchAuto(ctx, tx, site, req.Server, claim); err != nil {
+			return nil, err
+		}
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO messages(server_id,author,body,conversation_id,created_at,command,request_id) VALUES(?,?,?,?,?,?,?)`, m.ServerID, m.Author, m.Body, m.ConversationID, now.Unix(), m.Command, m.RequestID)
 	if err == nil {
 		m.ID, err = res.LastInsertId()
 	}
+	autoKind := ""
+	if claim != nil {
+		autoKind = "suspicious"
+	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview) VALUES(?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded))
+		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview,auto_kind) VALUES(?,?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded), autoKind)
 	}
 	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
-		writeErr(w, 503, "could not queue investigation")
-		return
+		return nil, err
 	}
 	m.Status = "queued"
 	m.CreatedAt = now
-	s.st.Audit(c.user.Name, "research.investigate", worker.ID, fmt.Sprintf("job=%d site=%s date=%s", m.ID, site.ID, req.Day), c.ip)
+	s.st.Audit(author, "research.investigate", worker.ID, fmt.Sprintf("job=%d site=%s date=%s", m.ID, site.ID, req.Day), ip)
 	s.wake(worker.ID)
-	writeJSON(w, 200, m)
+	return m, nil
 }
 
 func (s *Server) handleInvestigations(w http.ResponseWriter, r *http.Request, c *opCtx) {
@@ -184,7 +210,7 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 	var result any
 	switch req.View {
 	case "overview":
-		result = map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": report, "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
+		result = map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": json.RawMessage(overview), "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
 	case "evidence":
 		result, err = s.opt.Research.Window(ctx, siteID, sources, report.Start, report.End, req.After, through)
 	case "sources":

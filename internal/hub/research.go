@@ -41,6 +41,10 @@ func (s *Server) researchRoutes() {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
+		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_automation WHERE site=?", r.PathValue("site")); err != nil {
+			s.researchError(w, err)
+			return
+		}
 		if err := s.opt.Research.DeleteSite(ctx, r.PathValue("site")); err != nil {
 			s.researchError(w, err)
 			return
@@ -309,10 +313,12 @@ func (s *Server) ResearchMaintenance(ctx context.Context) {
 		if err != nil && ctx.Err() == nil {
 			s.log.Warn("research maintenance delayed")
 		}
+		s.researchAutomationTick(ctx, time.Now())
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-s.researchAutoWake:
 		}
 	}
 }
