@@ -317,6 +317,9 @@ func (k *Engine) registerAgents(ctx context.Context) error {
 		// A role's configured model wins over the definition's own; both
 		// fall back to agent_model.
 		role := strings.TrimPrefix(a.Name, "blue-")
+		if role == "investigator" && k.cfg.Budget.IncidentMaxIterations > 0 {
+			a.MaxIterations = min(a.MaxIterations, k.cfg.Budget.IncidentMaxIterations)
+		}
 		ref := k.cfg.ModelRef(role)
 		if _, chosen := k.cfg.Inference.Refs[role]; a.Model != "" && !chosen && strings.TrimSpace(k.cfg.Inference.AgentModels[role]) == "" {
 			ref.Model = a.Model
@@ -375,7 +378,7 @@ func (k *Engine) StartSession(ctx context.Context, agent, provider, model, messa
 	}
 	runID, err := k.send(ctx, sess.ID, message)
 	if err != nil {
-		return nil, err
+		return &Session{ID: sess.ID}, err // caller can abort a session whose dispatch failed
 	}
 	return &Session{ID: sess.ID, RunID: runID}, nil
 }

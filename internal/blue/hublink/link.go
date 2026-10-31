@@ -370,7 +370,8 @@ func (l *Link) status() hubproto.Status {
 		Heartbeat: l.st.Get("heartbeat"), LearnedAt: l.st.Get("learned_at"), LearnerPending: l.st.Get(store.LearnerPendingKey) != "", LastReviewAt: l.st.Get("last_review_at"),
 		SpendToday: usd, SpendByPurpose: per, Spend7d: week, DailyBudget: l.cfg.Budget.DailyUSD, TokensToday: tokens,
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
-		FindingStats7d: l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
+		SupportsInvestigator: true,
+		FindingStats7d:       l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
 		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
@@ -522,7 +523,7 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	if m.Decision != "" {
 		return l.decide(ctx, m)
 	}
-	if m.Command != "" {
+	if m.Command != "" && m.Command != hubproto.CommandInvestigate {
 		l.st.Journal("hub:"+m.Author, "operator.command", fmt.Sprintf("#%d %s", m.ID, m.Command))
 		if m.Command == hubproto.CommandStop {
 			return l.agent.StopSession(ctx, m)
@@ -564,6 +565,14 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	l.mu.Unlock()
 	if limited {
 		return hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Rate limit: this server handles at most %d operator messages per hour.", l.cfg.Hub.MessagesPerHour)}
+	}
+	if m.Command == hubproto.CommandInvestigate {
+		if agent, ok := l.agent.(interface {
+			Investigate(context.Context, hubproto.OperatorMessage) hubproto.MessageReply
+		}); ok {
+			return agent.Investigate(ctx, m)
+		}
+		return hubproto.MessageReply{Status: "refused", Text: "Upgrade this server to run the investigator."}
 	}
 	return l.agent.HandleOperatorMessage(ctx, m)
 }

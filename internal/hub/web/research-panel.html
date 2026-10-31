@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><meta name="referrer" content="no-referrer">
+<title>Behavioral research · kodeblue</title>
+<link rel="icon" href="/assets/icon.svg"><link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/research.css">
+<script src="/assets/research.js" defer></script>
+</head>
+<body>
+<main class="research-page">
+<header class="research-heading"><div><h2>Behavioral research layer</h2><p>One War room · source locations and evidence relationships.</p></div><span class="badge">Experimental foundation</span></header>
+<p id="status" role="status">Loading research status…</p>
+<section id="workspace" hidden>
+<div class="research-controls"><label>Site <select id="site"></select></label><label>Report day <input id="day" type="date"></label><button id="refresh" class="btn">Load evidence</button></div>
+<p class="research-note">Daily totals cover the selected site and day. Geographic links also follow War room's time/server filters and reuse known locations only. Collection and map refresh do not call a model. Automatic investigation requires this site's opt-in policy; fingerprint matches do not establish an actor.</p>
+<div id="metrics" class="research-metrics"></div>
+<section class="research-panel"><h2>Investigator</h2><p>A read-only specialist connects the site's traffic evidence and linked incident summaries. It runs for your question or an enabled suspicious-traffic policy, using the selected worker's normal model, budget, live session and notifications.</p>
+<form id="investigator-form"><div class="research-form"><label>Investigator worker<select id="investigator-worker" required></select></label><label>Question or report request<textarea id="investigator-question" required maxlength="4000" placeholder="Compare suspicious activity with ordinary traffic. Cite evidence, alternative explanations and missing coverage."></textarea></label></div><button class="btn" type="submit" id="investigator-submit" disabled>Ask investigator</button></form><p id="investigator-status" role="status"></p>
+<details class="research-panel" id="automation-settings"><summary>Investigator automation settings</summary><form id="automation-form"><div class="research-form">
+<label>Automation worker / report source<select id="automation-worker"></select></label>
+<label class="research-check"><input id="automation-suspicious" type="checkbox"> Automatically investigate potential suspicious traffic</label>
+<label class="research-check"><input id="automation-daily" type="checkbox"> Send a daily traffic and suspicious-activity overview</label>
+<label>Daily report hour (0–23, site timezone)<input id="automation-hour" type="number" min="0" max="23" value="8" required></label>
+</div><p>Both options are off by default. Automatic investigation requires 20 new producer-reported sensitive-route requests, queues at most one automatic job per hour and four per site/day. It is a research lead, never permission to block. Daily overviews use deterministic counts and no model call. Normal notification filters apply.</p><p id="automation-status" role="status"></p><button class="btn" type="submit" id="automation-submit">Save automation settings</button></form></details>
+<div id="investigator-jobs"></div></section>
+<section class="research-panel"><h2>Traffic overview</h2><p id="period"></p><div id="traffic"></div></section>
+<section class="research-panel"><h2>Activity needing review</h2><div id="findings"></div></section>
+<section class="research-panel"><h2>Evidence network</h2><p>Solid: producer-reported connection. Dashed: fingerprint observation. Inspect a link for its source evidence.</p><svg id="network" viewBox="0 0 900 380" role="group" aria-label="Bounded evidence network"></svg><div id="network-links" class="research-link-controls"></div><p id="graph-note"></p><div id="evidence" aria-live="polite"></div></section>
+<section class="research-panel"><h2>Coverage and limits</h2><div id="coverage"></div></section>
+</section>
+<details id="configuration" hidden class="research-panel"><summary>Configure a research site</summary>
+<form id="site-form"><div class="research-form">
+<label>Site ID<input id="config-id" required maxlength="96" pattern="[A-Za-z0-9_-]+" placeholder="website-prod"></label>
+<label>Name<input id="config-name" required maxlength="100" placeholder="Production website"></label>
+<label>Timezone<input id="config-timezone" value="UTC" required placeholder="Asia/Jerusalem"></label>
+<label>Allowed browser origins, one per line<textarea id="config-origins" placeholder="https://www.example.com"></textarea></label>
+<label>Allowed browser paths, one per line<textarea id="config-paths" placeholder="/&#10;/services&#10;/booking"></textarea></label>
+<label>Enrolled source server IDs, one per line<textarea id="config-servers" placeholder="srv_…"></textarea></label>
+<label class="research-check"><input id="config-browser" type="checkbox"> Enable optional browser collection</label>
+</div><p>Browser events remain untrusted claims. Configure your site's privacy gate before enabling the SDK. No external enrichment or model calls are started.</p><button class="btn" type="submit">Save site</button></form>
+</details>
+</main>
+</body></html>

@@ -162,7 +162,7 @@ function verdictBadge(v) {
   const cls = { true_positive: "b-bad", malicious: "b-bad", suspicious: "b-warn", inconclusive: "b-warn", false_positive: "b-ok", benign_change: "b-ok", benign: "b-ok", error: "b-bad" }[v] || "";
   return h("span", { class: "badge " + cls }, v.replace(/_/g, " "));
 }
-function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "operator", "coverage"].includes(k) ? k : "incident") }, k || "case"); }
+function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "research", "operator", "coverage"].includes(k) ? k : "incident") }, k || "case"); }
 function phaseBadge(p) {
   const cls = { watching: "b-ok", learning: "b-accent", maintenance: "b-warn" }[p] || "b-warn";
   return h("span", { class: "badge " + cls, title: p ? null : "enrolled, but no report received yet" }, p || "not reporting yet");
@@ -305,6 +305,8 @@ async function logout() {
 
 function renderLogin(msg) {
   if (S.loginShown) { if (msg) { const e = document.querySelector(".lerr"); if (e && !e.textContent) e.textContent = msg; } return; }
+  closeWarRoom();
+  const warTab = document.getElementById("war-tab"); if (warTab) warTab.hidden = true;
   S.loginShown = true; S.viewKey = "";
   setTimer(null); closePanel();
   document.querySelectorAll(".scrim, .menu").forEach((x) => x.remove());
@@ -399,6 +401,7 @@ async function route() {
     await renderView(r);
   }
   if (my !== routing || !S.me || S.loginShown) return;
+  if(location.hash==="#war-room-research"){openWarRoom();toggleWarResearch(true,true);}
   if (r.view === "board") syncPanel(r); else closePanel();
 }
 window.addEventListener("hashchange", route);
@@ -495,6 +498,7 @@ function header(r) {
   av.addEventListener("click", () => menu(av, [
     h("div", { class: "mwho" }, h("div", { class: "fg" }, me), h("div", { class: "muted small" }, "operator")),
     menuItem("Audit log", { href: "#/audit", icon: "file" }),
+      menuItem("War room · research", { icon: "layers", click: () => { openWarRoom(); toggleWarResearch(true,true); } }),
     menuItem("Sign out", { icon: "logout", cls: "c-red", click: logout }),
   ]));
   return h("header", { class: "hdr" },
@@ -566,6 +570,7 @@ async function openBell(anchor) {
 setInterval(() => { if (!document.hidden) bellLoad(); }, 20000);
 
 async function renderView(r) {
+  mountWarRoom();
   try { await loadServers(); } catch (e) { if (e.status === 401) return; }
   setTimer(null);
   clear(app);
@@ -862,7 +867,7 @@ async function vBoard(r, main, srv) {
 const DROP_HINT = { live: "Ask the agent to look again", human: "Move to Needs human", done: "Mark resolved" };
 
 // ----- board filters (kept in this browser) and pins (shared on the hub)
-const KINDS = ["incident", "learning", "review", "operator", "coverage"];
+const KINDS = ["incident", "learning", "review", "research", "operator", "coverage"];
 const sevOf = (t) => (SEV.includes(t.severity) ? t.severity : "info");
 const kindOf = (t) => (KINDS.includes(t.kind) ? t.kind : "incident");
 // needsYou: waiting on a person: approvals, or the Needs human column.
@@ -1196,7 +1201,7 @@ function sevChip(sev) {
   return h("span", { class: "chip2 s-" + k, title: "severity" }, h("i"), k);
 }
 function kindChip(kind) {
-  const k = ["incident", "learning", "review", "operator", "coverage"].includes(kind) ? kind : "incident";
+  const k = ["incident", "learning", "review", "research", "operator", "coverage"].includes(kind) ? kind : "incident";
   return h("span", { class: "chip2 k-" + k }, k);
 }
 function liveRow(text, at) {
@@ -1436,6 +1441,10 @@ async function sendMessage(text) {
   text = text.trim();
   if (!text || P.busy) return;
   const st = P.st;
+  if(st.inc?.kind==="research"){
+    openWarRoom();toggleWarResearch(true,true);window.KodeBlueResearch.prefillQuestion(text);
+    P.comp.setNote("Select the research scope in War room and ask the investigator there.");return;
+  }
   let srv = st.srv;
   const body = { body: text, incident_id: 0, conversation_id: "" };
   if (st.isNew) {
@@ -3081,7 +3090,7 @@ async function vTelegramSettings(main) {
 // Operators pick the model endpoint, a model per agent role, extra
 // instructions per agent and a rule per containment action. The fleet has
 // one set; a server can override single entries. Empty means "not set here".
-const ROLE_NAMES = { default: "Default (every agent)", triage: "Triage", learner: "Learner", responder: "Responder (incidents)", reviewer: "Reviewer",
+const ROLE_NAMES = { default: "Default (every agent)", triage: "Triage", learner: "Learner", responder: "Responder (incidents)", reviewer: "Reviewer", investigator: "Investigator (behavioral research)",
   operator: "Operator (hub chats)", critical: "Critical incidents", all: "All agents" };
 const ACTION_NAMES = { block_ip: "Block an IP", disable_ssh_key: "Disable an SSH key", kill_process: "Kill a process", lock_user: "Lock a user",
   quarantine_file: "Quarantine a file", stop_unit: "Stop a service" };
@@ -3447,7 +3456,8 @@ async function fleetAgents(box) {
   const agents = h("div", { class: "stack" },
     panel("Agent models", h("div", { class: "bd stack" },
       h("div", { class: "note" }, "The model each agent uses on every server, from any connection. An empty role uses Default; critical incidents use the Responder's model unless set. Servers can override single roles on their Settings tab."),
-      h("div", { class: "frows" }, models.map(([role, f]) => h("div", { class: "frow" }, h("span", { class: "frow-l" }, roleName(role)), f.el)))), null, "cyan"),
+      h("div", { class: "frows" }, models.map(([role, f]) => h("div", { class: "frow" }, h("span", { class: "frow-l" }, roleName(role)), f.el))),
+      h("button",{class:"btn small",type:"button",on:{click:()=>{openWarRoom();toggleWarResearch(true);window.KodeBlueResearch.openAutomation();}}},"Investigator automation settings in War room")), null, "cyan"),
     panel("Agent instructions", h("div", { class: "bd stack" },
       h("div", { class: "note" }, "Extra instructions added after each agent's built-in prompt: “All agents” first, then the agent's own."),
       instr.map(([, b]) => b.el())), null, "green"),

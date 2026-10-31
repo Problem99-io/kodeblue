@@ -87,7 +87,7 @@ func (s *Server) clientIP(r *http.Request) string {
 // agentFacing reports whether path must stay reachable for servers: the
 // agent API, the installer and release files, and the health check.
 func agentFacing(path string) bool {
-	return strings.HasPrefix(path, hubproto.PathPrefix) || path == "/install.sh" || strings.HasPrefix(path, "/dist/") || path == "/healthz"
+	return strings.HasPrefix(path, hubproto.PathPrefix) || strings.HasPrefix(path, "/collect/research/") || path == "/research-tracker.js" || path == "/install.sh" || strings.HasPrefix(path, "/dist/") || path == "/healthz"
 }
 
 // consoleGate hides the console and operator API from addresses outside
