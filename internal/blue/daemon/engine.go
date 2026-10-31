@@ -15,6 +15,7 @@ type agentEngine interface {
 	Stop()
 	Alive() bool
 	StartSession(ctx context.Context, agent, provider, model, message string) (*runtime.Session, error)
+	SessionBusy(ctx context.Context, sessionID string) (bool, error)
 	FollowUp(ctx context.Context, s *runtime.Session, message string) (*runtime.Session, error)
 	Steer(ctx context.Context, s *runtime.Session, message string) error
 	Abort(ctx context.Context, sessionID string) error

@@ -111,3 +111,34 @@ func TestFollowUpTimesOutWithReason(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestSteerRejectsPausedDelivery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"paused","error":"provider unavailable"}`))
+	}))
+	defer srv.Close()
+	k := &Engine{baseURL: srv.URL, http: srv.Client()}
+	if err := k.Steer(context.Background(), &Session{ID: "one"}, "hello"); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+		t.Fatalf("paused steer accepted: %v", err)
+	}
+}
+
+func TestSessionBusyIncludesPendingQueue(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		busy bool
+	}{{`{"is_running":true}`, true}, {`{"is_running":false,"pending_messages":1}`, true}, {`{"is_running":false,"pending_messages":0}`, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "GET" || r.URL.Path != "/v1/sessions/s1/status" {
+				t.Error("wrong status endpoint")
+			}
+			w.Write([]byte(tc.body))
+		}))
+		engine := &Engine{baseURL: srv.URL, http: srv.Client()}
+		busy, err := engine.SessionBusy(context.Background(), "s1")
+		srv.Close()
+		if err != nil || busy != tc.busy {
+			t.Fatalf("body=%s busy=%v err=%v", tc.body, busy, err)
+		}
+	}
+}

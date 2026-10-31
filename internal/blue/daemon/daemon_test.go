@@ -1133,3 +1133,5 @@ func TestAnnounceMode(t *testing.T) {
 		t.Fatal("mode not remembered")
 	}
 }
+
+func (f *fakeEngine) SessionBusy(context.Context, string) (bool, error) { return false, nil }

@@ -460,10 +460,10 @@ func checkSettings(s *hubproto.Settings) error {
 
 // ---- operator messages ----
 
-// messageLoop polls the hub for operator messages. Chats and learning
-// commands run one at a time, in order, and a chat holds its turn until the
-// agent answers (minutes). Stop and approve/deny cannot wait behind it: they
-// are usually about that very session, so they run as soon as they arrive.
+// messageLoop polls the hub for operator messages. Chat admission is ordered,
+// but its answer waits independently so more input can steer a live session.
+// Legacy agents and learning commands retain the serial queue. Stop and
+// approve/deny run as soon as they arrive, since they often concern that session.
 // Containment rule rulings take no model either, and pausing a rule that
 // misfires must not wait.
 func (l *Link) messageLoop(ctx context.Context) {
@@ -474,7 +474,15 @@ func (l *Link) messageLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case m := <-queue:
-				l.answer(ctx, m)
+				if _, ok := l.agent.(operatorMessageStarter); ok && m.Decision == "" && m.Command == "" {
+					wait := l.beginChat(ctx, m)
+					go func(m hubproto.OperatorMessage, wait func() hubproto.MessageReply) {
+						l.sendReply(ctx, m.ID, wait())
+						l.Nudge()
+					}(m, wait)
+				} else {
+					l.answer(ctx, m)
+				}
 			}
 		}
 	}()
@@ -503,6 +511,8 @@ func (l *Link) messageLoop(ctx context.Context) {
 			}
 			select {
 			case queue <- m:
+			default:
+				go l.sendReply(ctx, m.ID, hubproto.MessageReply{Status: "refused", Text: "Operator admission queue is full; try again later."})
 			case <-ctx.Done():
 				return
 			}
@@ -547,9 +557,22 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		}
 		return l.agent.Learn(ctx, m)
 	}
+	return l.beginChat(ctx, m)()
+}
+
+// operatorMessageStarter separates admission from waiting for a final answer.
+// Admission must finish before the next message is considered, so rapid input
+// joins the same session in arrival order, including the first poll batch.
+type operatorMessageStarter interface {
+	BeginOperatorMessage(context.Context, hubproto.OperatorMessage) func() hubproto.MessageReply
+}
+
+func (l *Link) beginChat(ctx context.Context, m hubproto.OperatorMessage) func() hubproto.MessageReply {
 	l.st.Journal("hub:"+m.Author, "operator.message", fmt.Sprintf("#%d %s", m.ID, clip(m.Body, 300)))
 	if !l.cfg.Hub.AcceptMessages {
-		return hubproto.MessageReply{Status: "refused", Text: "This server does not accept operator messages (hub.accept_messages = false in /etc/kodeblue/kodeblue.toml)."}
+		return func() hubproto.MessageReply {
+			return hubproto.MessageReply{Status: "refused", Text: "This server does not accept operator messages (hub.accept_messages = false in /etc/kodeblue/kodeblue.toml)."}
+		}
 	}
 	l.mu.Lock()
 	cut := 0
@@ -563,9 +586,14 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	}
 	l.mu.Unlock()
 	if limited {
-		return hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Rate limit: this server handles at most %d operator messages per hour.", l.cfg.Hub.MessagesPerHour)}
+		return func() hubproto.MessageReply {
+			return hubproto.MessageReply{Status: "refused", Text: fmt.Sprintf("Rate limit: this server handles at most %d operator messages per hour.", l.cfg.Hub.MessagesPerHour)}
+		}
 	}
-	return l.agent.HandleOperatorMessage(ctx, m)
+	if starter, ok := l.agent.(operatorMessageStarter); ok {
+		return starter.BeginOperatorMessage(ctx, m)
+	}
+	return func() hubproto.MessageReply { return l.agent.HandleOperatorMessage(ctx, m) }
 }
 
 // vulnCommand applies an operator's change to a vulnerability. No model is
