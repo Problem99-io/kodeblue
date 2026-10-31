@@ -21,8 +21,8 @@ func (s *Server) researchContext(ctx context.Context, args json.RawMessage) (str
 		View  string `json:"view"`
 		After int64  `json:"after"`
 	}
-	if json.Unmarshal(args, &req) != nil || req.JobID <= 0 || req.After < 0 || (req.View != "overview" && req.View != "evidence" && req.View != "sources") {
-		return "", errors.New("choose the assigned job_id and view overview, evidence or sources, with a non-negative cursor")
+	if json.Unmarshal(args, &req) != nil || req.JobID <= 0 || req.After < 0 || (req.View != "overview" && req.View != "evidence" && req.View != "sources" && req.View != "traffic") {
+		return "", errors.New("choose the assigned job_id and view overview, evidence, sources or traffic, with a non-negative cursor")
 	}
 	if !s.cfg.Hub.Enabled() {
 		return "", errors.New("research requires an enrolled hub and an admin-assigned investigation")

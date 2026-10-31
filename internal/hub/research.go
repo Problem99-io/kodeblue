@@ -41,7 +41,7 @@ func (s *Server) researchRoutes() {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_councils WHERE site=?", r.PathValue("site")); err != nil {
+		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_councils WHERE site=? AND COALESCE(json_extract(data,'$.room.native'),0)=0", r.PathValue("site")); err != nil {
 			s.researchError(w, err)
 			return
 		}
@@ -305,15 +305,12 @@ func (s *Server) researchAdmission(w http.ResponseWriter, class string) bool {
 }
 
 func (s *Server) ResearchMaintenance(ctx context.Context) {
-	if s.opt.Research == nil {
-		return
-	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	var lastMaintenance time.Time
 	for {
 		s.researchCouncilTick(ctx)
-		if time.Since(lastMaintenance) >= time.Minute {
+		if s.opt.Research != nil && time.Since(lastMaintenance) >= time.Minute {
 			lastMaintenance = time.Now()
 			c, cancel := context.WithTimeout(ctx, 2*time.Second)
 			err := s.opt.Research.Maintain(c, time.Now())

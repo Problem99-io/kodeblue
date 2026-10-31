@@ -68,7 +68,16 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 	if req.Question == "" || len(req.Question) > 4000 {
 		return nil, researchDispatchProblem(400, "question must be 1-4000 bytes")
 	}
-	site, err := s.opt.Research.Site(ctx, siteID)
+	var site research.Site
+	var err error
+	native := req.council != nil && req.council.Room != nil && req.council.Room.Native
+	if native {
+		site, err = s.councilSite(ctx, *req.council.Room)
+	} else if s.opt.Research != nil {
+		site, err = s.opt.Research.Site(ctx, siteID)
+	} else {
+		err = researchDispatchProblem(409, "Traffic analytics are disabled.")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -78,14 +87,20 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 	}
 	var capability hubproto.Status
 	_ = json.Unmarshal(worker.Status, &capability)
-	if !capability.SupportsInvestigator || !capability.AcceptsMessages || !capability.ModelsEnabled {
+	if (!native && !capability.SupportsInvestigator) || (native && !capability.SupportsWarRoom) || !capability.AcceptsMessages || !capability.ModelsEnabled {
 		return nil, researchDispatchProblem(409, "worker needs an updated investigator-capable agent, accepted messages and a running model")
 	}
-	report, err := s.opt.Research.Daily(ctx, site.ID, req.Day)
-	if err != nil {
-		return nil, err
+	var report research.Report
+	var trafficGrant warRoomGrant
+	var through int64
+	if native {
+		report, trafficGrant, err = s.nativeOverview(ctx, *req.council.Room)
+	} else {
+		report, err = s.opt.Research.Daily(ctx, site.ID, req.Day)
+		if err == nil {
+			through, err = s.opt.Research.LastSequence(ctx, site.ID)
+		}
 	}
-	through, err := s.opt.Research.LastSequence(ctx, site.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +109,9 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 		var snapshot map[string]any
 		_ = json.Unmarshal(encoded, &snapshot)
 		snapshot["council_context"] = req.council.Context
+		if native {
+			snapshot["warroom_scope"] = trafficGrant
+		}
 		encoded, _ = json.Marshal(snapshot)
 	}
 	grantedSources := site.Servers
@@ -141,7 +159,12 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 		autoKind = "suspicious"
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview,auto_kind,source_only) VALUES(?,?,?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded), autoKind, req.council != nil && req.council.SourceOnly)
+		bindings := "{}"
+		if native {
+			b, _ := json.Marshal(req.council.Room.Enrollments)
+			bindings = string(b)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview,auto_kind,source_only,native,enrollments) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded), autoKind, req.council != nil && req.council.SourceOnly, native, bindings)
 	}
 	if err == nil && req.council != nil {
 		err = s.reserveCouncilTurn(ctx, tx, site, req.council, m.ID)
@@ -168,15 +191,12 @@ func (s *Server) handleInvestigations(w http.ResponseWriter, r *http.Request, c 
 }
 
 func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, serverID string) {
-	if !s.researchEnabled(w) {
-		return
-	}
 	var req struct {
 		View  string `json:"view"`
 		After int64  `json:"after"`
 	}
 	id, err := strconv.ParseInt(r.PathValue("job"), 10, 64)
-	if err != nil || id <= 0 || researchJSON(w, r, 1024, &req) != nil || req.After < 0 || (req.View != "overview" && req.View != "evidence" && req.View != "sources") {
+	if err != nil || id <= 0 || researchJSON(w, r, 1024, &req) != nil || req.After < 0 || (req.View != "overview" && req.View != "evidence" && req.View != "sources" && req.View != "traffic") {
 		writeErr(w, 400, "invalid research job query")
 		return
 	}
@@ -184,25 +204,56 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 	defer cancel()
 	var siteID, day, sourcesJSON, overview string
 	var through int64
-	var sourceOnly bool
-	err = s.st.db.QueryRowContext(ctx, `SELECT j.site,j.day,j.sources,j.through_seq,j.overview,j.source_only FROM research_jobs j JOIN messages m ON m.id=j.message_id WHERE j.message_id=? AND m.server_id=? AND m.command=? AND m.status='delivered' AND j.expires>?`, id, serverID, hubproto.CommandInvestigate, time.Now().Unix()).Scan(&siteID, &day, &sourcesJSON, &through, &overview, &sourceOnly)
+	var sourceOnly, native bool
+	var enrollmentJSON string
+	err = s.st.db.QueryRowContext(ctx, `SELECT j.site,j.day,j.sources,j.through_seq,j.overview,j.source_only,j.native,j.enrollments FROM research_jobs j JOIN messages m ON m.id=j.message_id WHERE j.message_id=? AND m.server_id=? AND m.command=? AND m.status='delivered' AND j.expires>?`, id, serverID, hubproto.CommandInvestigate, time.Now().Unix()).Scan(&siteID, &day, &sourcesJSON, &through, &overview, &sourceOnly, &native, &enrollmentJSON)
 	if err != nil {
 		writeErr(w, 403, "no active research grant for this worker")
-		return
-	}
-	site, err := s.opt.Research.Site(ctx, siteID)
-	if err != nil || !slices.Contains(site.Servers, serverID) {
-		writeErr(w, 403, "research site grant withdrawn")
 		return
 	}
 	var granted []string
 	_ = json.Unmarshal([]byte(sourcesJSON), &granted)
 	sources := []string{}
-	for _, source := range granted {
-		if slices.Contains(site.Servers, source) {
-			srv := s.st.GetServer(source)
-			if srv != nil && !srv.Revoked && srv.Enrolled {
+	if native {
+		var keys map[string]string
+		_ = json.Unmarshal([]byte(enrollmentJSON), &keys)
+		if len(keys) == 0 || len(keys) > 6 {
+			writeErr(w, 403, "War room enrollment grant unavailable")
+			return
+		}
+		for source, expected := range keys {
+			var key string
+			if s.st.db.QueryRowContext(ctx, "SELECT key_hash FROM servers WHERE id=? AND revoked=0 AND enrolled_at>0", source).Scan(&key) != nil || key == "" || key != expected {
+				writeErr(w, 403, "War room enrollment grant withdrawn")
+				return
+			}
+		}
+		for _, source := range granted {
+			var key string
+			if s.st.db.QueryRowContext(ctx, "SELECT key_hash FROM servers WHERE id=? AND revoked=0 AND enrolled_at>0", source).Scan(&key) == nil && key != "" && keys[source] == key {
 				sources = append(sources, source)
+			}
+		}
+		if !slices.Contains(sources, serverID) {
+			writeErr(w, 403, "War room enrollment grant withdrawn")
+			return
+		}
+	} else {
+		if s.opt.Research == nil {
+			writeErr(w, 503, "Traffic analytics are disabled")
+			return
+		}
+		site, e := s.opt.Research.Site(ctx, siteID)
+		if e != nil || !slices.Contains(site.Servers, serverID) {
+			writeErr(w, 403, "research site grant withdrawn")
+			return
+		}
+		for _, source := range granted {
+			if slices.Contains(site.Servers, source) {
+				srv := s.st.GetServer(source)
+				if srv != nil && !srv.Revoked && srv.Enrolled {
+					sources = append(sources, source)
+				}
 			}
 		}
 	}
@@ -225,76 +276,94 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 	}
 	var result any
 	refs := []string{}
-	switch req.View {
-	case "overview":
-		daily := json.RawMessage(overview)
+	if native {
 		var saved map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(overview), &saved)
-		councilContext, hasCouncil := saved["council_context"]
-		if hasCouncil {
-			delete(saved, "council_context")
-			daily, _ = json.Marshal(saved)
+		var grant warRoomGrant
+		_ = json.Unmarshal(saved["warroom_scope"], &grant)
+		switch req.View {
+		case "overview":
+			result = map[string]any{"job_id": id, "server_ids": sources, "case": grant.Anchor, "window_start": report.Start, "window_end": report.End, "council_context": saved["council_context"], "query_limit": 24, "traffic_available": len(grant.Traffic) > 0, "notes": "KodeBlue infrastructure investigation. Sources/evidence contain bounded synced cases, findings, services, vulnerabilities and actions. Traffic is optional. Missing or stale evidence is unknown."}
+		case "sources", "evidence":
+			result, refs, err = s.nativeEvidence(ctx, sources, grant, report.Start, report.End, req.After)
+		case "traffic":
+			result, refs, err = s.nativeTraffic(ctx, grant, sources, report.Start, report.End, req.After, sourceOnly)
 		}
-		payload := map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": daily, "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
-		if hasCouncil {
-			payload["council_context"] = councilContext
-		}
-		result = payload
-	case "evidence":
-		if sourceOnly {
-			result, err = s.opt.Research.SourceWindow(ctx, siteID, sources, report.Start, report.End, req.After, through)
-		} else {
-			result, err = s.opt.Research.Window(ctx, siteID, sources, report.Start, report.End, req.After, through)
-		}
-	case "sources":
-		// Only explicitly granted, currently enrolled site sources. No arbitrary
-		// record kinds, secret settings, transcripts or raw host/container access.
-		if req.After > int64(len(sources)) {
-			writeErr(w, 400, "invalid source cursor")
+	} else {
+		switch req.View {
+		case "traffic":
+			writeErr(w, 400, "Use evidence for a traffic-collector investigation.")
 			return
-		}
-		type record struct {
-			Source     string    `json:"source"`
-			Kind       string    `json:"kind"`
-			ID         string    `json:"id"`
-			At         time.Time `json:"updated_at"`
-			Title      string    `json:"title"`
-			Summary    string    `json:"summary"`
-			CaseKind   string    `json:"case_kind,omitempty"`
-			Provenance string    `json:"provenance"`
-		}
-		items := []record{}
-		end := min(int(req.After)+4, len(sources))
-		for _, source := range sources[int(req.After):end] {
-			for _, kind := range []string{"incident", "finding"} {
-				records, readErr := s.researchRecords(ctx, source, kind, report.Start, report.End)
-				if readErr != nil {
-					s.researchError(w, readErr)
-					return
-				}
-				for _, rec := range records {
-					var value map[string]any
-					if json.Unmarshal(rec.Data, &value) != nil {
-						continue
+		case "overview":
+			daily := json.RawMessage(overview)
+			var saved map[string]json.RawMessage
+			_ = json.Unmarshal([]byte(overview), &saved)
+			councilContext, hasCouncil := saved["council_context"]
+			if hasCouncil {
+				delete(saved, "council_context")
+				daily, _ = json.Marshal(saved)
+			}
+			payload := map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": daily, "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
+			if hasCouncil {
+				payload["council_context"] = councilContext
+			}
+			result = payload
+		case "evidence":
+			if sourceOnly {
+				result, err = s.opt.Research.SourceWindow(ctx, siteID, sources, report.Start, report.End, req.After, through)
+			} else {
+				result, err = s.opt.Research.Window(ctx, siteID, sources, report.Start, report.End, req.After, through)
+			}
+		case "sources":
+			// Only explicitly granted, currently enrolled site sources. No arbitrary
+			// record kinds, secret settings, transcripts or raw host/container access.
+			if req.After > int64(len(sources)) {
+				writeErr(w, 400, "invalid source cursor")
+				return
+			}
+			type record struct {
+				Source     string    `json:"source"`
+				Kind       string    `json:"kind"`
+				ID         string    `json:"id"`
+				At         time.Time `json:"updated_at"`
+				Title      string    `json:"title"`
+				Summary    string    `json:"summary"`
+				CaseKind   string    `json:"case_kind,omitempty"`
+				Provenance string    `json:"provenance"`
+			}
+			items := []record{}
+			end := min(int(req.After)+4, len(sources))
+			for _, source := range sources[int(req.After):end] {
+				for _, kind := range []string{"incident", "finding"} {
+					records, readErr := s.researchRecords(ctx, source, kind, report.Start, report.End)
+					if readErr != nil {
+						s.researchError(w, readErr)
+						return
 					}
-					title, _ := value["title"].(string)
-					caseKind, _ := value["kind"].(string)
-					if kind == "incident" && caseKind == "research" {
-						continue
-					} // Model reports are discussion, not independent source evidence.
-					summary, _ := value["summary"].(string)
-					if summary == "" {
-						summary, _ = value["detail"].(string)
+					for _, rec := range records {
+						var value map[string]any
+						if json.Unmarshal(rec.Data, &value) != nil {
+							continue
+						}
+						title, _ := value["title"].(string)
+						caseKind, _ := value["kind"].(string)
+						if kind == "incident" && caseKind == "research" {
+							continue
+						} // Model reports are discussion, not independent source evidence.
+						summary, _ := value["summary"].(string)
+						if summary == "" {
+							summary, _ = value["detail"].(string)
+						}
+						refs = append(refs, "record:"+source+":"+kind+":"+rec.ID)
+						items = append(items, record{source, kind, rec.ID, rec.UpdatedAt, trimRunes(title, 160), trimRunes(summary, 400), trimRunes(caseKind, 40), "source_synced_summary"})
 					}
-					refs = append(refs, "record:"+source+":"+kind+":"+rec.ID)
-					items = append(items, record{source, kind, rec.ID, rec.UpdatedAt, trimRunes(title, 160), trimRunes(summary, 400), trimRunes(caseKind, 40), "source_synced_summary"})
 				}
 			}
+			result = map[string]any{"records": items, "next": end, "capped": end < len(sources), "limits": "At most four newest records per kind/source, filtered by update time; not a full history. Missing/late syncs are unknown."}
 		}
-		result = map[string]any{"records": items, "next": end, "capped": end < len(sources), "limits": "At most four newest records per kind/source, filtered by update time; not a full history. Missing/late syncs are unknown."}
 	}
 	if err != nil {
-		s.researchError(w, err)
+		s.councilHTTPError(w, err)
 		return
 	}
 	if page, ok := result.(research.Page); ok {

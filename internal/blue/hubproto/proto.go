@@ -76,6 +76,7 @@ type Status struct {
 	Profile        string             `json:"profile,omitempty"`
 	// FindingStats7d is rule -> status -> count: the raw false-positive picture.
 	FindingStats7d       map[string]map[string]int `json:"finding_stats_7d,omitempty"`
+	SupportsWarRoom      bool                      `json:"supports_war_room,omitempty"`
 	SupportsInvestigator bool                      `json:"supports_investigator,omitempty"`
 	AcceptsMessages      bool                      `json:"accepts_messages"`
 	// AcceptsApprovals: hub operators may approve or deny containment the
@@ -347,6 +348,7 @@ func ValidProvider(p string) bool { return p == "" || providerRe.MatchString(p) 
 // OperatorMessage is a message an authenticated hub operator sent to this
 // server's kodeblue.
 type OperatorMessage struct {
+	CouncilRole string `json:"council_role,omitempty"`
 	// CouncilPhase controls report presentation only; it grants no additional tools.
 	CouncilPhase   string    `json:"council_phase,omitempty"`
 	ID             int64     `json:"id"`

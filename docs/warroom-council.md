@@ -1,102 +1,78 @@
-# War room case chat
+# War room case discussion
 
-War room uses one group chat in the existing drawer, with the hub's normal
-neutral palette, typography, controls and blue accent. The activity map and
-behavioral evidence remain available in expandable sections, without a new page
-or window. Agent model and instruction settings remain in normal Settings.
+The native entry points are `/api/warroom/conversations` and the existing
+fleet/server/case UI. A website or analytics collector is never required.
+The activity map is on the left; the shared case chat is on the right. The
+normal composer and turn components are shared with individual case chats.
 
-## How a case works
+## Scope and participants
 
-1. Choose a site/date, the lead Investigator's worker, and up to four enrolled
-   source agents. Participants and their order are fixed for that case.
-2. The Investigator frames the case, separates leads from established facts and
-   asks discriminating questions.
-3. Each source specialist gets one turn, sequentially. It can add new cited
-   evidence, answer a specific prior entry, correct a cited claim, or pass.
-4. The Investigator closes with established, contradicted and unknown vectors,
-   remaining evidence gaps and discriminators. It must not claim every possible
-   attack vector has been discovered. The admin decides any response.
-5. Follow-up questions can start another round with the same participants. There
-   is no autonomous discussion after the conclusion.
+An administrator selects the lead Investigator and up to four role/server pairs:
+Responder, Reviewer, Learner and Operator. A server can contribute multiple roles.
+Each gets a fresh, read-only delegate of its existing configured role, using that
+role's model/instructions and cost ledger. Original response/learning/review
+procedures and live session ownership are unchanged. All delegates have exactly
+one tool, the scoped evidence broker; no response, resolution, shell, arbitrary
+file/SQL, secret or configuration tools are granted.
 
-These are read-only Investigator instances on the selected workers. Existing
-responders, learners and reviewers keep their responsibilities and sessions.
-Source specialists get only their own source's retained events and bounded synced
-incident/finding summaries. The overview is site-wide context, as are the quoted
-peer contributions intentionally shared with the selected participants. Browser
-claims are excluded from source-specialist evidence reads. Lead turns retain the
-site's explicit source grant. No shell, raw container inspection, secret reads or
-response tools are granted. Missing live container data is an explicit limitation.
-Research/model-generated cases are excluded from source-summary evidence so they
-cannot serve as independent corroboration of themselves.
+The grant contains only selected enrolled servers and the linked case's server.
+A source turn reads only its own server; lead turns can connect the selected
+sources. The linked case is validated against existing server records, never a
+user-supplied title or external URL. Enrollment hashes are stored privately, so
+replacement/re-enrolled machines cannot inherit previous discussion access.
 
-## Useful contributions and evidence
+The Investigator frames the case, source roles answer in order and the
+Investigator closes. Each source returns JSON with `kind` (`evidence`, `answer`,
+`correction`, `pass`), `note`, `evidence` references and `addresses` entry IDs.
+Accepted citations must have been returned by that job's broker: `event:<sequence>`
+or `record:<server>:<kind>:<id>`. A ledger retains at most 256 references per grant,
+outside the analytics database. A contribution has at most eight citations,
+four addressed entries and 2,000 bytes of text.
 
-Source turns return a small JSON contribution: `kind` (`evidence`, `answer`,
-`correction`, `pass`), `note`, `evidence` references and `addresses` chat-entry IDs.
-Accepted facts need references actually returned by that job's broker, in the form
-`event:<sequence>` or `record:<source>:<kind>:<id>`. The hub records at most 256
-reference keys per grant, outside the analytics database. Chat entries are capped
-at 2,400 bytes including JSON escaping; long model text is marked as an excerpt with
-a link to the full native report. Oversized admin messages are rejected before
-admission rather than silently shortened. A source contribution
-has at most eight references, four addressed entries and 2,000 bytes of text.
+Unread references, exact text repeats, reused evidence-only contributions and
+already-addressed evidence/question combinations are suppressed. Answers and
+corrections must identify a preceding entry. A pass/invalid result becomes a
+small system status, not an invented answer. These checks prove provenance and
+bounded deduplication, not logical entailment or every semantic paraphrase.
+Peer assertions and source summaries remain untrusted; repeated model analysis
+is not independent corroboration. Conclusions must preserve contradictions,
+unknown vectors and missing evidence; no vote establishes truth or authorizes a
+response. The admin decides under KodeBlue's existing response policy.
 
-The hub suppresses unread references, repeated text, repeated evidence-only
-contributions and already-addressed evidence/question combinations. Answers and
-corrections must name preceding entries. A pass or malformed contribution becomes
-a small system status, not a fabricated agent answer. Details remain in the native
-case. These checks establish citation provenance and bounded deduplication;
-they do not prove a claim follows from its citations or detect every semantic
-paraphrase. The role prompt requires relevance, alternatives and contradictions.
-An administrator must still assess the reasoning. Peer assertions are untrusted
-discussion, not an independent source of truth.
+## Lifecycle and efficiency
 
-## Turn ownership, controls and limits
+Native messages and turn reservations commit atomically. Only one turn per
+conversation is dispatched at a time; concurrent ticks/restarts cannot dispatch
+it twice. Workers retain native semaphore, model-budget, replay, Stop, transcript
+and accounting behavior. The hub coordinator makes no separate model calls.
 
-The hub dispatches one native job at a time per conversation, then waits for its
-terminal reply before admitting the next turn. A durable version check reserves
-the native message and conversation cursor in one transaction. Concurrent ticks
-and hub restarts cannot admit the same turn twice. Jobs retain native semaphore,
-model budget, replay protection, grant/query limits, Stop, transcript and billing.
-The coordinator does not become a separate model process.
+Messages arriving mid-turn are stored for the next speaker. During the closing
+turn they request another bounded round. Pause stops future admission. End
+withdraws queued work; dispatched work can finish and its completion cannot
+reopen the case. Use the native worker-session Stop to abort current work. Failed
+source turns remain explicit gaps. Changed enrollments/scope pause admission.
+Models cannot select participants, create a discussion, call each other or write
+response policy.
 
-An admin message during a turn is stored for the next speaker. It does not steer
-or interrupt the current native session. A message during a closing turn starts a
-new round after that turn, subject to the three-round limit. Pause admits no new
-turns; a dispatched turn can finish. End cancels a queued turn and prevents further
-dispatch. For a dispatched/running session use the existing worker-case Stop
-control. Pausing the final turn does not make its conclusion repeat on resume.
-Unavailable workers/models or changed site scope pause the conversation visibly;
-an expired native job requires reviewing live sessions and ending the old case.
-Failed source turns remain explicit gaps. Models cannot nominate new participants,
-call one another or authorize a response.
+There are at most 32 retained conversations, 32 entries/96 KiB per conversation,
+three rounds and four specialist turns/round, with a two-hour admission lifetime.
+There is one active discussion per linked case or selected-server grouping.
+Entries fit 2,400 encoded bytes; model excerpts link to full native cases and
+oversized admin input is rejected. Jobs retain 24 reads/32 KiB per response,
+ten-minute runs and thirty-minute grants. Context carries the latest twelve
+entries/700 bytes each and the latest question. Evidence is a bounded received
+view, not an exhaustive or transactionally consistent live snapshot. Inventory
+can be stale, and native record payloads minimize fields and flag truncation.
 
-There is one active/paused case per site, at most 32 retained conversations across
-the hub, at most 32 entries/96 KiB per conversation and a two-hour admission
-lifetime. New input is refused near the entry limit to leave space for closing
-turns. Each round has at most six model jobs (opening, four source turns, conclusion),
-with at most three rounds. Ended turns and existing native cases remain subject
-to their normal storage retention. Conversation metadata expires after 30 days
-on new-case admission; explicit research-site deletion also clears its chats.
-Normal server deletion does not erase unrelated analytics history.
+Only a closing turn sends a normal notification; interim turns/passes remain in
+chat and native case history. Conversations expire after thirty days on new
+admission. Existing optional traffic APIs/policies remain compatible; traffic
+collection and automatic traffic jobs do not automatically convene a council.
 
-The prompt references a broker snapshot of the most recent 12 discussion entries,
-at most 700 UTF-8-safe bytes each, plus the latest admin question. Excerpts are
-marked; this is a bounded context, not an unlimited transcript or a transactionally
-consistent snapshot across both databases. The full stored chat stays visible to
-the admin. Only a closing turn notifies through normal destinations/severity
-filters; intermediate turns and passes do not flood notifications. Update workers
-with this hub to apply the notification-presentation metadata.
+The implementation can investigate normal KodeBlue cases with the analytics
+module disabled. Optional traffic snapshots are restricted to linked configured
+collectors, granted sources, a fixed sequence ceiling and a maximum of eight
+collectors/job. Source turns exclude browser claims. No external enrichment is
+triggered by a discussion. IP enrichment retains its independent opt-in policy.
 
-Daily deterministic overviews and optional suspicious-traffic jobs keep their
-separate opt-in settings. They do not automatically summon a group of agents.
-Their individual reports remain expandable below the chat. No response voting,
-automatic containment or autonomous participant discovery is implemented.
-
-## UI example
-
-This is a clearly labelled illustrative conversation in an isolated local fixture.
-No live model, production telemetry or external enrichment was used.
-
-![War room case chat](assets/warroom-case-chat.png)
+![Native War room workspace](assets/warroom-native-workspace.png)

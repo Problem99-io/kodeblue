@@ -4,8 +4,8 @@
   const $ = id => root?.querySelector(`#${id}`);
   let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null,onUnavailable=null;
   let investigatorTimer=null,investigatorRequest=0;
-  let pendingQuestion="";
-  let councilID="",councilSite="",councilNew=false,councilRooms=[],councilPaint="";
+
+
   let automationDirty=false,automationSite="",revealAutomation=false;
   const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = String(text); return e; };
   async function api(path, options = {}) {
@@ -82,72 +82,18 @@
     if(revealAutomation&&root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}
   }
   async function loadInvestigator(){
-    const request=++investigatorRequest;
-    clearTimeout(investigatorTimer);
-    const mounted=root,site=$("site")?.value;if(!mounted?.isConnected||!site)return;
-    try{
-      const [servers,jobs,automation,rooms]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`),api(`/api/research/sites/${encodeURIComponent(site)}/automation`).catch(e=>({error:e.message})),api(`/api/research/sites/${encodeURIComponent(site)}/councils`)]);
-      if(root!==mounted||$("site").value!==site||request!==investigatorRequest)return;
-      const allowed=sites.find(s=>s.id===site)?.servers||[],worker=$("investigator-worker"),previous=worker.value;
-      const sourceAgents=servers.filter(s=>allowed.includes(s.id)&&!s.revoked);
-      const eligible=s=>s.status?.supports_investigator&&s.status?.accepts_messages&&s.status?.models_enabled;
-      const candidates=sourceAgents.filter(eligible);
-      worker.replaceChildren(...sourceAgents.map(s=>{const o=node("option",`${s.name}${eligible(s)?"":" · unavailable"}`);o.value=s.id;o.disabled=!eligible(s);return o;}));if(candidates.some(s=>s.id===previous))worker.value=previous;
-      if(councilSite!==site){councilSite=site;councilID="";councilNew=false;councilPaint="";}
-      councilRooms=rooms;if(!councilNew&&!rooms.some(r=>r.id===councilID))councilID=rooms[0]?.id||"";
-      const chosen=new Set(Array.from($("council-participants").querySelectorAll("input:checked")).map(e=>e.value));
-      $("council-participants").replaceChildren(...sourceAgents.map(s=>{const label=node("label"),box=node("input");box.type="checkbox";box.value=s.id;box.checked=chosen.has(s.id);box.disabled=!eligible(s);label.append(box,node("span",`${s.name}${eligible(s)?"":" · unavailable"}`));return label;}));
-      const room=rooms.find(r=>r.id===councilID);
-      const history=$("council-history");history.replaceChildren(...rooms.map(r=>{const o=node("option",`${r.entries.find(e=>e.kind==="admin")?.text.slice(0,48)||"Case"} · ${r.status}`);o.value=r.id;return o;}));
-      if(!room){const o=node("option","New case");o.value="";history.prepend(o);}history.value=councilID;
-      worker.disabled=!!room;if(room&&candidates.some(s=>s.id===room.lead.server_id))worker.value=room.lead.server_id;
-      for(const input of $("council-participants").querySelectorAll("input")){input.disabled=!!room||!candidates.some(s=>s.id===input.value);if(room)input.checked=room.participants.some(p=>p.server_id===input.value);}
-      const paint=JSON.stringify(room||null);
-      if(paint!==councilPaint){councilPaint=paint;paintCouncil(room);}
-      $("investigator-submit").textContent=room?"Send":"Open case";
-      $("investigator-submit").disabled=room?room.status==="ended":!candidates.length;
-      $("council-pause").hidden=!room||room.status==="complete"||room.status==="ended";
-      $("council-pause").textContent=room?.status==="paused"?"Resume turns":"Pause turns";
-      $("council-end").hidden=!room||room.status==="ended";
-      if(room)text("investigator-status",`${room.date} · ${room.status}${room.inflight_job?" · one agent turn in progress":""} · round ${room.round}/3. ${room.error||""}`);
-      else if(candidates.length)text("investigator-status","Choose agents, then open a case. Up to four source agents; no background conversation.");
-      if(room?.inflight_job){const current=room.phase>0&&room.phase<=room.participants.length?room.participants[room.phase-1]:room.lead;const link=node("a"," Live session / Stop");link.href=`#/s/${encodeURIComponent(current.server_id)}`;$("investigator-status").append(link);}
-      if(!candidates.length&&!room)text("investigator-status","No investigator-capable worker with a running model is available. Update an enrolled site source and enable hub messages. Configure Investigator under the normal agent model settings.");
-      if(automation.error){text("automation-status",automation.error);$("automation-submit").disabled=true;}
-      else{
-        $("automation-submit").disabled=false;
-        if(automationSite!==site||!automationDirty){
-          automationSite=site;automationDirty=false;
-          const policy=automation.settings,source=$("automation-worker");
-          source.replaceChildren(node("option","Choose a site source"));source.firstChild.value="";
-          for(const candidate of servers.filter(s=>allowed.includes(s.id)&&!s.revoked)){const option=node("option",candidate.name);option.value=candidate.id;source.append(option);}
-          if(policy.worker&&!Array.from(source.options).some(o=>o.value===policy.worker)){const option=node("option","Configured source unavailable");option.value=policy.worker;source.append(option);}
-          source.value=policy.worker||"";$("automation-suspicious").checked=policy.auto_suspicious;$("automation-daily").checked=policy.daily_report;$("automation-hour").value=policy.daily_hour;
-          const state=automation.state;
-          text("automation-status",`Site: ${sites.find(s=>s.id===site)?.name||site}. Timezone: ${automation.timezone}. Last daily overview: ${state.last_daily_report||"none"}. Automatic jobs queued: ${state.suspicious_runs||0}/4 (${state.day||"no activity yet"}). ${automation.scope_changed?"Site scope changed; save these settings to approve the current sources/timezone. ":""}${state.suspicious_error||""} ${state.daily_error||""}`);
-        }
+    clearTimeout(investigatorTimer);const mounted=root,site=$("site")?.value;if(!mounted?.isConnected||!site)return;
+    try{const [servers,jobs,automation]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`),api(`/api/research/sites/${encodeURIComponent(site)}/automation`)]);
+      if(root!==mounted||$("site").value!==site)return;
+      if(automationSite!==site||!automationDirty){automationSite=site;automationDirty=false;const policy=automation.settings,source=$("automation-worker"),allowed=sites.find(s=>s.id===site)?.servers||[];
+        source.replaceChildren(node("option","Choose an enrolled source"));source.firstChild.value="";
+        for(const server of servers.filter(s=>allowed.includes(s.id)&&!s.revoked)){const option=node("option",server.name);option.value=server.id;source.append(option);}
+        source.value=policy.worker||"";$("automation-suspicious").checked=policy.auto_suspicious;$("automation-daily").checked=policy.daily_report;$("automation-hour").value=policy.daily_hour;
+        const state=automation.state;text("automation-status",`Last traffic overview: ${state.last_daily_report||"none"}. Automatic jobs: ${state.suspicious_runs||0}/4. ${automation.scope_changed?"Collector scope changed; save to approve it.":""} ${state.suspicious_error||""} ${state.daily_error||""}`);
       }
-      $("investigator-jobs").replaceChildren(...jobs.map(job=>{
-        const card=node("details"),title=node("summary",`Job #${job.id} · ${job.status} · $${Number(job.cost_usd||0).toFixed(4)}`),question=node("p",job.body),report=node("pre",job.reply||"Waiting for the worker's report. Live progress and Stop are available on its normal case board."),link=node("a","Open worker cases and live sessions");
-        link.href=`#/s/${encodeURIComponent(job.server_id)}`;report.className="research-evidence";card.append(title,question,report,link);return card;
-      }));
-      if(rooms.some(r=>r.status==="active"||r.inflight_job)||jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,5000);
-    }catch(e){if(root===mounted&&request===investigatorRequest)text("investigator-status",e.message);}
-  }
-  function paintCouncil(room){
-    const chat=$("council-chat");
-    if(!room){const empty=node("div","Bring a case to the table.");empty.className="council-empty";empty.append(node("p","Choose agents and ask a question. The Investigator opens, source agents answer in turn, then the Investigator concludes. Agents can pass when they have nothing new."));chat.replaceChildren(empty);return;}
-    const atBottom=chat.scrollHeight-chat.scrollTop-chat.clientHeight<60;
-    chat.replaceChildren(...room.entries.map(entry=>{
-      const row=node("article");row.className=`council-message ${entry.kind==="admin"?"from-admin":""} ${entry.kind==="pass"||entry.kind==="gap"?"council-system":""}`;
-      const head=node("header"),name=node("strong",entry.speaker),time=node("time",new Date(entry.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));time.dateTime=entry.at;
-      head.append(name,time);row.append(head,node("p",entry.text));
-      if(entry.worker_id){const link=node("a","Full report / worker sessions");link.href=`#/s/${encodeURIComponent(entry.worker_id)}`;link.className="council-case-link";row.append(link);}
-      if(entry.evidence?.length)row.append(node("small",`Evidence: ${entry.evidence.join(" · ")}${entry.addresses?.length?` · answers #${entry.addresses.join(", #")}`:""}`));
-      return row;
-    }));
-    if(room.inflight_job){const pending=node("div","One agent is gathering evidence…");pending.className="council-thinking";chat.append(pending);}
-    if(atBottom)chat.scrollTop=chat.scrollHeight;
+      $("investigator-jobs").replaceChildren(...jobs.map(job=>{const detail=node("details");detail.append(node("summary",`Traffic investigation #${job.id} · ${job.status}`),node("pre",job.reply||"Pending native case report."));return detail;}));
+      if(jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,10000);
+    }catch(e){if(root===mounted)text("automation-status",e.message);}
   }
   function bind(){
   $("day").value=new Date(Date.now()-86400000).toISOString().slice(0,10);
@@ -160,18 +106,6 @@
     catch(err){if(root===mounted)text("automation-status",err.message);}
     finally{if(root===mounted)button.disabled=false;}
   });
-  $("council-new").addEventListener("click",()=>{councilID="";councilNew=true;councilPaint="";$("council-roster").open=true;loadInvestigator();});
-  $("council-history").addEventListener("change",()=>{councilID=$("council-history").value;councilNew=!councilID;loadInvestigator();});
-  const councilAction=async action=>{if(!councilID)return;try{await api(`/api/research/sites/${encodeURIComponent($("site").value)}/councils/${encodeURIComponent(councilID)}`,{method:"POST",body:JSON.stringify({action})});await loadInvestigator();}catch(e){text("investigator-status",e.message);}};
-  $("council-pause").addEventListener("click",()=>councilAction(councilRooms.find(r=>r.id===councilID)?.status==="paused"?"resume":"pause"));
-  $("council-end").addEventListener("click",()=>councilAction("end"));
-  $("investigator-form").addEventListener("submit",async e=>{
-    e.preventDefault();const mounted=root,site=$("site").value,button=$("investigator-submit"),question=$("investigator-question").value.trim();button.disabled=true;
-    const base=`/api/research/sites/${encodeURIComponent(site)}/councils`;
-    try{const room=await api(councilID?`${base}/${encodeURIComponent(councilID)}`:base,{method:"POST",body:JSON.stringify(councilID?{text:question}:{lead:$("investigator-worker").value,participants:Array.from($("council-participants").querySelectorAll("input:checked")).map(e=>e.value),date:$("day").value,question})});if(root!==mounted||$("site").value!==site)return;councilID=room.id;councilNew=false;$("investigator-question").value="";$("council-roster").open=false;await loadInvestigator();}
-    catch(err){if(root===mounted)text("investigator-status",err.message);}
-    finally{if(root===mounted)button.disabled=councilRooms.find(r=>r.id===councilID)?.status==="ended"||(!councilID&&!Array.from($("investigator-worker").options).some(o=>!o.disabled));}
-  });
   $("site-form").addEventListener("submit",async e=>{
     e.preventDefault(); const id=$("config-id").value.trim();
     const list=id=>$(id).value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
@@ -181,7 +115,7 @@
   }
   window.KodeBlueResearch = {
     openAutomation(){revealAutomation=true;if(root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}},
-    prefillQuestion(question){pendingQuestion=question;if(root?.isConnected){$("investigator-question").value=question;pendingQuestion="";councilID="";councilNew=true;councilPaint="";loadInvestigator();$("investigator-question").scrollIntoView({block:"center"});}},
+    prefillQuestion(question){window.KodeBlueWarRoom?.prefill(question);},
     async mount(host,options={}) {
       const token=++generation;
       const response=await fetch("/assets/research-panel.html");
@@ -193,9 +127,9 @@
       root.querySelector(".research-heading a")?.remove();
       host.replaceChildren(root);onGraph=options.onGraph||null;onUnavailable=options.onUnavailable||null;bind();
       graphSnapshot=null;graphResize?.disconnect();graphResize=new ResizeObserver(()=>{if(root?.isConnected&&graphSnapshot)graph(graphSnapshot.map,graphSnapshot.observations);});graphResize.observe($("network"));
-      try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();if(pendingQuestion&&root?.isConnected){$("investigator-question").value=pendingQuestion;pendingQuestion="";councilID="";councilNew=true;councilPaint="";await loadInvestigator();}}
+      try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();}
       catch {if(token===generation && root?.isConnected)text("status","Research unavailable; geography and incident evidence remain available.");}
     },
-    close(){generation++;investigatorRequest++;automationDirty=false;automationSite="";revealAutomation=false;councilID="";councilSite="";councilNew=false;councilPaint="";clearTimeout(investigatorTimer);root=null;onGraph=null;onUnavailable=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
+    close(){generation++;investigatorRequest++;automationDirty=false;automationSite="";revealAutomation=false;clearTimeout(investigatorTimer);root=null;onGraph=null;onUnavailable=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
   };
 })();

@@ -16,6 +16,7 @@ type investigatorEngine struct {
 	fakeEngine
 	d                 *Daemon
 	agent, brief      string
+	model             string
 	entered           chan struct{}
 	aborted           atomic.Bool
 	liveAtAbort       atomic.Bool
@@ -24,6 +25,7 @@ type investigatorEngine struct {
 
 func (f *investigatorEngine) StartSession(ctx context.Context, a, p, m, b string) (*runtime.Session, error) {
 	f.agent, f.brief = a, b
+	f.model = m
 	sess, err := f.fakeEngine.StartSession(ctx, a, p, m, b)
 	if f.failAfterDispatch {
 		return sess, errors.New("synthetic dispatch response lost")
@@ -169,5 +171,24 @@ func TestInvestigatorHonorsBudgetAndAdmissionDeadline(t *testing.T) {
 	cancel()
 	if r := d.Investigate(ctx, m); r.Status != "refused" || f.n.Load() != 0 {
 		t.Fatalf("cancelled admission started: %+v", r)
+	}
+}
+
+func TestWarRoomResponderUsesItsOwnModelInAFreshReadOnlyDelegate(t *testing.T) {
+	d, st, _, _ := newTestDaemon(t)
+	d.cfg.Hub.URL = "https://hub.example"
+	d.cfg.Hub.AcceptMessages = true
+	d.cfg.Inference.AgentModels = map[string]string{hubproto.RoleResponder: "responder-model", hubproto.RoleInvestigator: "investigator-model"}
+	engine := &investigatorEngine{d: d}
+	engine.script = make(chan runtime.Outcome, 1)
+	engine.script <- runtime.Outcome{Status: "completed", Text: `{"kind":"pass"}`}
+	d.setEngine(engine)
+	reply := d.Investigate(context.Background(), hubproto.OperatorMessage{ID: 219, Command: hubproto.CommandInvestigate, RequestID: "wr_case", Body: "Read-only responder turn", CouncilPhase: "source", CouncilRole: "responder", CreatedAt: time.Now()})
+	if reply.Status != "done" || engine.agent != "blue-warroom-responder" || engine.model != "responder-model" || len(st.Incidents("WHERE kind='research'")) != 1 {
+		t.Fatalf("wrong role/session: %+v agent=%s model=%s", reply, engine.agent, engine.model)
+	}
+	bad := d.Investigate(context.Background(), hubproto.OperatorMessage{ID: 220, Command: hubproto.CommandInvestigate, RequestID: "wr_case", Body: "test", CouncilRole: "root-shell", CouncilPhase: "source", CreatedAt: time.Now()})
+	if bad.Status != "refused" {
+		t.Fatal("arbitrary agent dispatch allowed")
 	}
 }

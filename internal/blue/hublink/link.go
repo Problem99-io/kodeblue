@@ -371,6 +371,7 @@ func (l *Link) status() hubproto.Status {
 		SpendToday: usd, SpendByPurpose: per, Spend7d: week, DailyBudget: l.cfg.Budget.DailyUSD, TokensToday: tokens,
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
 		SupportsInvestigator: true,
+		SupportsWarRoom:      true,
 		FindingStats7d:       l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
 		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,

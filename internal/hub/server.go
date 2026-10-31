@@ -367,7 +367,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, id string) {
 					phase = s.councilPhase(m.ID)
 				}
 				out.Messages = append(out.Messages, hubproto.OperatorMessage{ID: m.ID, Author: m.Author, Body: m.Body, IncidentID: m.IncidentID,
-					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash, CouncilPhase: phase})
+					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash, CouncilPhase: phase, CouncilRole: s.councilRole(m.ID)})
 			}
 			writeJSON(w, http.StatusOK, out)
 			return

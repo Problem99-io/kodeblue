@@ -313,11 +313,12 @@ func (k *Engine) registerAgents(ctx context.Context) error {
 	for _, e := range existing {
 		ids[e.Name] = e.ID
 	}
+	defs = append(defs, blue.WarRoomDelegates()...)
 	for _, a := range defs {
 		// A role's configured model wins over the definition's own; both
 		// fall back to agent_model.
-		role := strings.TrimPrefix(a.Name, "blue-")
-		if role == "investigator" && k.cfg.Budget.IncidentMaxIterations > 0 {
+		role := strings.TrimPrefix(strings.TrimPrefix(a.Name, "blue-"), "warroom-")
+		if (role == "investigator" || strings.HasPrefix(a.Name, "blue-warroom-")) && k.cfg.Budget.IncidentMaxIterations > 0 {
 			a.MaxIterations = min(a.MaxIterations, k.cfg.Budget.IncidentMaxIterations)
 		}
 		ref := k.cfg.ModelRef(role)

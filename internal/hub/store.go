@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 	}
 	// Columns added after the first release.
 	for _, c := range []struct{ table, col, def string }{
+		{"research_jobs", "native", "INTEGER NOT NULL DEFAULT 0"},
+		{"research_jobs", "enrollments", "TEXT NOT NULL DEFAULT '{}'"},
 		{"research_jobs", "source_only", "INTEGER NOT NULL DEFAULT 0"},
 		{"research_jobs", "auto_kind", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "decision", "TEXT NOT NULL DEFAULT ''"},

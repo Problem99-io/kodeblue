@@ -14,6 +14,7 @@ import (
 
 func TestInvestigatorRegistersThroughNormalEngineCatalog(t *testing.T) {
 	seen := false
+	delegateSeen := false
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && r.URL.Path == "/v1/agents" {
 			_, _ = w.Write([]byte(`[]`))
@@ -40,19 +41,25 @@ func TestInvestigatorRegistersThroughNormalEngineCatalog(t *testing.T) {
 				t.Errorf("bad native registration %+v", agent)
 			}
 		}
+		if agent.Name == "blue-warroom-responder" {
+			delegateSeen = true
+			if agent.Model != "incident-role-model" || agent.Iterations != 3 || len(agent.Tools) != 1 || agent.Tools[0] != "mcp__kodeblue__research_context" || !strings.Contains(agent.Instructions, "responder-role-note") {
+				t.Errorf("unsafe or incorrectly configured delegate %+v", agent)
+			}
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": "agent-" + agent.Name})
 	}))
 	defer engine.Close()
 	cfg := config.Default()
 	cfg.Inference.AgentModel = "native-default"
-	cfg.Inference.AgentModels = map[string]string{hubproto.RoleInvestigator: "research-only"}
+	cfg.Inference.AgentModels = map[string]string{hubproto.RoleInvestigator: "research-only", hubproto.RoleResponder: "incident-role-model"}
 	cfg.Budget.IncidentMaxIterations = 3
-	cfg.Agents.Instructions = map[string]string{hubproto.RoleInvestigator: "native-review-note"}
+	cfg.Agents.Instructions = map[string]string{hubproto.RoleInvestigator: "native-review-note", hubproto.RoleResponder: "responder-role-note"}
 	k := &Engine{cfg: cfg, baseURL: engine.URL, http: engine.Client(), agents: map[string]string{}}
 	if err := k.registerAgents(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !seen || k.agents["blue-investigator"] == "" {
+	if !seen || !delegateSeen || k.agents["blue-investigator"] == "" {
 		t.Fatal("investigator was not registered in the native catalog")
 	}
 }

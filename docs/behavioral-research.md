@@ -1,5 +1,12 @@
 # Behavioral research prototype
 
+Traffic analytics are an optional evidence source for native War room investigations.
+War room itself follows KodeBlue's enrolled servers and cases, including monitored
+containers and services, and works with this module disabled. See
+[Investigator and War room](behavioral-investigator.md). Collector groups below
+configure analytics ingestion; they are not a prerequisite or primary app scope.
+
+
 This experimental module is the first implementation slice of KodeBlue's
 behavioral intelligence layer. It adds passive analytics/evidence storage,
 deterministic daily counts, a bounded relationship graph and a research layer
