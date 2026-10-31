@@ -71,6 +71,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS cloudflare_lookups (at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS cloudflare_lookups_at ON cloudflare_lookups(at);
+CREATE TABLE IF NOT EXISTS cloudflare_budget (id INTEGER PRIMARY KEY CHECK(id=1), bucket INTEGER NOT NULL, n INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS baseline (
   id TEXT PRIMARY KEY, collector TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL DEFAULT '',
@@ -977,4 +980,19 @@ func orDefault(s, d string) string {
 		return d
 	}
 	return s
+}
+
+// ReserveCloudflareLookup counts only validated requests, independently of the
+// security journal. A conditional insert is atomic across concurrent MCP processes.
+func (s *Store) ReserveCloudflareLookup(now time.Time, limit int) (bool, error) {
+	cutoff := now.Add(-time.Minute).UnixMilli()
+	if _, err := s.db.Exec(`DELETE FROM cloudflare_lookups WHERE at<=?`, cutoff); err != nil {
+		return false, err
+	}
+	var at int64
+	err := s.db.QueryRow(`INSERT INTO cloudflare_lookups(at) SELECT ? WHERE (SELECT COUNT(*) FROM cloudflare_lookups WHERE at>?)<? RETURNING at`, now.UnixMilli(), cutoff, limit).Scan(&at)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }

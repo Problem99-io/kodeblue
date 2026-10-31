@@ -252,3 +252,65 @@ Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+## Cloudflare security context
+
+![Per-server Cloudflare settings with a synthetic configured token](assets/cloudflare-settings.jpg)
+
+The screenshot uses a synthetic token and zone for local UI verification.
+
+In a server's **Settings → Cloudflare security context**, save a read-only
+analytics API token and the zone IDs that server may query. A blank token field
+keeps the existing secret; **Clear Cloudflare** removes it and its zone access.
+The hub never returns the token to browsers or agents. Each enrolled server
+queries through its existing authenticated outbound hub connection and can only
+access its own configured zones. Revoking or deleting a server removes access;
+revoking or deleting it also removes its Cloudflare credentials.
+
+The agent tool `cloudflare_context` accepts `ip`, optional `zone_id`, and `hours`
+(1–24, default 1). Call without `ip` to discover configured zones. When exactly
+one zone is configured its ID can be omitted. Lookups use fixed read-only
+Cloudflare GraphQL queries: up to 50 recent security events and up to 50 bot-score
+groups, with a possible-truncation flag. The hub allows ten lookups per minute
+across the fleet; the server also keeps a local per-minute lookup budget.
+
+[Create an Analytics API token](https://developers.cloudflare.com/analytics/graphql-api/getting-started/authentication/api-token-auth/)
+with the required Analytics Read permissions, restricted to the intended zones
+and, where practical, the hub's outbound IP. Do not grant write permissions.
+Cloudflare's official walkthrough uses Account Analytics Read; dataset access and
+zone resources must also permit the requested zone. Provider errors are redacted.
+
+[Security events](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-firewall-events/)
+and HTTP bot analytics can be sampled and have plan-specific retention and access
+limits. Bot analytics are optional: if unavailable, security events remain usable
+and the tool reports bot information as unknown.
+[Granular bot scores](https://developers.cloudflare.com/bots/concepts/bot-score/)
+require Enterprise Bot Management. Zero means not computed, not safe; verified
+bots may be legitimate. Empty samples are not proof that an IP is harmless.
+
+Agents receive evidence for recommendations, not permission to block. They must
+correlate it with local findings, respect protected IPs and existing approval
+policy, and recommend a narrow scope rather than blocking an origin proxy or an
+entire ASN from a bot score alone. The integration never changes Cloudflare rules.
+Only the queried IP, zone and time range leave the hub; no incident summaries or
+host logs are uploaded. Request paths, user agents and provider fields remain
+untrusted model input.
+
+Cloudflare lookup limits are separate: 5 validated lookups/minute per server and
+25/minute across the hub. Each lookup makes at most two provider calls, leaving
+headroom under 300 calls per five minutes. Only event-query failures returning no data can refund hub reservations;
+429 retains the global charge. Optional bot failures never refund delivered evidence. Local accounting uses a dedicated counter, not the security journal.
+User agent and path fields are limited to 256 characters and stripped of invisible
+format/control characters. The learner does not receive this investigation tool.
+Standalone token files must be root-owned regular files under `/etc/kodeblue/`,
+with group kodeblue and mode 0640 so the daemon can read them. Mode 0600 is
+usable only by root. Token filenames must begin with cloudflare and end in
+.token or .key; other kodeblue credentials cannot be reused. Inline tokens
+require protected configuration files; only run/mcp reject unsafe inline secrets,
+so an optional integration cannot disable containment, undo or enrollment.
+
+Local lookup accounting uses a sliding 60-second window. Zone entries can include
+an optional domain/label after the ID (one zone per line); metadata returns these
+labels without additional Cloudflare requests.
+
+![Configured zone labels using synthetic credentials](assets/cloudflare-zone-labels.jpg)

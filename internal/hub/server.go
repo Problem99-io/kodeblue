@@ -81,6 +81,8 @@ type Server struct {
 	telegramReset     chan struct{}
 	models            modelCache
 	telegramTestLimit *limiter
+	cfLimit           *limiter
+	cfGlobal          *limiter
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -103,6 +105,8 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1), telegramWake: make(chan struct{}, 1), slackReset: make(chan struct{}, 1), telegramReset: make(chan struct{}, 1)}
 	s.models.client = endpointClient(opt.EndpointAllow)
 	s.telegramTestLimit = newLimiter(3, time.Minute)
+	s.cfLimit = newLimiter(5, time.Minute)
+	s.cfGlobal = newLimiter(25, time.Minute)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -128,6 +132,7 @@ func (s *Server) Janitor(ctx context.Context) {
 }
 
 func (s *Server) routes() {
+	s.cloudflareRoutes()
 	m := s.mux
 	// Agent API: server API key (Bearer kbk_…), or the one-time token for enroll.
 	m.HandleFunc("POST "+hubproto.PathEnroll, s.handleEnroll)
