@@ -347,6 +347,8 @@ func ValidProvider(p string) bool { return p == "" || providerRe.MatchString(p) 
 // OperatorMessage is a message an authenticated hub operator sent to this
 // server's kodeblue.
 type OperatorMessage struct {
+	// CouncilPhase controls report presentation only; it grants no additional tools.
+	CouncilPhase   string    `json:"council_phase,omitempty"`
 	ID             int64     `json:"id"`
 	Author         string    `json:"author"`
 	Body           string    `json:"body"`

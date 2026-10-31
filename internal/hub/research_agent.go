@@ -16,6 +16,7 @@ import (
 
 func (s *Server) researchAgentRoutes() {
 	s.researchAutoRoutes()
+	s.researchCouncilRoutes()
 	s.mux.HandleFunc("POST /api/research/sites/{site}/investigate", s.op(s.handleInvestigate))
 	s.mux.HandleFunc("GET /api/research/sites/{site}/investigations", s.op(s.handleInvestigations))
 	s.mux.HandleFunc("POST "+hubproto.PathPrefix+"research-job/{job}", s.agent(s.handleResearchEvidence))
@@ -25,6 +26,7 @@ type investigationRequest struct {
 	Server   string `json:"server_id"`
 	Day      string `json:"date"`
 	Question string `json:"question"`
+	council  *councilClaim
 }
 
 type researchDispatchError struct {
@@ -88,7 +90,17 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 		return nil, err
 	}
 	encoded, _ := json.Marshal(report)
-	sources, _ := json.Marshal(site.Servers)
+	if req.council != nil {
+		var snapshot map[string]any
+		_ = json.Unmarshal(encoded, &snapshot)
+		snapshot["council_context"] = req.council.Context
+		encoded, _ = json.Marshal(snapshot)
+	}
+	grantedSources := site.Servers
+	if req.council != nil && req.council.SourceOnly {
+		grantedSources = []string{worker.ID}
+	}
+	sources, _ := json.Marshal(grantedSources)
 	m := &Message{ServerID: worker.ID, Author: author, Body: req.Question, Command: hubproto.CommandInvestigate, RequestID: site.ID, ConversationID: "c_" + NewToken("")[:12]}
 	tx, err := s.st.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -129,7 +141,10 @@ func (s *Server) queueResearchInvestigation(ctx context.Context, siteID string, 
 		autoKind = "suspicious"
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview,auto_kind) VALUES(?,?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded), autoKind)
+		_, err = tx.ExecContext(ctx, `INSERT INTO research_jobs(message_id,site,day,expires,sources,through_seq,overview,auto_kind,source_only) VALUES(?,?,?,?,?,?,?,?,?)`, m.ID, site.ID, req.Day, now.Add(30*time.Minute).Unix(), string(sources), through, string(encoded), autoKind, req.council != nil && req.council.SourceOnly)
+	}
+	if err == nil && req.council != nil {
+		err = s.reserveCouncilTurn(ctx, tx, site, req.council, m.ID)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -169,7 +184,8 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 	defer cancel()
 	var siteID, day, sourcesJSON, overview string
 	var through int64
-	err = s.st.db.QueryRowContext(ctx, `SELECT j.site,j.day,j.sources,j.through_seq,j.overview FROM research_jobs j JOIN messages m ON m.id=j.message_id WHERE j.message_id=? AND m.server_id=? AND m.command=? AND m.status='delivered' AND j.expires>?`, id, serverID, hubproto.CommandInvestigate, time.Now().Unix()).Scan(&siteID, &day, &sourcesJSON, &through, &overview)
+	var sourceOnly bool
+	err = s.st.db.QueryRowContext(ctx, `SELECT j.site,j.day,j.sources,j.through_seq,j.overview,j.source_only FROM research_jobs j JOIN messages m ON m.id=j.message_id WHERE j.message_id=? AND m.server_id=? AND m.command=? AND m.status='delivered' AND j.expires>?`, id, serverID, hubproto.CommandInvestigate, time.Now().Unix()).Scan(&siteID, &day, &sourcesJSON, &through, &overview, &sourceOnly)
 	if err != nil {
 		writeErr(w, 403, "no active research grant for this worker")
 		return
@@ -208,11 +224,28 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var result any
+	refs := []string{}
 	switch req.View {
 	case "overview":
-		result = map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": json.RawMessage(overview), "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
+		daily := json.RawMessage(overview)
+		var saved map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(overview), &saved)
+		councilContext, hasCouncil := saved["council_context"]
+		if hasCouncil {
+			delete(saved, "council_context")
+			daily, _ = json.Marshal(saved)
+		}
+		payload := map[string]any{"job_id": id, "site": siteID, "source_ids": sources, "through_sequence": through, "daily": daily, "query_limit": 24, "detail": "Overview captured at job admission; retained details may subsequently expire. Findings are research leads, not actor identity."}
+		if hasCouncil {
+			payload["council_context"] = councilContext
+		}
+		result = payload
 	case "evidence":
-		result, err = s.opt.Research.Window(ctx, siteID, sources, report.Start, report.End, req.After, through)
+		if sourceOnly {
+			result, err = s.opt.Research.SourceWindow(ctx, siteID, sources, report.Start, report.End, req.After, through)
+		} else {
+			result, err = s.opt.Research.Window(ctx, siteID, sources, report.Start, report.End, req.After, through)
+		}
 	case "sources":
 		// Only explicitly granted, currently enrolled site sources. No arbitrary
 		// record kinds, secret settings, transcripts or raw host/container access.
@@ -246,10 +279,14 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 					}
 					title, _ := value["title"].(string)
 					caseKind, _ := value["kind"].(string)
+					if kind == "incident" && caseKind == "research" {
+						continue
+					} // Model reports are discussion, not independent source evidence.
 					summary, _ := value["summary"].(string)
 					if summary == "" {
 						summary, _ = value["detail"].(string)
 					}
+					refs = append(refs, "record:"+source+":"+kind+":"+rec.ID)
 					items = append(items, record{source, kind, rec.ID, rec.UpdatedAt, trimRunes(title, 160), trimRunes(summary, 400), trimRunes(caseKind, 40), "source_synced_summary"})
 				}
 			}
@@ -260,9 +297,18 @@ func (s *Server) handleResearchEvidence(w http.ResponseWriter, r *http.Request, 
 		s.researchError(w, err)
 		return
 	}
+	if page, ok := result.(research.Page); ok {
+		for _, o := range page.Observations {
+			refs = append(refs, fmt.Sprintf("event:%d", o.Sequence))
+		}
+	}
 	b, err := json.Marshal(result)
 	if err != nil || len(b) > 32<<10 {
 		writeErr(w, 503, "research result exceeded response bound")
+		return
+	}
+	if err = s.recordCouncilRefs(ctx, id, refs); err != nil {
+		writeErr(w, 503, "evidence citation ledger unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

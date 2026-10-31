@@ -9,25 +9,33 @@
 </head>
 <body>
 <main class="research-page">
-<header class="research-heading"><div><h2>Behavioral research layer</h2><p>One War room · source locations and evidence relationships.</p></div><span class="badge">Experimental foundation</span></header>
+<header class="research-heading"><div><h2>Case discussion</h2><p>Investigator opens · source agents answer · Investigator concludes.</p></div></header>
 <p id="status" role="status">Loading research status…</p>
 <section id="workspace" hidden>
 <div class="research-controls"><label>Site <select id="site"></select></label><label>Report day <input id="day" type="date"></label><button id="refresh" class="btn">Load evidence</button></div>
-<p class="research-note">Daily totals cover the selected site and day. Geographic links also follow War room's time/server filters and reuse known locations only. Collection and map refresh do not call a model. Automatic investigation requires this site's opt-in policy; fingerprint matches do not establish an actor.</p>
+<section class="research-chat" aria-label="War room group chat">
+<div class="council-toolbar"><label class="sr-only" for="council-history">Case conversation</label><select id="council-history" aria-label="Case conversation"></select><button type="button" class="btn small" id="council-new">New case</button><button type="button" class="btn small" id="council-pause" hidden>Pause turns</button><button type="button" class="btn small" id="council-end" hidden>End case</button></div>
+<details id="council-roster"><summary>Choose agents</summary><label>Investigator runs on<select id="investigator-worker" required></select></label><p>Select source agents to answer in order. Each uses its native read-only Investigator, scoped to that source's received evidence. Existing responders keep their incident work.</p><div id="council-participants" class="council-participants"></div></details>
+<div id="council-chat" class="council-chat" role="log" aria-label="Case discussion" aria-live="polite"><div class="council-empty">Bring a case to the table.<p>Choose agents and ask a question. Only one agent speaks at a time; source agents can pass. Conclusions stay tied to evidence and missing coverage.</p></div></div>
+<p id="investigator-status" class="council-status" role="status"></p>
+<form id="investigator-form" class="council-composer"><label class="sr-only" for="investigator-question">Message to War room</label><textarea id="investigator-question" required maxlength="2000" placeholder="Ask about a case, add evidence, or challenge a conclusion…"></textarea><button class="btn" type="submit" id="investigator-submit" disabled>Open case</button></form>
+<p class="council-footnote">Messages during a turn reach the next speaker. Pause stops further turns; running sessions retain their normal Stop control. Read-only advice. You decide any response.</p>
+</section>
+<details class="research-context"><summary>Evidence and coverage</summary><p class="research-note">Daily totals cover the selected site and day. Geographic links also follow War room's time/server filters and reuse known locations only. Collection and map refresh do not call a model. Automatic investigation requires this site's opt-in policy; fingerprint matches do not establish an actor.</p>
 <div id="metrics" class="research-metrics"></div>
-<section class="research-panel"><h2>Investigator</h2><p>A read-only specialist connects the site's traffic evidence and linked incident summaries. It runs for your question or an enabled suspicious-traffic policy, using the selected worker's normal model, budget, live session and notifications.</p>
-<form id="investigator-form"><div class="research-form"><label>Investigator worker<select id="investigator-worker" required></select></label><label>Question or report request<textarea id="investigator-question" required maxlength="4000" placeholder="Compare suspicious activity with ordinary traffic. Cite evidence, alternative explanations and missing coverage."></textarea></label></div><button class="btn" type="submit" id="investigator-submit" disabled>Ask investigator</button></form><p id="investigator-status" role="status"></p>
+<section class="research-panel"><h2>Traffic overview</h2><p id="period"></p><div id="traffic"></div></section>
+<section class="research-panel"><h2>Activity needing review</h2><div id="findings"></div></section>
+<section class="research-panel"><h2>Evidence network</h2><p>Solid: producer-reported connection. Dashed: fingerprint observation. Inspect a link for its source evidence.</p><svg id="network" viewBox="0 0 900 380" role="group" aria-label="Bounded evidence network"></svg><div id="network-links" class="research-link-controls"></div><p id="graph-note"></p><div id="evidence" aria-live="polite"></div></section>
+<section class="research-panel"><h2>Coverage and limits</h2><div id="coverage"></div></section>
+</details>
 <details class="research-panel" id="automation-settings"><summary>Investigator automation settings</summary><form id="automation-form"><div class="research-form">
 <label>Automation worker / report source<select id="automation-worker"></select></label>
 <label class="research-check"><input id="automation-suspicious" type="checkbox"> Automatically investigate potential suspicious traffic</label>
 <label class="research-check"><input id="automation-daily" type="checkbox"> Send a daily traffic and suspicious-activity overview</label>
 <label>Daily report hour (0–23, site timezone)<input id="automation-hour" type="number" min="0" max="23" value="8" required></label>
 </div><p>Both options are off by default. Automatic investigation requires 20 new producer-reported sensitive-route requests, queues at most one automatic job per hour and four per site/day. It is a research lead, never permission to block. Daily overviews use deterministic counts and no model call. Normal notification filters apply.</p><p id="automation-status" role="status"></p><button class="btn" type="submit" id="automation-submit">Save automation settings</button></form></details>
-<div id="investigator-jobs"></div></section>
-<section class="research-panel"><h2>Traffic overview</h2><p id="period"></p><div id="traffic"></div></section>
-<section class="research-panel"><h2>Activity needing review</h2><div id="findings"></div></section>
-<section class="research-panel"><h2>Evidence network</h2><p>Solid: producer-reported connection. Dashed: fingerprint observation. Inspect a link for its source evidence.</p><svg id="network" viewBox="0 0 900 380" role="group" aria-label="Bounded evidence network"></svg><div id="network-links" class="research-link-controls"></div><p id="graph-note"></p><div id="evidence" aria-live="polite"></div></section>
-<section class="research-panel"><h2>Coverage and limits</h2><div id="coverage"></div></section>
+<details class="research-panel"><summary>Individual investigations and automatic reports</summary><div id="investigator-jobs"></div></details>
+
 </section>
 <details id="configuration" hidden class="research-panel"><summary>Configure a research site</summary>
 <form id="site-form"><div class="research-form">

@@ -1,7 +1,7 @@
 // War room is a drawer above the current page. All source/provider data is
 // untrusted and rendered through text nodes; the map has no remote tile server.
 "use strict";
-const WAR = { open: false, request: 0, hours: "24", server: "", severity: "", query: "", selected: null, eventLimit: 50, camera: { x: 0, y: 0, width: 1000, height: 500 }, data: null, land: null, timer: null };
+const WAR = { open: false, researchOpen: true, request: 0, hours: "24", server: "", severity: "", query: "", selected: null, eventLimit: 50, camera: { x: 0, y: 0, width: 1000, height: 500 }, data: null, land: null, timer: null };
 
 function mountWarRoom() {
   let tab = document.getElementById("war-tab");
@@ -47,17 +47,20 @@ function openWarRoom() {
   WAR.inspector = h("aside", { class: "war-inspector", "aria-label": "Source and incident details", "aria-live": "polite" });
   WAR.config = h("div", { class: "war-config", hidden: true });
   WAR.notice = h("div", { class: "war-notice", hidden: true, role: "status" });
-  const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) paintWarSettings(); } } }, ic("sliders", 13), "Enrichment");
+  const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) {WAR.shell.querySelector(".war-map-section").open=true;paintWarSettings();} } } }, ic("sliders", 13), "Enrichment");
   WAR.settingsButton = settings;
-  WAR.researchButton=h("button",{class:"btn small",type:"button","aria-expanded":"false","aria-controls":"war-research-panel",on:{click:()=>toggleWarResearch(!WAR.researchOpen)}},ic("layers",13),"Research layer");
+  WAR.researchButton=h("button",{class:"btn small",type:"button","aria-expanded":"false","aria-controls":"war-research-panel",on:{click:()=>toggleWarResearch(!WAR.researchOpen)}},ic("layers",13),"Case chat");
   WAR.shell.append(
     h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Source activity · evidence · agent council"))), h("div", { class: "sp" }), WAR.status, WAR.researchButton, settings, close),
-    h("div", { class: "war-filters" }, range, servers, severity, h("div", { class: "sp" }), query), WAR.config, WAR.notice, WAR.stats,
-    h("div", { class: "war-grid" }, h("div", { class: "war-theater" },
-      h("div", { class: "war-map-top" }, h("span", null, "SOURCE ORIGINS"), h("span", { class: "war-live" }, h("span", { class: "dot on" }), "Live activity")),
-      WAR.map,
-      h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),
-      WAR.recent,WAR.researchHost), WAR.inspector));
+    WAR.researchHost,
+    h("details",{class:"war-map-section"},h("summary",null,"Activity map and source evidence"),
+      h("div", { class: "war-filters" }, range, servers, severity, h("div", { class: "sp" }), query), WAR.config, WAR.notice, WAR.stats,
+      h("div", { class: "war-grid" }, h("div", { class: "war-theater" },
+        h("div", { class: "war-map-top" }, h("span", null, "SOURCE ORIGINS"), h("span", { class: "war-live" }, h("span", { class: "dot on" }), "Live activity")),
+        WAR.map,
+        h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),
+        WAR.recent), WAR.inspector)));
+
   WAR.shell.addEventListener("keydown", warKeys);
   document.body.append(WAR.backdrop);
   drawer.append(WAR.shell);
@@ -87,7 +90,7 @@ function closeWarRoom() {
 function warKeys(e) {
   if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeWarRoom(); }
   if (e.key !== "Tab") return;
-  const nodes = [...WAR.shell.querySelectorAll('a,button,input,select,[tabindex="0"]')].filter((el) => !el.disabled && el.getClientRects().length);
+  const nodes = [...WAR.shell.querySelectorAll('a,button,input,select,textarea,summary,[tabindex="0"]')].filter((el) => !el.disabled && el.getClientRects().length);
   const first = nodes[0], last = nodes[nodes.length - 1];
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
@@ -101,7 +104,7 @@ function toggleWarResearch(enabled,focusPanel=false){
   if(!enabled){window.KodeBlueResearch?.close();WAR.researchGraph=null;paintWarRoom();return;}
   WAR.researchHost.textContent="Loading behavioral evidence…";
   let first=true;
-  window.KodeBlueResearch.mount(WAR.researchHost,{onGraph:data=>{if(!WAR.open || !WAR.researchOpen)return;WAR.researchGraph=data;paintWarRoom();if(first&&focusPanel)WAR.researchHost.scrollIntoView({block:"start"});first=false;}}).catch(()=>{if(WAR.open && WAR.researchOpen)WAR.researchHost.textContent="Research layer unavailable. Source locations and incidents remain available.";});
+  window.KodeBlueResearch.mount(WAR.researchHost,{onUnavailable:()=>{if(WAR.open){toggleWarResearch(false);WAR.shell.querySelector(".war-map-section").open=true;}},onGraph:data=>{if(!WAR.open || !WAR.researchOpen)return;WAR.researchGraph=data;paintWarRoom();if(first&&focusPanel)WAR.researchHost.scrollIntoView({block:"start"});first=false;}}).catch(()=>{if(WAR.open && WAR.researchOpen)WAR.researchHost.textContent="Research layer unavailable. Source locations and incidents remain available.";});
 }
 
 // Relationships reuse only already available War room locations. No additional

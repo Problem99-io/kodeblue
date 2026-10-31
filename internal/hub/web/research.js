@@ -2,16 +2,17 @@
 (() => {
   "use strict";
   const $ = id => root?.querySelector(`#${id}`);
-  let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null;
-  let investigatorTimer=null;
+  let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null,onUnavailable=null;
+  let investigatorTimer=null,investigatorRequest=0;
   let pendingQuestion="";
+  let councilID="",councilSite="",councilNew=false,councilRooms=[],councilPaint="";
   let automationDirty=false,automationSite="",revealAutomation=false;
   const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = String(text); return e; };
   async function api(path, options = {}) {
     const res = await fetch(path, { ...options, headers: { "Content-Type": "application/json", "X-Kodeblue-CSRF": csrf, ...options.headers } });
     let data;try{data=await res.json();}catch{throw new Error(`Research request failed (HTTP ${res.status})`);} if (!res.ok) throw new Error(data.error || "Research unavailable"); return data;
   }
-  const text = (id, value) => { $(id).textContent = value; };
+  const text = (id, value) => { $(id).textContent = value;if(id==="status")$(id).hidden=value.startsWith("Loaded passive evidence."); };
   function table(target, headings, rows) {
     const t = node("table"), head = node("tr"); headings.forEach(h => head.append(node("th", h))); t.append(head);
     rows.forEach(values => { const r = node("tr"); values.forEach(v => r.append(node("td", v))); t.append(r); });
@@ -71,7 +72,7 @@
     const mounted=root;
     const data = await api("/api/research");
     if (root!==mounted || !root?.isConnected) return;
-    if (!data.enabled) { text("status","Research is disabled. Start the hub with --behavioral-research to enable this experimental module. Existing agents are unchanged."); return; }
+    if (!data.enabled) { text("status","Research is disabled. Start the hub with --behavioral-research to enable this experimental module. Existing agents are unchanged.");onUnavailable?.();return; }
     sites=data.sites; $("configuration").hidden=false; $("workspace").hidden=false;
     const selected=$("site").value; $("site").replaceChildren(...sites.map(s=>{const o=node("option",s.name);o.value=s.id;return o;}));
     if (sites.some(s=>s.id===selected)) $("site").value=selected;
@@ -81,17 +82,37 @@
     if(revealAutomation&&root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}
   }
   async function loadInvestigator(){
+    const request=++investigatorRequest;
     clearTimeout(investigatorTimer);
     const mounted=root,site=$("site")?.value;if(!mounted?.isConnected||!site)return;
-    $("investigator-submit").disabled=true;
     try{
-      const [servers,jobs,automation]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`),api(`/api/research/sites/${encodeURIComponent(site)}/automation`).catch(e=>({error:e.message}))]);
-      if(root!==mounted||$("site").value!==site)return;
+      const [servers,jobs,automation,rooms]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`),api(`/api/research/sites/${encodeURIComponent(site)}/automation`).catch(e=>({error:e.message})),api(`/api/research/sites/${encodeURIComponent(site)}/councils`)]);
+      if(root!==mounted||$("site").value!==site||request!==investigatorRequest)return;
       const allowed=sites.find(s=>s.id===site)?.servers||[],worker=$("investigator-worker"),previous=worker.value;
-      const candidates=servers.filter(s=>allowed.includes(s.id)&&!s.revoked&&s.status?.supports_investigator&&s.status?.accepts_messages&&s.status?.models_enabled);
-      worker.replaceChildren(...candidates.map(s=>{const o=node("option",s.name);o.value=s.id;return o;}));if(candidates.some(s=>s.id===previous))worker.value=previous;
-      $("investigator-submit").disabled=!candidates.length;
-      if(!candidates.length)text("investigator-status","No investigator-capable worker with a running model is available. Update an enrolled site source and enable hub messages. Configure Investigator under the normal agent model settings.");
+      const sourceAgents=servers.filter(s=>allowed.includes(s.id)&&!s.revoked);
+      const eligible=s=>s.status?.supports_investigator&&s.status?.accepts_messages&&s.status?.models_enabled;
+      const candidates=sourceAgents.filter(eligible);
+      worker.replaceChildren(...sourceAgents.map(s=>{const o=node("option",`${s.name}${eligible(s)?"":" · unavailable"}`);o.value=s.id;o.disabled=!eligible(s);return o;}));if(candidates.some(s=>s.id===previous))worker.value=previous;
+      if(councilSite!==site){councilSite=site;councilID="";councilNew=false;councilPaint="";}
+      councilRooms=rooms;if(!councilNew&&!rooms.some(r=>r.id===councilID))councilID=rooms[0]?.id||"";
+      const chosen=new Set(Array.from($("council-participants").querySelectorAll("input:checked")).map(e=>e.value));
+      $("council-participants").replaceChildren(...sourceAgents.map(s=>{const label=node("label"),box=node("input");box.type="checkbox";box.value=s.id;box.checked=chosen.has(s.id);box.disabled=!eligible(s);label.append(box,node("span",`${s.name}${eligible(s)?"":" · unavailable"}`));return label;}));
+      const room=rooms.find(r=>r.id===councilID);
+      const history=$("council-history");history.replaceChildren(...rooms.map(r=>{const o=node("option",`${r.entries.find(e=>e.kind==="admin")?.text.slice(0,48)||"Case"} · ${r.status}`);o.value=r.id;return o;}));
+      if(!room){const o=node("option","New case");o.value="";history.prepend(o);}history.value=councilID;
+      worker.disabled=!!room;if(room&&candidates.some(s=>s.id===room.lead.server_id))worker.value=room.lead.server_id;
+      for(const input of $("council-participants").querySelectorAll("input")){input.disabled=!!room||!candidates.some(s=>s.id===input.value);if(room)input.checked=room.participants.some(p=>p.server_id===input.value);}
+      const paint=JSON.stringify(room||null);
+      if(paint!==councilPaint){councilPaint=paint;paintCouncil(room);}
+      $("investigator-submit").textContent=room?"Send":"Open case";
+      $("investigator-submit").disabled=room?room.status==="ended":!candidates.length;
+      $("council-pause").hidden=!room||room.status==="complete"||room.status==="ended";
+      $("council-pause").textContent=room?.status==="paused"?"Resume turns":"Pause turns";
+      $("council-end").hidden=!room||room.status==="ended";
+      if(room)text("investigator-status",`${room.date} · ${room.status}${room.inflight_job?" · one agent turn in progress":""} · round ${room.round}/3. ${room.error||""}`);
+      else if(candidates.length)text("investigator-status","Choose agents, then open a case. Up to four source agents; no background conversation.");
+      if(room?.inflight_job){const current=room.phase>0&&room.phase<=room.participants.length?room.participants[room.phase-1]:room.lead;const link=node("a"," Live session / Stop");link.href=`#/s/${encodeURIComponent(current.server_id)}`;$("investigator-status").append(link);}
+      if(!candidates.length&&!room)text("investigator-status","No investigator-capable worker with a running model is available. Update an enrolled site source and enable hub messages. Configure Investigator under the normal agent model settings.");
       if(automation.error){text("automation-status",automation.error);$("automation-submit").disabled=true;}
       else{
         $("automation-submit").disabled=false;
@@ -110,8 +131,23 @@
         const card=node("details"),title=node("summary",`Job #${job.id} · ${job.status} · $${Number(job.cost_usd||0).toFixed(4)}`),question=node("p",job.body),report=node("pre",job.reply||"Waiting for the worker's report. Live progress and Stop are available on its normal case board."),link=node("a","Open worker cases and live sessions");
         link.href=`#/s/${encodeURIComponent(job.server_id)}`;report.className="research-evidence";card.append(title,question,report,link);return card;
       }));
-      if(jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,10000);
-    }catch(e){if(root===mounted)text("investigator-status",e.message);}
+      if(rooms.some(r=>r.status==="active"||r.inflight_job)||jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,5000);
+    }catch(e){if(root===mounted&&request===investigatorRequest)text("investigator-status",e.message);}
+  }
+  function paintCouncil(room){
+    const chat=$("council-chat");
+    if(!room){const empty=node("div","Bring a case to the table.");empty.className="council-empty";empty.append(node("p","Choose agents and ask a question. The Investigator opens, source agents answer in turn, then the Investigator concludes. Agents can pass when they have nothing new."));chat.replaceChildren(empty);return;}
+    const atBottom=chat.scrollHeight-chat.scrollTop-chat.clientHeight<60;
+    chat.replaceChildren(...room.entries.map(entry=>{
+      const row=node("article");row.className=`council-message ${entry.kind==="admin"?"from-admin":""} ${entry.kind==="pass"||entry.kind==="gap"?"council-system":""}`;
+      const head=node("header"),name=node("strong",entry.speaker),time=node("time",new Date(entry.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));time.dateTime=entry.at;
+      head.append(name,time);row.append(head,node("p",entry.text));
+      if(entry.worker_id){const link=node("a","Full report / worker sessions");link.href=`#/s/${encodeURIComponent(entry.worker_id)}`;link.className="council-case-link";row.append(link);}
+      if(entry.evidence?.length)row.append(node("small",`Evidence: ${entry.evidence.join(" · ")}${entry.addresses?.length?` · answers #${entry.addresses.join(", #")}`:""}`));
+      return row;
+    }));
+    if(room.inflight_job){const pending=node("div","One agent is gathering evidence…");pending.className="council-thinking";chat.append(pending);}
+    if(atBottom)chat.scrollTop=chat.scrollHeight;
   }
   function bind(){
   $("day").value=new Date(Date.now()-86400000).toISOString().slice(0,10);
@@ -124,11 +160,17 @@
     catch(err){if(root===mounted)text("automation-status",err.message);}
     finally{if(root===mounted)button.disabled=false;}
   });
+  $("council-new").addEventListener("click",()=>{councilID="";councilNew=true;councilPaint="";$("council-roster").open=true;loadInvestigator();});
+  $("council-history").addEventListener("change",()=>{councilID=$("council-history").value;councilNew=!councilID;loadInvestigator();});
+  const councilAction=async action=>{if(!councilID)return;try{await api(`/api/research/sites/${encodeURIComponent($("site").value)}/councils/${encodeURIComponent(councilID)}`,{method:"POST",body:JSON.stringify({action})});await loadInvestigator();}catch(e){text("investigator-status",e.message);}};
+  $("council-pause").addEventListener("click",()=>councilAction(councilRooms.find(r=>r.id===councilID)?.status==="paused"?"resume":"pause"));
+  $("council-end").addEventListener("click",()=>councilAction("end"));
   $("investigator-form").addEventListener("submit",async e=>{
-    e.preventDefault();const mounted=root,button=$("investigator-submit");button.disabled=true;
-    try{const job=await api(`/api/research/sites/${encodeURIComponent($("site").value)}/investigate`,{method:"POST",body:JSON.stringify({server_id:$("investigator-worker").value,date:$("day").value,question:$("investigator-question").value.trim()})});if(root!==mounted)return;text("investigator-status",`Investigation #${job.id} queued through the normal agent message channel.`);await loadInvestigator();}
+    e.preventDefault();const mounted=root,site=$("site").value,button=$("investigator-submit"),question=$("investigator-question").value.trim();button.disabled=true;
+    const base=`/api/research/sites/${encodeURIComponent(site)}/councils`;
+    try{const room=await api(councilID?`${base}/${encodeURIComponent(councilID)}`:base,{method:"POST",body:JSON.stringify(councilID?{text:question}:{lead:$("investigator-worker").value,participants:Array.from($("council-participants").querySelectorAll("input:checked")).map(e=>e.value),date:$("day").value,question})});if(root!==mounted||$("site").value!==site)return;councilID=room.id;councilNew=false;$("investigator-question").value="";$("council-roster").open=false;await loadInvestigator();}
     catch(err){if(root===mounted)text("investigator-status",err.message);}
-    finally{if(root===mounted)button.disabled=!$("investigator-worker").options.length;}
+    finally{if(root===mounted)button.disabled=councilRooms.find(r=>r.id===councilID)?.status==="ended"||(!councilID&&!Array.from($("investigator-worker").options).some(o=>!o.disabled));}
   });
   $("site-form").addEventListener("submit",async e=>{
     e.preventDefault(); const id=$("config-id").value.trim();
@@ -139,7 +181,7 @@
   }
   window.KodeBlueResearch = {
     openAutomation(){revealAutomation=true;if(root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}},
-    prefillQuestion(question){pendingQuestion=question;if(root?.isConnected){$("investigator-question").value=question;$("investigator-question").scrollIntoView({block:"center"});}},
+    prefillQuestion(question){pendingQuestion=question;if(root?.isConnected){$("investigator-question").value=question;pendingQuestion="";councilID="";councilNew=true;councilPaint="";loadInvestigator();$("investigator-question").scrollIntoView({block:"center"});}},
     async mount(host,options={}) {
       const token=++generation;
       const response=await fetch("/assets/research-panel.html");
@@ -149,11 +191,11 @@
       const doc=new DOMParser().parseFromString(markup,"text/html");
       root=document.importNode(doc.querySelector("main.research-page"),true);
       root.querySelector(".research-heading a")?.remove();
-      host.replaceChildren(root);onGraph=options.onGraph||null;bind();if(pendingQuestion)$("investigator-question").value=pendingQuestion;
+      host.replaceChildren(root);onGraph=options.onGraph||null;onUnavailable=options.onUnavailable||null;bind();
       graphSnapshot=null;graphResize?.disconnect();graphResize=new ResizeObserver(()=>{if(root?.isConnected&&graphSnapshot)graph(graphSnapshot.map,graphSnapshot.observations);});graphResize.observe($("network"));
-      try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();}
+      try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();if(pendingQuestion&&root?.isConnected){$("investigator-question").value=pendingQuestion;pendingQuestion="";councilID="";councilNew=true;councilPaint="";await loadInvestigator();}}
       catch {if(token===generation && root?.isConnected)text("status","Research unavailable; geography and incident evidence remain available.");}
     },
-    close(){generation++;automationDirty=false;automationSite="";revealAutomation=false;clearTimeout(investigatorTimer);root=null;onGraph=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
+    close(){generation++;investigatorRequest++;automationDirty=false;automationSite="";revealAutomation=false;councilID="";councilSite="";councilNew=false;councilPaint="";clearTimeout(investigatorTimer);root=null;onGraph=null;onUnavailable=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
   };
 })();

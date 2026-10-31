@@ -77,6 +77,31 @@ func TestInvestigatorUsesNativeLifecycleAndBooksOnce(t *testing.T) {
 	}
 }
 
+func TestCouncilInterimTurnsKeepNativeAccountingWithoutNotificationNoise(t *testing.T) {
+	for _, phase := range []string{"opening", "source", "conclusion"} {
+		t.Run(phase, func(t *testing.T) {
+			d, st, _, sent := newTestDaemon(t)
+			d.cfg.Hub.URL = "https://hub.example"
+			d.cfg.Hub.AcceptMessages = true
+			engine := &investigatorEngine{d: d}
+			engine.script = make(chan runtime.Outcome, 1)
+			engine.script <- runtime.Outcome{Status: "completed", Text: `{"kind":"pass"}`}
+			d.setEngine(engine)
+			out := d.Investigate(context.Background(), hubproto.OperatorMessage{ID: 187, Command: hubproto.CommandInvestigate, RequestID: "website", Body: "Read-only council turn", CreatedAt: time.Now(), CouncilPhase: phase})
+			if out.Status != "done" || out.CostUSD <= 0 || len(st.Incidents("WHERE kind='research'")) != 1 {
+				t.Fatalf("native accounting lost: %+v", out)
+			}
+			expected := 0
+			if phase == "conclusion" {
+				expected = 1
+			}
+			if len(sent.titles()) != expected {
+				t.Fatalf("%s notifications: %v", phase, sent.titles())
+			}
+		})
+	}
+}
+
 func TestInvestigatorCancellationAbortsBeforeUntrack(t *testing.T) {
 	d, _, _, _ := newTestDaemon(t)
 	d.cfg.Hub.URL = "https://hub.example"

@@ -41,6 +41,10 @@ func (s *Server) researchRoutes() {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
+		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_councils WHERE site=?", r.PathValue("site")); err != nil {
+			s.researchError(w, err)
+			return
+		}
 		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_automation WHERE site=?", r.PathValue("site")); err != nil {
 			s.researchError(w, err)
 			return
@@ -304,16 +308,21 @@ func (s *Server) ResearchMaintenance(ctx context.Context) {
 	if s.opt.Research == nil {
 		return
 	}
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var lastMaintenance time.Time
 	for {
-		c, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := s.opt.Research.Maintain(c, time.Now())
-		cancel()
-		if err != nil && ctx.Err() == nil {
-			s.log.Warn("research maintenance delayed")
+		s.researchCouncilTick(ctx)
+		if time.Since(lastMaintenance) >= time.Minute {
+			lastMaintenance = time.Now()
+			c, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err := s.opt.Research.Maintain(c, time.Now())
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				s.log.Warn("research maintenance delayed")
+			}
+			s.researchAutomationTick(ctx, time.Now())
 		}
-		s.researchAutomationTick(ctx, time.Now())
 		select {
 		case <-ctx.Done():
 			return

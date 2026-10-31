@@ -129,9 +129,12 @@ func (d *Daemon) Investigate(ctx context.Context, m hubproto.OperatorMessage) hu
 	in.CostUSD = spent
 	_ = d.st.UpdateIncident(in)
 	d.st.Journal("kodeblue", "research.complete", fmt.Sprintf("job=%d case=%d status=%s", m.ID, in.ID, out.Status))
-	// One normal notification per job. The agent itself has no send tool and
+	// Standalone jobs and council conclusions notify; interim turns stay in chat.
+	// The agent itself has no send tool and
 	// cannot bypass delivery deduplication or manufacture extra notifications.
-	d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "research", Severity: "info", IncidentID: in.ID, Title: in.Summary, Body: fmt.Sprintf("Research case #%d, site %s, job %d. %s", in.ID, m.RequestID, m.ID, researchSnippet(in.Report, 1800))}, nil)
+	if m.CouncilPhase != "opening" && m.CouncilPhase != "source" {
+		d.slack.Async(notify.Message{Server: d.cfg.Server.Name, Kind: "research", Severity: "info", IncidentID: in.ID, Title: in.Summary, Body: fmt.Sprintf("Research case #%d, site %s, job %d. %s", in.ID, m.RequestID, m.ID, researchSnippet(in.Report, 1800))}, nil)
+	}
 	d.nudgeHub()
 	return hubproto.MessageReply{Status: status, Text: in.Report, SessionID: sess.ID, CostUSD: spent}
 }

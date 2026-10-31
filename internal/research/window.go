@@ -16,6 +16,15 @@ func (s *Store) LastSequence(ctx context.Context, site string) (int64, error) {
 // Window is a bounded investigation slice. The job fixes the site, source set,
 // event-time interval and last accepted sequence; new ingestion cannot grow it.
 func (s *Store) Window(ctx context.Context, site string, sources []string, start, end time.Time, after, through int64) (Page, error) {
+	return s.window(ctx, site, sources, start, end, after, through, true)
+}
+
+// SourceWindow excludes browser claims for a source specialist's own evidence.
+func (s *Store) SourceWindow(ctx context.Context, site string, sources []string, start, end time.Time, after, through int64) (Page, error) {
+	return s.window(ctx, site, sources, start, end, after, through, false)
+}
+
+func (s *Store) window(ctx context.Context, site string, sources []string, start, end time.Time, after, through int64, browser bool) (Page, error) {
 	p := Page{Observations: []Observation{}}
 	if after < 0 || through < 0 || len(sources) > 32 || !end.After(start) {
 		return p, ErrInvalid
@@ -24,11 +33,17 @@ func (s *Store) Window(ctx context.Context, site string, sources []string, start
 	if p.Coverage, err = s.Coverage(ctx, site); err != nil {
 		return p, err
 	}
-	args := []any{site, after, through, start.Unix(), end.Unix(), time.Now().Add(-s.limits.DetailTTL).Unix(), "browser"}
+	if browser {
+		sources = append(append([]string(nil), sources...), "browser")
+	}
+	if len(sources) == 0 {
+		return p, nil
+	}
+	args := []any{site, after, through, start.Unix(), end.Unix(), time.Now().Add(-s.limits.DetailTTL).Unix()}
 	for _, source := range sources {
 		args = append(args, source)
 	}
-	query := "SELECT seq,source,ingested,data FROM events WHERE site=? AND seq>? AND seq<=? AND at>=? AND at<? AND ingested>=? AND source IN (?" + strings.Repeat(",?", len(sources)) + ") ORDER BY seq LIMIT 26"
+	query := "SELECT seq,source,ingested,data FROM events WHERE site=? AND seq>? AND seq<=? AND at>=? AND at<? AND ingested>=? AND source IN (?" + strings.Repeat(",?", len(sources)-1) + ") ORDER BY seq LIMIT 26"
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return p, err

@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, serve
   replied_at INTEGER NOT NULL DEFAULT 0, reply TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '', cost_usd REAL NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS messages_server ON messages(server_id, status);
 CREATE TABLE IF NOT EXISTS research_jobs(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,site TEXT NOT NULL,day TEXT NOT NULL,expires INTEGER NOT NULL,sources TEXT NOT NULL,through_seq INTEGER NOT NULL,overview TEXT NOT NULL,queries INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS research_councils(id TEXT PRIMARY KEY,site TEXT NOT NULL,version INTEGER NOT NULL,updated INTEGER NOT NULL,data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS research_job_refs(job INTEGER NOT NULL REFERENCES research_jobs(message_id) ON DELETE CASCADE,ref TEXT NOT NULL,PRIMARY KEY(job,ref));
 CREATE TABLE IF NOT EXISTS research_automation(site TEXT PRIMARY KEY,version INTEGER NOT NULL,config TEXT NOT NULL,state TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   server_id TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '');
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 	}
 	// Columns added after the first release.
 	for _, c := range []struct{ table, col, def string }{
+		{"research_jobs", "source_only", "INTEGER NOT NULL DEFAULT 0"},
 		{"research_jobs", "auto_kind", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "decision", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "request_id", "TEXT NOT NULL DEFAULT ''"},

@@ -17,19 +17,27 @@ Set an optional **Investigator (behavioral research)** model and instructions in
 the existing fleet/server agent settings. Otherwise the normal default agent model
 applies. The worker advertises that effective model in its usual status sync.
 
-Open **War room > Research layer**, select the site and report date, choose an
-eligible worker, enter a question, and press **Ask investigator**. The hub queues
-an `investigate` operator message. The resulting `research` case appears on the
-normal case board, with live transcript, cost and Stop. War room shows recent jobs
-and their replies, refreshing every ten seconds only while a job is outstanding.
-The final report uses the existing notification pipeline, including its configured
-destinations, minimum severity, retries and deduplication. Research completion has
-severity `info`; destinations configured to forward only higher severities may
-skip it. The report remains available in the case and War room.
+Open **War room** for the case chat. Select the site and report day, expand
+**Choose agents**, choose the lead Investigator's worker and up to four source
+agents, and send a question. The Investigator opens the case, each selected source
+specialist gets one turn in the displayed order, and the Investigator concludes.
+A follow-up question starts another bounded round, up to three rounds per case.
+See [War room case chat](warroom-council.md) for turn semantics and limits.
 
-Asking a follow-up from a research case's normal chat box opens the same War room
-and copies the question into its form. Select the intended site/day/worker and
-submit a fresh grant; the operator liaison cannot adopt the research session.
+Each turn is a fresh native `research` case, with live transcript, cost and Stop on
+the normal case board. No existing responder, reviewer, learner or operator session
+is adopted. Source specialists use the native read-only Investigator on their own
+worker and read scoped synced evidence; their names do not imply a live shell or
+an existing responder joining the chat. Interim turns stay in the conversation and
+case history. Only the closing Investigator turn uses the existing notification
+pipeline, at severity `info`, subject to its usual filters and deduplication.
+Standalone manual and automatic investigations retain their normal notification.
+
+Messages sent during a turn are added to the discussion for the next speaker.
+They do not interrupt a running action. A message arriving during the final turn
+gets a subsequent round if capacity remains. The map, evidence and automation
+settings remain in the same drawer behind expandable controls. Questions from a
+research case's normal chat prefill this composer, creating a fresh scoped case.
 
 Manual questions remain available. Two independent, opt-in automation settings
 are described below. Passive ingestion itself never calls a model.
@@ -37,7 +45,7 @@ are described below. Passive ingestion itself never calls a model.
 ## Automation settings
 
 Open **Settings > Agent models > Investigator automation settings in War room**,
-or expand **Investigator automation settings** in War room's Research layer.
+or expand **Investigator automation settings** below the War room chat.
 Choose the site first. Policies apply only to that site and both switches default
 to off. The independent Save button does not alter agent model settings.
 
@@ -82,7 +90,7 @@ Synthetic local preview; no real telemetry or model credentials are configured.
 The worker-unavailable state is intentional in this fixture. Dispatch, grants,
 accounting, Stop and notifications are exercised with fake engine/HTTP fixtures.
 
-![Investigator question form inside War room](assets/behavioral-investigator.png)
+![War room case chat, illustrative synthetic conversation](assets/warroom-case-chat.png)
 
 ![Investigator in the normal agent model settings](assets/behavioral-investigator-model.png)
 
@@ -146,5 +154,5 @@ The role prompt requires cited facts, separate similarity and communications,
 competing hypotheses, contradictions, coverage gaps and a falsifying discriminator.
 Shared fingerprints or proxies do not prove actor identity. Untrusted source text
 cannot expand a grant or authorize an action. Recommendations are advisory; the
-admin decides any response under the existing policy. Multi-agent council chat
-and ballots are not implemented by this investigator feature.
+admin decides any response under the existing policy. The bounded War room case chat is read-only; ballots and response execution are
+not implemented by it.

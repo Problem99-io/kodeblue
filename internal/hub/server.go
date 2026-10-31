@@ -362,8 +362,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, id string) {
 		if msgs := s.st.TakeQueued(id); len(msgs) > 0 {
 			out := hubproto.MessagesResponse{}
 			for _, m := range msgs {
+				phase := ""
+				if m.Command == hubproto.CommandInvestigate {
+					phase = s.councilPhase(m.ID)
+				}
 				out.Messages = append(out.Messages, hubproto.OperatorMessage{ID: m.ID, Author: m.Author, Body: m.Body, IncidentID: m.IncidentID,
-					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash})
+					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash, CouncilPhase: phase})
 			}
 			writeJSON(w, http.StatusOK, out)
 			return
@@ -394,6 +398,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request, id string) 
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.wakeResearchCouncil()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
