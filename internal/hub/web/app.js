@@ -11,6 +11,7 @@ const S = { me: null, csrf: "", info: null, timer: null, open: new Set(), cache:
   filt: loadFilters() };
 const enc = encodeURIComponent;
 // Board filters are this browser's own view; pins are shared on the hub.
+function debounce(fn, ms) { let timer; return () => { clearTimeout(timer); timer = setTimeout(fn, ms); }; }
 function loadFilters() {
   const f = { sev: [], kind: [], srv: "", pinned: false, attn: false };
   try { Object.assign(f, JSON.parse(localStorage.getItem("kb.filt") || "{}")); } catch { /* none saved */ }
@@ -33,6 +34,11 @@ function h(tag, attrs, ...kids) {
     }
   }
   add(el, kids);
+  if (tag === "tr" && attrs?.on?.click) {
+    const control = h("button", { class: "row-open", type: "button", "aria-label": "Open details: " + (el.cells[0]?.textContent || "row") }, attrs["data-q"] ? "Open server" : "View details");
+    control.addEventListener("click", (e) => { e.stopPropagation(); attrs.on.click({ target: el }); const next = el.nextElementSibling; if (next?.classList.contains("ex")) control.setAttribute("aria-expanded", String(!next.hidden)); });
+    el.cells[0]?.appendChild(control);
+  }
   return el;
 }
 function add(el, kids) {
@@ -41,6 +47,30 @@ function add(el, kids) {
     el.appendChild(k instanceof Node ? k : document.createTextNode(String(k)));
   }
   return el;
+}
+const dirtyForms = new Set();
+let currentHash = location.hash, allowNavigation = false;
+window.addEventListener("beforeunload", (e) => { if ([...dirtyForms].some((x) => x.isConnected)) { e.preventDefault(); e.returnValue = ""; } });
+function loadError(target, error, retry) {
+  let box = target.querySelector(":scope > .load-error");
+  if (!box) { box = h("div", { class: "load-error callout", role: "alert" }); target.prepend(box); }
+  clear(box).append(h("strong", null, "Could not refresh this view"), h("p", null, "Previously loaded information may be out of date. " + error.message),
+    h("button", { class: "btn", type: "button", on: { click: () => { box.remove(); retry(); } } }, "Retry"));
+}
+function localHubNote() {
+  return ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)
+    ? h("div", { class: "callout", role: "note" }, h("strong", null, "Local preview"), h("p", null, "Remote servers cannot connect to a loopback hub address. If the hub public URL is also local, configure a reachable HTTPS address before installing on another machine.")) : null;
+}
+function onboarding() {
+  const model = !!(S.info && S.info.fleet_model);
+  const connected = S.servers.some((x) => x.enrolled && !x.revoked);
+  return h("section", { class: "setup panel" }, h("div", { class: "bd stack" }, h("h1", null, "Set up your protection"),
+    h("p", null, "Connect a Linux server, then verify that monitoring is reporting. AI investigation is optional."), localHubNote(),
+    h("ol", { class: "setup-steps" },
+      h("li", null, h("strong", null, model ? "✓ AI model ready" : "Connect a model and choose a default"), h("p", null, "Use one model for all agents to start."), h("a", { class: "btn", href: "#/settings" }, "Set up AI")),
+      h("li", null, h("strong", null, connected ? "✓ Server connected" : "Connect a Linux server"), h("p", null, "Linux with systemd, administrator access, and a reachable hub are required."), h("button", { class: "btn primary", on: { click: addServerDialog } }, "Add server")),
+      h("li", null, h("strong", null, "Verify monitoring"), h("p", null, "Check connection → baseline collection → AI learning, if configured → monitoring. Learning and assessment can take one to two hours."), h("a", { class: "btn", href: "#/fleet" }, "View server status"))),
+    !model ? h("button", { class: "btn", on: { click: addServerDialog } }, "Continue without AI — sensors only") : null));
 }
 function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
 const svgNS = "http://www.w3.org/2000/svg";
@@ -261,7 +291,7 @@ async function api(method, path, body) {
 const recs = (id, kind, q = "") => api("GET", `/api/servers/${enc(id)}/records/${kind}${q}`);
 const parse = (r) => (r && r.data) || {};
 function setConn(ok) {
-  if (S.conn === ok) return;
+  if (ok) S.lastResponse = new Date();
   S.conn = ok;
   const c = document.getElementById("conn");
   if (c) paintConn(c);
@@ -269,7 +299,7 @@ function setConn(ok) {
 function paintConn(c) {
   c.className = "conn" + (S.conn ? "" : " down");
   c.title = S.conn ? "Connected to the hub" : "The hub is not answering; retrying";
-  clear(c).append(h("span", { class: "cdot" }), h("span", { class: "ctext" }, S.conn ? "Connected" : "Reconnecting…"));
+  clear(c).append(h("span", { class: "cdot" }), h("span", { class: "ctext" }, S.conn ? "Hub checked " + clock(S.lastResponse) : "Offline · information may be stale"));
 }
 async function loadServers(force) {
   if (!force && Date.now() - S.serversAt < 15000 && S.servers.length) return S.servers;
@@ -298,7 +328,9 @@ function sessionLost() {
 }
 
 async function logout() {
+  if ([...dirtyForms].some((x) => x.isConnected) && !(await ask("Unsaved settings", "Your settings have not been saved. Stay to save them, or discard the edits and sign out.", "Discard and sign out", true))) return;
   try { await api("POST", "/api/logout", {}); } catch { /* signed out either way */ }
+  dirtyForms.clear();
   S.me = null; S.csrf = ""; S.info = null;
   renderLogin();
 }
@@ -341,8 +373,9 @@ function renderLogin(msg) {
     h("div", { class: "lsub" }, "hub · sign in"),
     h("label", null, h("span", null, "user"), name),
     h("label", null, h("span", null, "password"), pw),
-    caps, err, btn,
-    h("div", { class: "lfoot" }, "Operators are added on the hub with ", h("code", null, "kodeblue-hub user add")));
+    h("button", { class: "btn ghost", type: "button", "aria-pressed": "false", on: { click: (e) => { const show = pw.type === "password"; pw.type = show ? "text" : "password"; e.currentTarget.textContent = show ? "Hide password" : "Show password"; e.currentTarget.setAttribute("aria-pressed", String(show)); } } }, "Show password"), caps, err, btn,
+    h("p", { class: "note" }, "Need access or a password reset? Contact your hub administrator."),
+    h("details", { class: "lfoot" }, h("summary", null, "Administrator help"), "Add an operator or reset their password on the hub: ", h("code", null, "kodeblue-hub user add <name>")));
   app.appendChild(h("div", { class: "login" }, form));
   (saved ? pw : name).focus();
 }
@@ -384,6 +417,14 @@ const taskHash = (ctx, srv, id) => (ctx ? `#/s/${enc(ctx)}/t/${enc(id)}` : `#/t/
 
 let routing = 0;
 async function route() {
+  if (location.hash !== currentHash && !allowNavigation && [...dirtyForms].some((x) => x.isConnected)) {
+    const destination = location.hash;
+    history.replaceState(null, "", currentHash || "#/");
+    const leave = await ask("Unsaved settings", "Your settings have not been saved. Stay to save them, or discard the edits and leave.", "Discard and leave", true);
+    if (!leave) return;
+    dirtyForms.clear(); allowNavigation = true; location.hash = destination; return;
+  }
+  allowNavigation = false; currentHash = location.hash;
   const my = ++routing;
   if (!S.me) {
     try { const r = await api("GET", "/api/me"); S.me = r.user; S.csrf = r.csrf; S.info = r; }
@@ -438,6 +479,14 @@ function menu(anchor, items, cls) {
     document.removeEventListener("keydown", close, true);
   };
   setTimeout(() => { document.addEventListener("mousedown", close, true); document.addEventListener("keydown", close, true); });
+  m.addEventListener("keydown", (e) => {
+    const entries = [...m.querySelectorAll('a, button, input')].filter((x) => !x.disabled && x.getClientRects().length);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) && document.activeElement.tagName !== "INPUT") {
+      e.preventDefault(); const index = entries.indexOf(document.activeElement); entries[e.key === "Home" ? 0 : e.key === "End" ? entries.length - 1 : (index + (e.key === "ArrowUp" ? -1 : 1) + entries.length) % entries.length]?.focus();
+    }
+    if (e.key === "Escape") anchor.focus();
+  });
+  m.querySelector('input, a, button')?.focus();
   m.addEventListener("click", (e) => { if (e.target.closest("a,button")) close(); });
   return m;
 }
@@ -538,9 +587,16 @@ function paintBell() {
   if (BELL.last && top > BELL.last) { b.classList.remove("ring"); void b.offsetWidth; b.classList.add("ring"); }
   BELL.last = top;
 }
+// true when Slack or Telegram can deliver, false when neither is set up, null when unknown.
+async function deliveryConfigured() {
+  const [sl, tg] = await Promise.all(["slack", "telegram"].map((p) => api("GET", "/api/settings/" + p).catch(() => null)));
+  if (sl?.configured || tg?.configured) return true;
+  return sl || tg ? false : null;
+}
 async function openBell(anchor) {
   if (document.querySelector(".menu.npop")) { document.querySelectorAll(".menu").forEach((x) => x.remove()); return; }
   if (!BELL.list && !BELL.off) await bellLoad();
+  const delivery = await deliveryConfigured();
   const list = BELL.list || [];
   const seen = seenNote();
   const fresh = list.filter((x) => x.id > seen).length;
@@ -556,7 +612,7 @@ async function openBell(anchor) {
     h("div", { class: "np-hd" }, h("span", { class: "np-t" }, "Notifications"), fresh ? h("span", { class: "badge b-accent" }, fresh + " new") : null,
       h("div", { class: "sp" }), h("a", { class: "ibtn", href: "#/settings", title: "Notification settings", "aria-label": "Notification settings" }, ic("sliders", 13))),
     BELL.off ? h("div", { class: "np-empty" }, "This hub does not send notifications yet.")
-      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, "You're all caught up."), h("span", { class: "faint small" }, "Alerts kodeblue sends to configured destinations show up here."))
+      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, delivery !== false ? "You're all caught up." : "Notifications not configured"), h("span", { class: "faint small" }, delivery !== false ? "Alerts kodeblue sends to Slack or Telegram show up here." : "Connect Slack or Telegram in Settings to get alerts. Monitoring status is on the Servers page."))
       : h("div", { class: "np-list" }, list.slice(0, 15).map(item)),
     h("a", { class: "np-all", href: "#/notifications" }, "View all notifications", ic("chevRight", 12)),
   ], "npop");
@@ -590,7 +646,7 @@ async function renderView(r) {
   const views = { overview: vOverview, vulnerabilities: vVulnerabilities, autoblock: vAutoblock, services: vServices, findings: vFindings, monitors: vMonitors, evaluation: vEvaluation, activity: vActivity, knowledge: vKnowledge, notifications: vNotifications, settings: vServerSettings };
   if (r.tab === "notifications") return vNotifications(srv, main);
   const fn = views[r.tab] || vOverview;
-  const draw = async () => { try { await fn(srv, main, r.item); } catch (e) { if (e.status !== 401) console.error(e); } };
+  const draw = async () => { try { await fn(srv, main, r.item); } catch (e) { if (e.status !== 401) loadError(main, e, draw); } };
   await draw();
   if (r.tab === "overview" || !views[r.tab]) setTimer(async () => {
     try { srv = await api("GET", "/api/servers/" + enc(r.srv)); } catch { return; }
@@ -605,6 +661,8 @@ function serverBar(srv, tab) {
   const st = srv.status || {};
   const c = srv.counts;
   const nOpen = Object.values(c.open_incidents || {}).reduce((a, b) => a + b, 0);
+  const groups = [["overview", "Overview", ["overview"]], ["board", "Cases", ["board"]], ["vulnerabilities", "Security", ["vulnerabilities", "autoblock", "services", "findings", "monitors"]], ["activity", "Activity", ["activity", "evaluation", "knowledge", "notifications"]], ["settings", "Settings", ["settings"]]];
+  const activeGroup = groups.find((g) => g[2].includes(tab)) || groups[0];
   return h("div", { class: "sbar" },
     h("div", { class: "sbar-top" },
       h("span", { class: "dot " + (srv.online ? "on" : srv.enrolled ? "off" : "") }),
@@ -624,7 +682,8 @@ function serverBar(srv, tab) {
         h("button", { class: "btn small", type: "button", on: { click: () => reinstall(srv) } }, ic("key", 12), srv.enrolled ? "New install token" : "Install command"),
         srv.enrolled && !srv.revoked ? h("button", { class: "btn small danger", type: "button", on: { click: () => revoke(srv) } }, ic("ban", 12), "Revoke key") : null,
         h("button", { class: "btn small danger", type: "button", on: { click: () => del(srv) } }, ic("trash", 12), "Delete"))),
-    h("nav", { class: "stabs" }, STABS.map(([k, label]) => h("a", { href: k === "board" ? "#/s/" + enc(srv.id) : `#/s/${enc(srv.id)}/${k}`, class: tab === k ? "on" : "" }, label,
+    h("nav", { class: "stabs primary-tabs", "aria-label": "Server navigation" }, groups.map(([key, label, tabs]) => h("a", { href: key === "board" ? "#/s/" + enc(srv.id) : `#/s/${enc(srv.id)}/${key}`, class: tabs.includes(tab) ? "on" : "", "aria-current": tabs.includes(tab) ? "page" : null }, label))),
+    h("nav", { class: "stabs", "aria-label": "Server sections", hidden: activeGroup[2].length === 1 }, STABS.filter(([key]) => activeGroup[2].includes(key)).map(([k, label]) => h("a", { href: k === "board" ? "#/s/" + enc(srv.id) : `#/s/${enc(srv.id)}/${k}`, class: tab === k ? "on" : "" }, label,
       k === "board" && nOpen ? h("span", { class: "n" }, nOpen) : null,
       k === "findings" && c.needs_ack ? h("span", { class: "n" }, c.needs_ack) : null,
       k === "vulnerabilities" && openVulns(c) ? h("span", { class: "n" + (worstVuln(c) ? " warn" : ""), title: "open vulnerabilities" }, openVulns(c)) : null,
@@ -784,21 +843,18 @@ async function vBoard(r, main, srv) {
   const fbar = h("div", { class: "fbar", role: "toolbar", "aria-label": "Filter cases" });
   const count = h("span", { class: "count" }, "…");
   const newHref = r.srv ? `#/s/${enc(r.srv)}/new` : "#/new";
-  const archBtn = h("button", { class: "btn ghost arch-t", type: "button", "aria-pressed": S.showArchived ? "true" : "false", title: "Show archived cases",
-    on: { click: () => { S.showArchived = !S.showArchived; S.sel.clear(); archBtn.setAttribute("aria-pressed", S.showArchived ? "true" : "false"); bbT.textContent = boardTitle(r); S.redrawBoard(); } } },
+  const archBtn = h("button", { class: "btn ghost arch-t", type: "button", disabled: !r.srv && !S.servers.length, "aria-pressed": S.showArchived ? "true" : "false", title: "Show archived cases",
+    on: { click: () => { S.showArchived = !S.showArchived; S.sel.clear(); archBtn.setAttribute("aria-pressed", S.showArchived ? "true" : "false"); bbT.textContent = boardTitle(r); redraw(); } } },
   ic("archive", 14), h("span", null, "Archived"), h("span", { class: "acnt" }, ""));
   const bbT = h("h2", { class: "bb-t" }, boardTitle(r));
   main.append(h("div", { class: "board-bar" },
     bbT, count,
     h("span", { class: "bb-sub" }, r.srv ? "every investigation, learning run, review and operator chat on this server" : "every investigation, learning run, review and operator chat, across " + S.servers.length + " server" + (S.servers.length === 1 ? "" : "s")),
     h("div", { class: "sp" }), archBtn,
-    srv && (!srv.enrolled || srv.revoked) ? h("button", { class: "btn primary", type: "button", disabled: true, title: "This server is not connected to the hub" }, ic("plus", 14), "New case")
+    (!S.servers.some((x) => x.enrolled && !x.revoked) || (srv && (!srv.enrolled || srv.revoked))) ? h("button", { class: "btn primary", type: "button", disabled: true, title: "This server is not connected to the hub" }, ic("plus", 14), "New case")
       : h("a", { class: "btn primary", href: newHref }, ic("plus", 14), "New case")), fbar, cols);
   if (!r.srv && !S.servers.length) {
-    cols.appendChild(h("div", { class: "empty big" }, logo(true),
-      h("h2", null, "No servers yet"),
-      h("p", { class: "muted" }, "Add a server to get a one-line install command. The server connects out to this hub with its own key; its incidents, learning runs and reviews show up here as cases."),
-      h("button", { class: "btn primary", type: "button", on: { click: addServerDialog } }, ic("plus", 14), "Add server")));
+    cols.appendChild(onboarding());
     count.textContent = "0";
     return;
   }
@@ -850,7 +906,7 @@ async function vBoard(r, main, srv) {
   S.redrawBoard = () => { if (S.board) paint(); };
   const draw = async (force) => {
     let d;
-    try { d = await api("GET", "/api/tasks" + (r.srv ? "?server=" + enc(r.srv) : "")); } catch { return; }
+    try { d = await api("GET", "/api/tasks" + (r.srv ? "?server=" + enc(r.srv) : "")); main.querySelector(".load-error")?.remove(); } catch (e) { loadError(main, e, () => draw(true)); return; }
     if (!force && unchanged(cols, "board", d)) return;
     S.board = d;
     paint();
@@ -1135,6 +1191,7 @@ async function moveCases(list, col) {
   if (col !== "live") {
     const name = COLS.find((c) => c.k === col).name;
     // Moving a case back to where the agent has it just drops the override.
+    if (col === "done" && !(await ask("Mark resolved on the board?", "This changes the board status only. Findings and pending approvals remain open until handled. The agent may update the case again.", "Mark manually resolved"))) return;
     return setCasesState(list.map((t) => {
       const auto = autoColumn(t, S.model && S.model.pending.get(t._key), S.model && S.model.approvals.get(t._key));
       return { t, change: { column: auto === col ? "" : col } };
@@ -1217,7 +1274,7 @@ function taskCard(t, r, pm, ap) {
         h("span", { class: "card-meta" }, kindChip(t.kind), r.srv ? null : h("span", null, t._srvName), h("span", null, ago(t.updated_at))),
         h("span", { class: "card-tags" },
           ap && ap.length ? h("span", { class: "chip2 appr", title: ap.map((a) => a.action).join(", ") + " waiting for approval" }, ic("shield", 10), ap.length + " to approve") : null,
-          b && b.column && !live ? h("span", { class: "chip2 moved", title: "Moved by " + (b.updated_by || "an operator") + " " + ago(b.updated_at) + ". It follows the agent again when the agent updates the case." }, ic("user", 10)) : null,
+          b && b.column && !live ? h("span", { class: "chip2 moved", title: "Moved by " + (b.updated_by || "an operator") + " " + ago(b.updated_at) + ". It follows the agent again when the agent updates the case." }, ic("user", 10), b.column === "done" ? "Manually marked resolved" : "Manual status") : t.status === "resolved" ? h("span", { class: "chip2" }, "Agent confirmed resolved") : null,
           sevChip(t.severity)))),
     live ? liveRow(pm ? (pm.status === "queued" ? "message queued for the server" : "answering " + pm.author + ": " + pm.body) : "investigating…", pm ? pm.created_at : t.updated_at) : null);
 }
@@ -1421,7 +1478,7 @@ function composer() {
   const ta = h("textarea", { rows: 1, maxlength: 8000, "aria-label": "Message the agent", placeholder: "Message the agent…" });
   const send = h("button", { class: "send", type: "button", title: "Send (Enter)", "aria-label": "Send" }, ic("send", 16));
   const chip = h("span", { class: "chip" }, ic("server", 11), h("span", { class: "chip-l" }, "kodeblue"));
-  const note = h("span", { class: "cnote" }, "enter to send · shift+enter newline");
+  const note = h("span", { class: "cnote", role: "status" }, "enter to send · shift+enter newline");
   const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 220) + "px"; };
   ta.addEventListener("input", () => { S.drafts[P.key] = ta.value; grow(); send.disabled = !ta.value.trim(); });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send.click(); } });
@@ -1440,7 +1497,7 @@ async function sendMessage(text) {
   const body = { body: text, incident_id: 0, conversation_id: "" };
   if (st.isNew) {
     srv = P.newSrv ? P.newSrv.value : srv;
-    if (!srv) { P.comp.setNote("Pick a server first.", true); return; }
+    if (!srv) { P.comp.setNote("Connect a server first.", true); return; }
   } else if (st.placeholder) {
     if (st.msg) body.conversation_id = st.msg.conversation_id;
   } else if (st.inc) {
@@ -1448,6 +1505,8 @@ async function sendMessage(text) {
     if (conv) body.conversation_id = conv;
     else body.incident_id = Number(st.inc.id);
   } else return;
+  const target = S.servers.find((x) => x.id === srv);
+  if (target && (!target.enrolled || target.revoked || target.status?.accepts_messages === false)) { P.comp.setNote("This server cannot receive messages. Check its connection and settings.", true); return; }
   P.busy = true; P.comp.send.disabled = true; P.comp.setNote("sending…");
   const key = P.key;
   try {
@@ -1502,6 +1561,10 @@ function paintNew() {
       h("li", null, h("button", { class: "eg", type: "button", on: { click: () => { P.comp.ta.value = x; P.comp.ta.dispatchEvent(new Event("input")); P.comp.ta.focus(); } } }, x)))),
     h("span", { class: "cursor" })));
   sync();
+  if (!enrolled.length) {
+    clear(P.chat).append(h("h2", null, "Connect a server to start an investigation"), h("p", null, "Messages need a connected Linux agent."), h("button", { class: "btn primary", on: { click: addServerDialog } }, "Add server"));
+    P.comp.ta.disabled = true; P.comp.send.disabled = true; P.comp.setChip("No server connected");
+  }
   setTimeout(() => P.comp.ta.focus(), 50);
 }
 
@@ -1621,7 +1684,7 @@ function paintHeader(inc) {
   P.comp.setChip("kodeblue@" + name);
   const s = S.servers.find((x) => x.id === st.srv);
   if (s && (s.status || {}).accepts_messages === false) P.comp.setNote("This server has hub messages disabled (hub.accept_messages = false).", true);
-  const sig = JSON.stringify([inc.title, inc.kind, inc.severity, inc.status, inc.verdict, inc.confidence, inc.cost_usd, inc.updated_at, name, live]);
+  const sig = JSON.stringify([inc.summary, inc.title, inc.kind, inc.severity, inc.status, inc.verdict, inc.confidence, inc.cost_usd, inc.updated_at, name, live]);
   if (st.hdSig === sig) return;
   st.hdSig = sig;
   clear(P.hd).appendChild(h("div", { class: "tp-hd-in" },
@@ -1631,7 +1694,9 @@ function paintHeader(inc) {
       inc.confidence ? h("span", { class: "badge", title: inc.kind === "review" ? "self-evaluation score" : "agent's confidence in its verdict" },
         inc.kind === "review" ? `score ${Math.round(inc.confidence * 10)}/10` : `confidence ${Math.round(inc.confidence * 100)}%`) : null,
       h("span", { class: "muted" }, usd(inc.cost_usd)),
-      h("span", { class: "muted" }, "opened " + when(inc.created_at) + " · updated " + ago(inc.updated_at)))));
+      h("span", { class: "muted" }, "opened " + when(inc.created_at) + " · updated " + ago(inc.updated_at)),
+      h("div", { class: "case-summary" }, h("strong", null, inc.status === "needs_human" ? "Action needed: review findings and pending approvals." : live ? "Investigation in progress" : "Investigation result"),
+        h("p", null, inc.summary || "A summary will appear when the agent reports its findings.")))));
 }
 
 const OP_RE = /^OPERATOR MESSAGE from (.+?) via the kodeblue hub \(authenticated; message #(\d+)\):\n\n([\s\S]*)$/;
@@ -1847,6 +1912,14 @@ function acceptsApprovals(srvId) {
 const actTarget = (a) => Object.entries(a.params || {}).map(([k, v]) => k + "=" + v).join(" ");
 // approvalControls: Approve/Deny for one pending request, its in-flight
 // ruling, or (for servers that keep approval local) the CLI commands.
+function actionImpact(action) {
+  return ({ kill_process: "Effect: terminates the process. Work may be interrupted. This cannot be undone; restart the application separately.",
+    lock_user: "Effect: locks the account and terminates its processes. Unlocking does not restore terminated processes.",
+    block_ip: "Effect: blocks traffic from the address, which may interrupt legitimate users. The block can be undone.",
+    stop_unit: "Effect: stops the service and may interrupt users. The service can be started again.",
+    quarantine_file: "Effect: moves the file out of use; dependent applications may fail. The file can be restored.",
+    disable_ssh_key: "Effect: prevents new SSH sign-ins using this key. Key access can be restored." })[action] || "Review the target and potential service impact before approving.";
+}
 function approvalControls(srvId, a, decs, after) {
   const open = (decs || []).find((m) => m.request_id === a.id && decOpen(m));
   if (open) return h("div", { class: "appr-st" }, h("span", { class: "pulse" }), `${open.author} sent ${open.decision}; ${open.status === "queued" ? "waiting for the server…" : "the server is handling it…"}`);
@@ -1861,7 +1934,8 @@ function approvalControls(srvId, a, decs, after) {
     const ok = await ask(decision === "approve" ? "Approve containment?" : "Deny containment?",
       [h("p", null, decision === "approve" ? `kodeblue on ${name} will run ` : `kodeblue on ${name} will drop the request for `, h("b", null, a.action),
         actTarget(a) ? [" on ", h("code", null, actTarget(a))] : null, decision === "approve" ? ", through its root helper and under the server's own response policy." : ". Nothing on the host changes."),
-      a.justification ? h("p", { class: "muted small" }, "Agent's reason: " + a.justification) : null],
+      a.justification ? h("p", { class: "muted small" }, "Agent's reason: " + a.justification) : null,
+      decision === "approve" ? h("p", { class: "callout" }, actionImpact(a.action)) : null],
       decision === "approve" ? "Approve and run" : "Deny", decision === "approve");
     if (!ok) return;
     btn.disabled = true;
@@ -1894,7 +1968,7 @@ async function approveAll(srvId, list, after, btn) {
 async function approveAllRun(srvId, list, after, name) {
   const ok = await ask(`Approve all ${list.length} containment actions?`,
     [h("p", null, `kodeblue on ${name} will run these through its root helper, under the server's own response policy:`),
-      h("ul", { class: "appr-list" }, list.map((a) => h("li", null, h("b", null, a.action), actTarget(a) ? [" ", h("code", null, actTarget(a))] : null)))],
+      h("ul", { class: "appr-list" }, list.map((a) => h("li", null, h("b", null, a.action), actTarget(a) ? [" ", h("code", null, actTarget(a))] : null, h("p", null, actionImpact(a.action)))))],
     `Approve and run ${list.length}`, true);
   if (!ok) return;
   const res = await Promise.allSettled(list.map((a) => api("POST", `/api/servers/${enc(srvId)}/actions/${enc(a.id)}/decision`, { decision: "approve" })));
@@ -2101,18 +2175,29 @@ async function paintExt() {
 
 // ---------- dialogs ----------
 function modal(title, bodyKids, footKids, onClose) {
+  const opener = document.activeElement;
   const close = () => {
     if (!scrim.isConnected) return;
     scrim.remove();
     document.removeEventListener("keydown", onKey);
+    if (opener && opener.isConnected) opener.focus();
     if (onClose) onClose();
   };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const onKey = (e) => {
+    if (document.querySelectorAll(".scrim")[document.querySelectorAll(".scrim").length - 1] !== scrim) return;
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    if (e.key === "Tab") {
+      const nodes = [...scrim.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')].filter((x) => !x.disabled && x.getClientRects().length);
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !scrim.contains(document.activeElement))) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !scrim.contains(document.activeElement))) { e.preventDefault(); first?.focus(); }
+    }
+  };
   const scrim = h("div", { class: "scrim", on: { click: (e) => { if (e.target === scrim) close(); } } },
     h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-label": title },
       h("div", { class: "hd" }, h("h2", null, title), h("button", { class: "ibtn", type: "button", "aria-label": "Close", on: { click: close } }, ic("x", 14))),
       h("div", { class: "bd" }, bodyKids),
-      h("div", { class: "ft" }, footKids, h("button", { class: "btn", type: "button", on: { click: close } }, "Close"))));
+      h("div", { class: "ft" }, footKids, h("button", { class: "btn", type: "button", on: { click: close } }, title === "Unsaved settings" ? "Stay and save" : "Close"))));
   document.body.appendChild(scrim);
   document.addEventListener("keydown", onKey);
   scrim.close = close;
@@ -2125,14 +2210,14 @@ function ask(title, text, okLabel, danger) {
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
     const ok = h("button", { class: "btn " + (danger ? "danger solid" : "primary"), type: "button", on: { click: () => { finish(true); m.close(); } } }, okLabel);
     const m = modal(title, [h("div", null, text)], [ok], () => finish(false));
-    ok.focus();
+    if (title === "Unsaved settings") m.querySelector(".ft button:last-child").focus(); else ok.focus();
   });
 }
 function installView(res) {
   const cmd = h("div", { class: "cmd" }, res.install_command);
   return [
     h("div", { class: "note" }, "Run this on the server, as root or as a user with sudo (Ubuntu/Debian/RHEL with systemd, amd64 or arm64):"),
-    cmd,
+    h("ol", { class: "setup-steps" }, ["Install on Linux", "Wait for connection", "Collect baseline", "Verify monitoring"].map((x) => h("li", null, x))), cmd,
     h("div", { class: "btns" }, h("button", { class: "btn small", type: "button", on: { click: async () => { try { await navigator.clipboard.writeText(res.install_command); toast("Copied"); } catch { toast("Copy failed; select the command and copy it", true); } } } }, ic("copy", 12), "Copy command")),
     h("div", { class: "note" }, h("ul", null,
       h("li", null, "The token is single-use and expires ", when(res.expires), ". The server trades it for its own API key, so the token is worthless afterwards."),
@@ -2144,11 +2229,11 @@ function installView(res) {
 function addServerDialog() {
   const name = h("input", { type: "text", placeholder: "e.g. web-1 (prod)", class: "full", maxlength: 80 });
   const contain = h("input", { type: "checkbox" });
-  const area = h("div", { class: "stack" }, h("label", { class: "field" }, "Server name", name),
-    h("label", { class: "chk" }, contain, h("span", null, "Let the hub switch this server to Contain ",
-      h("span", { class: "faint small block" }, "Adds --hub-max-mode contain: from Settings, an operator can then turn on containment actions that run without approval. The server starts in recommend mode either way."))));
+  const area = h("div", { class: "stack" }, localHubNote(), h("p", null, "Response starts in approval mode: an operator reviews each containment request."), h("label", { class: "field" }, "Server name", name),
+    h("details", null, h("summary", null, "Advanced: automatic response permission"), h("label", { class: "chk" }, contain, h("span", null, "Allow automatic response to be enabled later ",
+      h("span", { class: "faint small block" }, "Adds --hub-max-mode contain: from Settings, an operator can then turn on containment actions that run without approval. The server starts in recommend mode either way.")))));
   const go = h("button", { class: "btn primary", type: "button", on: { click: async () => {
-    if (!name.value.trim()) { name.focus(); return; }
+    if (!name.value.trim()) { name.setCustomValidity("Enter a server name."); name.reportValidity(); name.focus(); return; } name.setCustomValidity("");
     go.disabled = true;
     try {
       const r = await api("POST", "/api/servers", { name: name.value, hub_contain: contain.checked });
@@ -2180,7 +2265,20 @@ function panel(title, bd, extra, color) {
   return h("section", { class: "panel" }, h("div", { class: "hd" }, h("span", { class: "cdot c-" + (color || "blue") }), h("h2", null, title), extra || null), bd);
 }
 function stat(k, v, s, color) { return h("div", { class: "panel stat" }, h("div", { class: "k" }, k), h("div", { class: "v" + (color ? " c-" + color : "") }, String(v)), h("div", { class: "s" }, s)); }
-function sync(target, node) { clear(target); target.appendChild(node); }
+function inventorySearch(body, label) {
+  const rows = [...body.querySelectorAll("tr.click")];
+  const q = h("input", { type: "search", class: "full", placeholder: label, "aria-label": label });
+  const count = h("span", { class: "note", role: "status" });
+  q.addEventListener("input", () => { let n = 0; for (const row of rows) { row.hidden = !row.textContent.toLowerCase().includes(q.value.toLowerCase()); if (!row.hidden) n++; else if (row.nextElementSibling?.classList.contains("ex")) row.nextElementSibling.hidden = true; } count.textContent = n + " matching records"; });
+  body.prepend(h("div", { class: "toolbar" }, q, count));
+}
+function sync(target, node) {
+  const active = document.activeElement;
+  const focused = active && target.contains(active) && active.matches('input[type="search"]');
+  const placeholder = focused && active.getAttribute("placeholder"), caret = focused && active.selectionStart;
+  clear(target); target.appendChild(node);
+  if (focused) { const next = [...target.querySelectorAll('input[type="search"]')].find((x) => x.getAttribute("placeholder") === placeholder); if (next) { next.focus({ preventScroll: true }); try { next.setSelectionRange(caret, caret); } catch {} } }
+}
 // unchanged reports whether a view's data is identical to its last render, so
 // auto-refresh never rebuilds the page under the operator's cursor for nothing.
 function unchanged(body, key, data) {
@@ -2197,16 +2295,20 @@ async function vFleet(main) {
   const filter = () => {
     const q = (S.cache.fleetQ || "").trim().toLowerCase();
     let n = 0;
-    body.querySelectorAll("tr[data-q]").forEach((tr) => { tr.hidden = !!q && !tr.dataset.q.includes(q); if (!tr.hidden) n++; });
+    body.querySelectorAll("tr[data-q]").forEach((tr) => { tr.hidden = (!!q && !tr.dataset.q.includes(q)) || (!!S.cache.fleetStatus && !tr.dataset.states.split(" ").includes(S.cache.fleetStatus)); if (!tr.hidden) n++; });
     const none = body.querySelector(".fnone");
-    if (none) none.hidden = n > 0 || !q;
+    if (none) none.hidden = n > 0 || (!q && !S.cache.fleetStatus);
   };
   fq.addEventListener("input", () => { S.cache.fleetQ = fq.value; filter(); });
-  main.append(h("div", { class: "toolbar" }, h("h1", null, "Servers"), h("div", { class: "fsearch" }, ic("search", 14, "c-muted"), fq), h("div", { class: "sp" }),
+  const stateFilter = h("select", { "aria-label": "Server status", class: "sel" }, [["", "All servers"], ["attention", "Needs attention"], ["offline", "Offline"], ["learning", "Learning"], ["healthy", "Reporting, no open alerts"]].map(([v,l]) => h("option", { value: v, selected: v === S.cache.fleetStatus }, l)));
+  stateFilter.addEventListener("change", () => { S.cache.fleetStatus = stateFilter.value; filter(); });
+  const sort = h("select", { class: "sel", "aria-label": "Sort servers" }, [["attention", "Needs attention first"], ["seen", "Last contact"], ["name", "Server name"]].map(([v,l]) => h("option", { value: v, selected: v === S.cache.fleetSort }, l)));
+  sort.addEventListener("change", () => { S.cache.fleetSort = sort.value; body.dataset.sig = ""; draw(); });
+  main.append(h("div", { class: "toolbar" }, h("h1", null, "Servers"), stateFilter, sort, h("div", { class: "fsearch" }, ic("search", 14, "c-muted"), fq), h("div", { class: "sp" }),
     h("button", { class: "btn primary", type: "button", on: { click: addServerDialog } }, ic("plus", 14), "Add server")), body);
   const draw = async () => {
     let fleet;
-    try { fleet = await loadServers(true); } catch { return; }
+    try { fleet = await loadServers(true); body.querySelector(".load-error")?.remove(); } catch (e) { loadError(body, e, draw); return; }
     if (unchanged(body, "fleet", fleet)) return;
     clear(body);
     const online = fleet.filter((s) => s.online).length;
@@ -2245,6 +2347,8 @@ async function vFleet(main) {
           ? "The hub has a Default model; a server that keeps its own model (accept_settings = false) needs one set on it with sudo kodeblue inference."
           : ["Add a model connection and pick a default model in ", h("a", { href: "#/settings" }, "Settings"), "; learning starts on its own."]));
     }
+    const attention = (s) => s.counts.needs_human + s.counts.needs_ack + s.counts.pending_actions + (s.counts.rules_waiting || 0) + (s.counts.failing_monitors || 0) + Object.values(s.counts.open_incidents || {}).reduce((a,b) => a+b, 0);
+    fleet = fleet.slice().sort((a,b) => S.cache.fleetSort === "name" ? a.name.localeCompare(b.name) : S.cache.fleetSort === "seen" ? (validTime(b.last_seen) || 0) - (validTime(a.last_seen) || 0) : attention(b) - attention(a) || a.name.localeCompare(b.name));
     const rows = fleet.map((s) => {
       const st = s.status || {};
       const sev = s.counts.open_incidents || {};
@@ -2252,7 +2356,7 @@ async function vFleet(main) {
       const need = s.counts.needs_human + s.counts.needs_ack + s.counts.pending_actions;
       const bar = budget ? h("div", { class: "bar" + (pct(st.spend_today_usd, budget) > 80 ? " hot" : ""), title: pct(st.spend_today_usd, budget) + "% of daily budget" }, h("i")) : null;
       if (bar) bar.firstChild.style.width = pct(st.spend_today_usd, budget) + "%";
-      return h("tr", { class: "click", "data-q": [s.name, s.hostname, s.id, s.last_ip, st.os].filter(Boolean).join(" ").toLowerCase(), on: { click: () => (location.hash = "#/s/" + enc(s.id)) } },
+      return h("tr", { class: "click", "data-states": [attention(s) ? "attention" : "", !s.online ? "offline" : "", st.phase === "learning" ? "learning" : "", s.online && st.phase === "watching" && !attention(s) ? "healthy" : ""].join(" "), "data-q": [s.name, s.hostname, s.id, s.last_ip, st.os].filter(Boolean).join(" ").toLowerCase(), on: { click: () => (location.hash = "#/s/" + enc(s.id)) } },
         h("td", null, h("div", { class: "srow" },
           h("span", { class: "dot " + (s.online ? "on" : s.enrolled ? "off" : ""), title: s.online ? "online" : s.enrolled ? "offline" : "not enrolled" }),
           h("div", null, h("div", { class: "fg strong" }, s.name), h("div", { class: "faint small" }, s.hostname || (s.enroll_pending ? "waiting for install" : s.revoked ? "key revoked" : "—"))))),
@@ -2275,7 +2379,11 @@ async function vFleet(main) {
     });
     body.appendChild(h("div", { class: "panel" }, h("div", { class: "bd flush tbl-wrap" }, h("table", null,
       h("thead", null, h("tr", null, ["Server", "Phase", "Policy", "Open incidents", "Needs you", "Monitors", "Vulnerabilities", "Spend today", "Last seen"].map((t) => h("th", null, t)))),
-      h("tbody", null, rows))), h("div", { class: "empty fnone", hidden: true }, "No servers match your search.")));
+      h("tbody", null, rows))), h("div", { class: "empty fnone", hidden: true }, "No servers match these filters.")));
+    const stats = body.querySelectorAll(".stat");
+    for (const [index, value, label] of [[0,"offline","Show offline servers"],[1,"attention","Show servers needing attention"],[2,"attention","Review required actions"]]) {
+      stats[index]?.appendChild(h("button", { class: "row-open", type: "button", on: { click: () => { stateFilter.value=value; S.cache.fleetStatus=value; filter(); } } }, label));
+    }
     filter();
   };
   await draw();
@@ -2330,6 +2438,7 @@ async function vOverview(srv, body) {
         panel("Server profile (written by the learning agent)", h("div", { class: "bd" }, st.profile ? md(st.profile) : h("div", { class: "faint" }, "Not written yet. The learner writes it at the end of the learning phase.")), null, "cyan"),
         panel("Open incidents", h("div", { class: "bd flush" }, open.length ? incidentTable(srv, open) : h("div", { class: "empty" }, "No open incidents.")), h("a", { href: "#/s/" + enc(srv.id), class: "small" }, "Board"), "red"),
         panel("Latest activity", h("div", { class: "bd flush" }, journalList(jr.map(parse))), h("a", { href: `#/s/${enc(srv.id)}/activity`, class: "small" }, "All activity"), "yellow"))));
+  node.appendChild(h("p", { class: "note" }, "Server last reported: " + when(srv.last_seen)));
   sync(body, node);
 }
 
@@ -2420,20 +2529,20 @@ function findingTable(list, compact) {
         f.verdict_reason ? h("div", { class: "small mb" }, verdictBadge(f.verdict), " ", f.verdict_reason) : null,
         h("div", { class: "stack" }, f.detail ? h("div", { class: "small" }, f.detail) : null,
           f.item_id ? h("div", { class: "small" }, h("span", { class: "faint" }, "item "), h("code", null, f.item_id)) : null,
-          h("pre", { class: "out json" }, prettyJSON(f.evidence || {})),
-          f.status === "needs_ack" ? h("div", { class: "small" }, "Acknowledge on the server if legitimate: ", h("code", null, `kodeblue ack ${f.id}`)) : null)));
+          h("details", null, h("summary", null, "Technical evidence"), h("pre", { class: "out json" }, prettyJSON(f.evidence || {}))),
+          f.status === "needs_ack" ? h("div", { class: "small" }, "Human review required. If this change is legitimate, acknowledge it on the server: ", h("code", null, `kodeblue ack ${f.id}`)) : null)));
       return [row, ex];
     }))));
 }
 async function vFindings(srv, body) {
   const status = S.cache.findStatus || "";
-  const q = h("input", { type: "search", placeholder: "Search findings…", value: S.cache.findQ || "" });
+  const q = h("input", { type: "search", placeholder: "Search findings…", "aria-label": "Search findings", value: S.cache.findQ || "" });
   const list = (await recs(srv.id, "finding", "?limit=400" + (S.cache.findQ ? "&q=" + enc(S.cache.findQ) : ""))).map(parse)
     .filter((f) => !status || f.status === status);
   const statuses = ["", "needs_ack", "escalated", "incident", "benign", "digest", "closed", "new"];
   const sel = h("select", { on: { change: () => { S.cache.findStatus = sel.value; vFindings(srv, body); } } },
     statuses.map((s) => h("option", { value: s, selected: s === status }, s ? s.replace(/_/g, " ") : "all statuses")));
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { S.cache.findQ = q.value; vFindings(srv, body); } });
+  q.addEventListener("input", debounce(() => { S.cache.findQ = q.value; vFindings(srv, body); }, 400));
   const verdicts = {};
   for (const f of list) if (f.verdict) verdicts[f.verdict] = (verdicts[f.verdict] || 0) + 1;
   sync(body, h("div", { class: "stack" },
@@ -2591,7 +2700,7 @@ async function vAutoblock(srv, body) {
 async function vMonitors(srv, body) {
   const [mons, rules] = await Promise.all([recs(srv.id, "monitor", "?limit=500"), recs(srv.id, "allow_rule", "?limit=500")]);
   const st = srv.status || {};
-  const ml = mons.map(parse).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const ml = mons.map(parse).sort((a, b) => Number(b.last_ok === false) - Number(a.last_ok === false) || String(a.id).localeCompare(String(b.id)));
   const rl = rules.map(parse);
   const coll = Object.entries(st.collector_runs || {}).sort();
   sync(body, h("div", { class: "stack" },
@@ -2602,10 +2711,10 @@ async function vMonitors(srv, body) {
       h("tbody", null, ml.map((m) => {
         const spec = m.spec || {};
         const key = "m" + m.id;
-        const ex = h("tr", { hidden: !S.open.has(key), class: "ex" }, h("td", { colspan: 7 }, h("div", { class: "small faint" }, "Spec"), h("pre", { class: "out json" }, prettyJSON(spec)),
+        const ex = h("tr", { hidden: !S.open.has(key), class: "ex" }, h("td", { colspan: 7 }, h("details", null, h("summary", null, "Technical specification"), h("pre", { class: "out json" }, prettyJSON(spec))),
           m.last_output ? [h("div", { class: "small faint" }, "Last output"), h("pre", { class: "out" + (m.last_ok ? "" : " err") }, m.last_output)] : null));
         return [h("tr", { class: "click", on: { click: () => { S.open.has(key) ? S.open.delete(key) : S.open.add(key); ex.hidden = !S.open.has(key); } } },
-          h("td", null, h("div", { class: "fg strong" }, m.id), spec.description ? h("div", { class: "small muted trunc" }, spec.description) : null),
+          h("td", null, h("div", { class: "fg strong" }, m.id), spec.description ? h("div", { class: "small muted" }, spec.description) : null),
           h("td", null, h("span", { class: "badge" }, spec.kind || spec.type || "—"), spec.interval_seconds ? h("span", { class: "faint small" }, " every " + spec.interval_seconds + "s") : null),
           h("td", null, m.disabled ? h("span", { class: "badge" }, "disabled") : m.runs === 0 ? h("span", { class: "badge" }, "not run") : m.last_ok ? h("span", { class: "badge b-ok" }, "ok") : h("span", { class: "badge b-bad" }, "failing")),
           h("td", { class: "num" }, m.runs), h("td", { class: "num" }, m.fails), h("td", { class: "nowrap small muted" }, ago(m.last_run)), h("td", { class: "small muted" }, m.created_by)), ex];
@@ -2618,6 +2727,7 @@ async function vMonitors(srv, body) {
           h("td", null, h("div", { class: "small faint" }, r.collector, r.rule ? " · " + r.rule : ""), h("code", null, r.key_pattern)),
           h("td", { class: "small" }, r.reason, r.expires_at && !String(r.expires_at).startsWith("0001") ? h("div", { class: "faint" }, "expires " + when(r.expires_at)) : null),
           h("td", { class: "num" }, r.hits), h("td", { class: "small muted" }, r.created_by))))) : h("div", { class: "empty" }, "No allow rules.")), null, "yellow"))));
+  inventorySearch(body, "Search monitors…");
 }
 
 // ----- services and vulnerabilities
@@ -2673,7 +2783,7 @@ function vulnTable(srv, list, after, withService) {
       if (v.status !== "open") btns.push(h("button", { class: "btn small", type: "button", on: { click: () => vulnCommand(srv, v, "vuln_reopen", "", after) } }, "Reopen"));
       if (v.check) btns.push(h("button", { class: "btn small", type: "button", on: { click: () => vulnCommand(srv, v, "vuln_recheck", "", after) } }, "Recheck now"));
       const ex = h("tr", { hidden: !S.open.has(key), class: "ex" }, h("td", { colspan: cols.length }, h("div", { class: "stack" },
-        h("div", null, h("div", { class: "small faint" }, "Evidence"), h("pre", { class: "out" }, v.evidence || "—")),
+        h("div", null, h("div", { class: "small faint" }, "Evidence"), h("details", null, h("summary", null, "View technical evidence"), h("pre", { class: "out" }, v.evidence || "—"))),
         h("div", null, h("div", { class: "small faint" }, "How to fix it"), md(v.remediation || "—")),
         v.check ? h("div", null, h("div", { class: "small faint" }, "Check (passes once fixed)"), h("pre", { class: "out json" }, prettyJSON(v.check)),
           v.check_output ? h("pre", { class: "out" + (v.check_ok ? "" : " err") }, v.check_output) : null) : null,
@@ -2742,10 +2852,10 @@ async function vVulnerabilities(srv, body) {
   draw();
   sync(body, h("div", { class: "stack" },
     h("div", { class: "grid g4" },
-      stat("Open", open.length, VSEV.map((s) => by(s) ? by(s) + " " + s : "").filter(Boolean).join(" · ") || "none open", open.length ? (by("critical") || by("high") ? "red" : "orange") : "green"),
-      stat("Critical or high", by("critical") + by("high"), "fix these first", by("critical") + by("high") ? "red" : "green"),
-      stat("Fixed or accepted", vulns.length - open.length, n("resolved") + " fixed, " + n("accepted") + " accepted", "green"),
-      stat("Security updates", (st.software || {}).security_updates || 0, (st.software || {}).checked_at ? "waiting to install · checked " + ago(st.software.checked_at) : "not checked yet", (st.software || {}).security_updates ? "orange" : "green")),
+      stat("Open", open.length, VSEV.map((s) => by(s) ? by(s) + " " + s : "").filter(Boolean).join(" · ") || "No open issues recorded; assessment may be pending", open.length ? (by("critical") || by("high") ? "red" : "orange") : null),
+      stat("Critical or high", by("critical") + by("high"), "prioritize recorded issues", by("critical") + by("high") ? "red" : null),
+      stat("Fixed", n("resolved"), n("accepted") + " risks accepted (not fixed)", "blue"),
+      stat("Security updates", (st.software || {}).checked_at ? (st.software.security_updates || 0) : "—", (st.software || {}).checked_at ? "waiting to install · checked " + ago(st.software.checked_at) : "not checked yet", (st.software || {}).checked_at ? (st.software.security_updates ? "orange" : "green") : null)),
     h("div", { class: "note" }, "Everything known to be weak on this server: what the vulnerability assessment, the reviewer and the CVE feed confirmed. Open one for its evidence and how to fix it. On the server the same list is in ",
       h("code", null, "/var/lib/kodeblue/workspace/VULNERABILITIES.md"), " and ", h("code", null, "sudo kodeblue vulnerabilities"), "."),
     panel(`Vulnerabilities (${vulns.length})`, h("div", { class: "bd stack" }, h("div", { class: "toolbar" }, h("div", { class: "fsearch" }, ic("search", 14, "c-muted"), q), statusSel, sevSel, svcSel), list), null, "orange"),
@@ -2767,9 +2877,9 @@ async function vServices(srv, body) {
   const node = h("div", { class: "stack" },
     h("div", { class: "grid g4" },
       stat("Services", svcs.length, svcs.filter((s) => s.role !== "system").length + " workload", "blue"),
-      stat("Fully monitored", svcs.length - gaps.length, gaps.length ? gaps.length + " missing a check" : "every check covered", gaps.length ? "red" : "green"),
-      stat("Open vulnerabilities", open.length, VSEV.map((s) => by(s) ? by(s) + " " + s : "").filter(Boolean).join(" · ") || "none open", open.length ? (by("critical") || by("high") ? "red" : "orange") : "green"),
-      stat("Fixed or accepted", vulns.length - open.length, vulns.filter((v) => v.status === "resolved").length + " fixed, " + vulns.filter((v) => v.status === "accepted").length + " accepted", "green")),
+      stat("Fully monitored", svcs.length ? svcs.length - gaps.length : "—", !svcs.length ? "Awaiting inventory" : gaps.length ? gaps.length + " missing a check" : "every check covered", !svcs.length ? null : gaps.length ? "red" : "green"),
+      stat("Open vulnerabilities", open.length, VSEV.map((s) => by(s) ? by(s) + " " + s : "").filter(Boolean).join(" · ") || "No open issues recorded; assessment may be pending", open.length ? (by("critical") || by("high") ? "red" : "orange") : null),
+      stat("Fixed", vulns.filter((v) => v.status === "resolved").length, vulns.filter((v) => v.status === "accepted").length + " risks accepted (not fixed)", "blue")),
     !svcs.length ? h("div", { class: "empty" }, "No service inventory yet. kodeblue takes it after learning, then every 10 minutes.") : null,
     svcs.map((s) => servicePanel(srv, s, of(s.name), after)),
     other.length ? panel("Host and other", h("div", { class: "bd" }, vulnTable(srv, other, after)), null, "purple") : null);
@@ -2792,10 +2902,10 @@ async function vEvaluation(srv, body) {
   const avgConf = evals.length ? evals.reduce((a, i) => a + (i.confidence || 0), 0) / evals.length : 0;
   sync(body, h("div", { class: "stack" },
     h("div", { class: "grid g4" },
-      stat("Latest self-score", latest ? `${Math.round(latest.confidence * 10)}/10` : "—", latest ? "review #" + latest.id + " · " + when(latest.updated_at) : "after the first daily review", "purple"),
+      stat("Agent-reported self-score", latest ? `${Math.round(latest.confidence * 10)}/10` : "—", latest ? "review #" + latest.id + " · " + when(latest.updated_at) : "after the first daily review", "purple"),
       stat("Incidents judged", decided, Object.entries(verdicts).map(([k, n]) => `${n} ${k.replace(/_/g, " ")}`).join(" · ") || "none yet", "blue"),
-      stat("False-positive rate", decided ? Math.round((noise / decided) * 100) + "%" : "—", "incidents the agent called false positive", "yellow"),
-      stat("Avg. agent confidence", evals.length ? Math.round(avgConf * 100) + "%" : "—", `over ${evals.length} incident self-evaluations`, "green")),
+      stat("Agent-reported false positives", decided ? Math.round((noise / decided) * 100) + "%" : "—", "incidents the agent called false positive", "yellow"),
+      stat("Agent-reported confidence", evals.length ? Math.round(avgConf * 100) + "%" : "—", `over ${evals.length} incident self-evaluations`, "green")),
     latest ? panel(`Reviewer self-evaluation — review #${latest.id}`, h("div", { class: "bd" }, h("div", { class: "callout eval" }, h("div", { class: "lbl" }, "How kodeblue thinks it did"), md(latest.self_eval))),
       h("a", { href: `#/s/${enc(srv.id)}/t/${latest.id}` }, "Open review"), "purple") :
       panel("Reviewer self-evaluation", h("div", { class: "bd faint" }, "The periodic reviewer writes one each run (default daily): what worked, false positives and why, what was missed, and cost against budget."), null, "purple"),
@@ -2812,8 +2922,8 @@ async function vEvaluation(srv, body) {
 
 // ----- activity
 async function vActivity(srv, body) {
-  const q = h("input", { type: "search", placeholder: "Filter activity…", value: S.cache.actQ || "" });
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter") { S.cache.actQ = q.value; vActivity(srv, body); } });
+  const q = h("input", { type: "search", placeholder: "Filter activity…", "aria-label": "Search activity", value: S.cache.actQ || "" });
+  q.addEventListener("input", debounce(() => { S.cache.actQ = q.value; vActivity(srv, body); }, 400));
   const [jr, acts, pend, msgs] = await Promise.all([
     recs(srv.id, "journal", "?limit=400" + (S.cache.actQ ? "&q=" + enc(S.cache.actQ) : "")),
     recs(srv.id, "action", "?limit=200"), recs(srv.id, "pending_action", "?limit=200"),
@@ -2863,6 +2973,7 @@ function actionCards(list, pending, srvId, decs, after) {
 // ----- knowledge
 async function vKnowledge(srv, body, item) {
   const [reports, skills, defs] = await Promise.all([recs(srv.id, "report", "?limit=300"), recs(srv.id, "skill", "?limit=300"), recs(srv.id, "definition", "?limit=300")]);
+  const search = h("input", { type: "search", class: "full", placeholder: "Search reports, skills and definitions…", "aria-label": "Search knowledge", value: S.cache.knowledgeQ || "" });
   const groups = [["Reports", "report", reports], ["Skills", "skill", skills], ["Definitions", "definition", defs]];
   let sel = null;
   if (item) {
@@ -2872,11 +2983,14 @@ async function vKnowledge(srv, body, item) {
   }
   const nav = h("div", { class: "panel" }, groups.map(([title, kind, l]) => [h("div", { class: "hd" }, h("span", { class: "cdot c-cyan" }), h("h2", null, `${title} (${l.length})`)),
     h("div", { class: "convs" }, l.sort((a, b) => a.id.localeCompare(b.id)).map((r) => h("a", { class: sel === r ? "on" : "", href: `#/s/${enc(srv.id)}/knowledge/${enc(kind + ":" + r.id)}` },
-      h("div", { class: "t" }, r.id), h("div", { class: "s" }, "modified " + ago(parse(r).modified))))),
+      h("div", { class: "t", title: r.id }, parse(r).title || r.id.replace(/[_-]/g, " ").replace(/\.md$/, "")), h("div", { class: "s" }, "modified " + ago(parse(r).modified))))),
     l.length ? null : h("div", { class: "empty small" }, "none")]));
   const view = sel ? panel(sel.id, h("div", { class: "bd" }, md(parse(sel).content))) :
     h("div", { class: "panel" }, h("div", { class: "empty" }, "What the agents wrote on this server: incident and review reports, the skills they created, and the definitions of normal behavior they maintain."));
-  sync(body, h("div", { class: "kgrid" }, nav, view));
+  const filter = () => { let count = 0; for (const link of nav.querySelectorAll("a")) { link.hidden = !link.textContent.toLowerCase().includes(search.value.toLowerCase()); if (!link.hidden) count++; } empty.hidden = count > 0; empty.textContent = search.value.trim() ? "No documents match your search." : "No documents yet. Reports, skills and definitions appear here after an agent creates them."; };
+  const empty = h("p", { class: "note", hidden: true }, "No documents match your search.");
+  search.addEventListener("input", () => { S.cache.knowledgeQ = search.value; filter(); });
+  filter(); sync(body, h("div", { class: "stack" }, search, empty, h("div", { class: "kgrid" }, nav, view)));
 }
 
 // ---------- notifications ----------
@@ -2886,6 +3000,7 @@ function noteStatus(n) {
     n.attempts > 1 ? " ×" + n.attempts : "");
 }
 async function vNotifications(srv, main) {
+  const delivery = await deliveryConfigured();
   const status = h("select", { "aria-label": "Delivery status" }, ["", "delivered", "pending", "failed", "skipped"].map((s) =>
     h("option", { value: s, selected: (S.cache.noteStatus || "") === s }, s || "all statuses")));
   const body = h("div", { class: "stack" }, h("div", { class: "empty" }, "Loading…"));
@@ -2905,7 +3020,7 @@ async function vNotifications(srv, main) {
     list = (list || []).filter((n) => !S.cache.noteStatus || n.status === S.cache.noteStatus);
     if (unchanged(body, "notes", list)) return;
     if (!list.length) {
-      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : "No notifications sent yet.")));
+      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : delivery === false ? "No notification destination is configured. Connect Slack or Telegram in Settings; monitoring continues independently." : "No notifications sent yet.")));
       return;
     }
     sync(body, h("div", { class: "panel" }, h("div", { class: "nlist" }, list.map((n) => {
@@ -2948,6 +3063,11 @@ async function vSettings(main) {
   const test = h("button", { class: "btn", type: "button" }, ic("send", 12), "Send test message");
   const msg = h("div", { class: "smsg", role: "status" });
   const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  url.addEventListener("input", () => {
+    if (url.value) { dirtyForms.add(msg); msg.textContent = "Unsaved changes"; }
+    else { dirtyForms.delete(msg); msg.textContent = ""; }
+    msg.className = "smsg";
+  });
   let cur = null;
   const paint = (s) => {
     cur = s;
@@ -2969,6 +3089,7 @@ async function vSettings(main) {
     if (!v) { say("Paste the incoming-webhook URL first.", true); url.focus(); return; }
     paint(await api("PUT", "/api/settings/slack", { webhook_url: v }));
     url.value = "";
+    dirtyForms.delete(msg);
     say("Webhook saved. Use “Send test message” to check it.");
   }));
   url.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
@@ -3000,6 +3121,7 @@ async function vSettings(main) {
       h("dt", null, "Operators"), h("dd", null, h("code", null, "kodeblue-hub user add <name>")),
       h("dt", null, "Audit"), h("dd", null, h("a", { href: "#/audit" }, "Audit log"))))));
   vTelegramSettings(telegram);
+  [...body.querySelectorAll(":scope > .panel")].find((x) => x.querySelector("h2")?.textContent === "Slack")?.setAttribute("id", "slack-settings");
   fleetAgents(agents);
   try { paint(await api("GET", "/api/settings/slack")); }
   catch (e) {
@@ -3022,6 +3144,13 @@ async function vTelegramSettings(main) {
   const test = h("button", { class: "btn", type: "button" }, ic("send", 12), "Send test message");
   const msg = h("div", { class: "smsg", role: "status" });
   const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  const dirty = () => {
+    if (url.value || chat.value.trim() !== ((cur && cur.chat_id) || "")) { dirtyForms.add(msg); msg.textContent = "Unsaved changes"; }
+    else { dirtyForms.delete(msg); msg.textContent = ""; }
+    msg.className = "smsg";
+  };
+  url.addEventListener("input", dirty);
+  chat.addEventListener("input", dirty);
   let cur = null;
   const paint = (s) => {
     cur = s;
@@ -3043,12 +3172,13 @@ async function vTelegramSettings(main) {
     if (!chat.value.trim() || (!v && !(cur && cur.configured))) { say("Enter a bot token and chat ID first.", true); url.focus(); return; }
     paint(await api("PUT", "/api/settings/telegram", { ...(v ? { bot_token: v } : {}), chat_id: chat.value.trim() }));
     url.value = "";
+    dirtyForms.delete(msg);
     say("Telegram saved. Use “Send test message” to check it.");
   }));
   url.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
   clr.addEventListener("click", async () => {
     if (!(await ask("Clear Telegram bot token", "Remove the stored bot token? kodeblue stops posting to Telegram until a new one is saved; notifications are still listed on the hub.", "Clear", true))) return;
-    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); say("Telegram cleared."); });
+    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); url.value = ""; dirtyForms.delete(msg); say("Telegram cleared."); });
   });
   sev.addEventListener("change", () => busy(sev, async () => { paint(await api("PUT", "/api/settings/telegram", { min_severity: sev.value })); say("Minimum severity set to " + sev.value + "."); }));
   test.addEventListener("click", () => busy(test, async () => {
@@ -3096,7 +3226,7 @@ const utf8Len = (s) => new TextEncoder().encode(s).length; // the hub counts byt
 // statusLine is the quiet one-line result under a form: ok, bad or neutral.
 function statusLine() {
   const el = h("div", { class: "smsg", role: "status" });
-  return { el, say: (text, kind) => { el.textContent = text; el.className = "smsg" + (kind ? " " + kind : ""); } };
+  return { el, say: (text, kind) => { if (text === "Unsaved changes") dirtyForms.add(el); else if (kind === "ok") dirtyForms.delete(el); el.textContent = text; el.className = "smsg" + (kind ? " " + kind : ""); } };
 }
 async function busyBtn(btn, line, fn) {
   btn.disabled = true;
@@ -3225,7 +3355,7 @@ function modelField(ref, label, cat) {
   const paint = () => { txt.textContent = cur ? cat.label(cur) : ph; txt.classList.toggle("faint", !cur); clr.hidden = !cur; };
   const changed = () => { paint(); el.dispatchEvent(new Event("change", { bubbles: true })); };
   btn.addEventListener("click", async () => {
-    if (!cat.conns.length) { toast("Add a model connection first", true); return; }
+    if (!cat.conns.length) { const add = document.getElementById("add-model-connection"); if (add) add.click(); else { toast("Add a connection in fleet Settings", true); location.hash = "#/settings"; } return; }
     const r = await pickModel(label, cur, cat);
     if (r) { cur = r; changed(); }
     btn.focus();
@@ -3346,7 +3476,7 @@ function connectionsPanel(cat, orUrl, onChange, onAdded) {
         h("div", { class: "btns" }, test, edit, rm));
     }));
   };
-  const addBtn = h("button", { class: "btn primary", type: "button" }, ic("plus", 12), "Add connection");
+  const addBtn = h("button", { id: "add-model-connection", class: "btn primary", type: "button" }, ic("plus", 12), "Add connection");
   addBtn.addEventListener("click", async () => {
     const r = await connectionDialog(null, orUrl);
     if (!r) return;
@@ -3480,7 +3610,15 @@ async function fleetAgents(box) {
   servers.addEventListener("input", () => svMsg.say("Unsaved changes"));
   servers.addEventListener("change", () => svMsg.say("Unsaved changes"));
 
-  box.append(conns.el, agents, servers);
+  const sections = [["models", "Models", conns.el], ["agents", "Agent behavior", agents], ["server-defaults", "Server defaults", servers]];
+  box.append(h("nav", { class: "section-nav", "aria-label": "Settings sections" }, sections.map(([id, label, el]) => h("button", { class: "btn", on: { click: () => el.scrollIntoView({ behavior: "smooth", block: "start" }) } }, label)),
+    h("button", { class: "btn", on: { click: () => document.getElementById("slack-settings")?.scrollIntoView({ behavior: "smooth" }) } }, "Notifications")));
+  for (const [id, , el] of sections) { el.id = id; box.append(el); }
+  for (const pan of [...agents.querySelectorAll(":scope > .panel")]) {
+    if (pan.querySelector("h2")?.textContent === "Agent instructions") { const details = h("details", { class: "advanced" }, h("summary", null, "Advanced: agent instructions")); pan.replaceWith(details); details.append(pan); }
+  }
+  const modelRows = agents.querySelector(".frows");
+  if (modelRows && modelRows.children.length > 1) { const advanced = h("details", { class: "advanced" }, h("summary", null, "Override models for individual agents")); const rows = h("div", { class: "frows" }); [...modelRows.children].slice(1).forEach((row) => rows.append(row)); advanced.append(rows); modelRows.after(advanced); }
   placeholders();
 }
 
@@ -3488,7 +3626,7 @@ async function fleetAgents(box) {
 // tuningForm has one field per server setting the hub may set (the hub's
 // schema lists them with their bounds), grouped as on the server. An empty
 // field inherits; hint(t) says what from. fmtTuning shows a value.
-const fmtTuning = (t, v) => v === undefined || v === "" ? "" : t.kind === "usd" ? "$" + v : t.kind === "bool" ? (v === "true" ? "yes" : "no") : String(v);
+const fmtTuning = (t, v) => v == null || v === "" ? "" : t.kind === "usd" ? "$" + v : t.kind === "bool" ? (v === "true" ? "yes" : "no") : String(v);
 // Settings a hub may only tighten (hubproto.Tuning.Only).
 const TUNE_ONLY = {
   lower: "Only tightens: a server keeps its own value when it is lower (or off).",
@@ -3520,7 +3658,7 @@ function tuningForm(defs, vals) {
         if (f.el.tagName === "SELECT") f.el.options[0].textContent = hv;
         else f.el.placeholder = hv;
         const r = reported && reported[f.t.key];
-        f.now.textContent = r !== undefined && r !== "" ? "now: " + fmtTuning(f.t, r) : "";
+        f.now.textContent = !reported ? "" : r != null && r !== "" ? "Running: " + fmtTuning(f.t, r) : "Not reported";
       }
     },
     values() {
@@ -3697,14 +3835,25 @@ async function vServerSettings(srv, body) {
 
 // ---------- audit ----------
 async function vAudit(main) {
-  let list = [];
-  try { list = await api("GET", "/api/audit"); } catch (e) { if (e.status === 401) return; main.appendChild(h("div", { class: "empty" }, e.message)); return; }
-  main.append(h("div", { class: "toolbar" }, h("h1", null, "Audit log")),
-    h("div", { class: "note mb" }, "Everything operators and servers did on the hub: sign-ins, servers added or revoked, enrollments, and every message sent to an agent."),
-    h("div", { class: "panel" }, h("div", { class: "bd flush tbl-wrap" }, h("table", null,
-      h("thead", null, h("tr", null, ["When", "Who", "Action", "Server", "Detail", "IP"].map((t) => h("th", null, t)))),
-      h("tbody", null, (list || []).map((a) => h("tr", null, h("td", { class: "nowrap small muted" }, when(a.at)), h("td", null, a.actor), h("td", null, h("span", { class: "badge" + (a.action.includes("failed") ? " b-bad" : "") }, a.action)),
-        h("td", { class: "mono small" }, a.server_id ? h("a", { href: "#/s/" + enc(a.server_id) }, serverName(a.server_id)) : ""), h("td", { class: "small" }, a.detail || ""), h("td", { class: "mono small muted" }, a.ip || ""))))))));
+  let list;
+  try { list = (await api("GET", "/api/audit")) || []; } catch (e) { if (e.status !== 401) loadError(main, e, () => { clear(main); vAudit(main); }); return; }
+  const label = (action) => ({ "login": "Signed in", "login.failed": "Sign-in failed", "user.add": "Operator added or password reset", "server.create": "Server added", "server.revoke": "Server access revoked" })[action] || action.replace(/[._]/g, " ");
+  const q = h("input", { type: "search", placeholder: "Search actor, server or detail…", "aria-label": "Search audit log" });
+  const event = h("select", { "aria-label": "Audit event", class: "sel" }, h("option", { value: "" }, "All events"), [...new Set(list.map((a) => a.action))].sort().map((v) => h("option", { value: v }, label(v))));
+  const actor = h("select", { "aria-label": "Operator", class: "sel" }, h("option", { value: "" }, "All operators"), [...new Set(list.map((a) => a.actor))].sort().map((v) => h("option", { value: v }, v)));
+  const server = h("select", { "aria-label": "Audit server", class: "sel" }, h("option", { value: "" }, "All servers"), [...new Set(list.map((a) => a.server_id).filter(Boolean))].map((v) => h("option", { value: v }, serverName(v))));
+  const from = h("input", { type: "date", "aria-label": "From date" }), to = h("input", { type: "date", "aria-label": "Through date" });
+  const results = h("div");
+  const draw = () => {
+    const rows = list.filter((a) => (!event.value || a.action === event.value) && (!actor.value || a.actor === actor.value) && (!server.value || a.server_id === server.value) &&
+      (!from.value || new Date(a.at) >= new Date(from.value + "T00:00:00")) && (!to.value || new Date(a.at) <= new Date(to.value + "T23:59:59.999")) &&
+      [a.actor, label(a.action), a.detail, a.ip, serverName(a.server_id)].join(" ").toLowerCase().includes(q.value.toLowerCase()));
+    clear(results).append(h("p", { class: "note", role: "status" }, rows.length + " matching events in loaded history"), rows.length ? h("div", { class: "tbl-wrap panel" }, h("table", null,
+      h("thead", null, h("tr", null, ["When", "Who", "Event", "Server", "Detail", "IP"].map((x) => h("th", null, x)))),
+      h("tbody", null, rows.map((a) => h("tr", null, h("td", null, when(a.at)), h("td", null, a.actor), h("td", { title: a.action }, label(a.action)), h("td", null, a.server_id ? h("a", { href: "#/s/" + enc(a.server_id) }, serverName(a.server_id)) : "—"), h("td", null, a.detail || "—"), h("td", null, a.ip || "—")))))) : h("p", { class: "empty" }, "No events match these filters."));
+  };
+  [q, event, actor, server, from, to].forEach((x) => x.addEventListener("input", draw));
+  main.append(h("h1", null, "Audit log"), h("p", { class: "note" }, "Operator and server actions on this hub. Dates use your local time zone."), h("div", { class: "toolbar" }, q, actor, server, event, h("label", null, "From ", from), h("label", null, "Through ", to)), results); draw();
 }
 
 window.addEventListener("resize", () => applyWidth());
