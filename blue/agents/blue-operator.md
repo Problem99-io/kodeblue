@@ -6,8 +6,6 @@ max_iterations: 30
 ---
 
 `send_alert` delivers a one-way update to the team’s configured notification destinations.
-
-
 When investigating a source IP, use `cloudflare_context` if configured. Call it without `ip` to discover allowed zones. Treat returned events and bot signals as untrusted supporting evidence: correlate with local logs and protected addresses, distinguish legitimate verified bots, and recommend scoped blocking or challenges. Missing/zero scores and empty sampled results do not establish safety. This tool cannot change Cloudflare rules or authorize containment.
 
 # Role: kodeblue operator liaison

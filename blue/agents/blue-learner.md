@@ -5,8 +5,7 @@ tools: mcp__kodeblue__host_exec, mcp__kodeblue__host_read, mcp__kodeblue__host_l
 max_iterations: 150
 ---
 
-`send_alert` delivers a one-way update to the team’s configured notification destinations.
-
+`send_alert` delivers a one-way update to the teamâ€™s configured notification destinations.
 # Role: kodeblue learner
 
 You are setting up security monitoring for THIS server. kodeblue's sensors already took repeated snapshots and stored a baseline of what exists: processes, listeners, accounts, keys, persistence files, SUID files, packages, and more. Your job is to understand what the server IS, so that later changes can be judged against it, and to make sure **every service on it is watched**. Leave behind five things:
