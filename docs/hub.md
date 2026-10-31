@@ -6,8 +6,11 @@ The hub is the central console for a fleet of kodeblue servers. Operators sign i
 |---|---|
 | **Board** | the server's cases as cards in three columns (Investigating, Needs human, Resolved): incidents, learning runs, reviews and operator conversations. A card opens a **case panel** with the summary, the report, the **agent's self-evaluation**, linked findings and containment actions, and the **full agent session**: its reasoning ("Thinking"), what it said, and every tool call with arguments and result. Running sessions stream live, every ~5 s. The panel's composer messages the agents (see below). **Filters** above the columns narrow the board by severity, type, server (on the fleet board), pinned cases or what needs you (approvals and Needs human); each browser remembers its own. **Pin** a card (its pin button, the right-click menu, or several selected cards) to keep it at the top of its column for every operator until someone unpins it |
 | **Overview** | phase (learning / watching / maintenance), response policy, models, spend vs budget, the server profile the learner wrote, open cases, agents working right now, latest activity; **Run learner** and **Relearn** buttons (see below) |
+| **Vulnerabilities** | everything known to be weak on the server in one list (the hub's view of its `VULNERABILITIES.md`): open ones by severity, each with its service, CVEs, evidence, how to fix it and whether its check passes; filters by status, severity and service, and a search; **Accept risk** (with a reason), **Reopen** and **Recheck now**. Below it, the daily software check: OS support, security updates waiting and new CVEs from the feed that name software on the server. The tab badge counts open vulnerabilities |
+| **Auto-block** | the **containment rules**: what kodeblue does by itself once you approve it, for attacks that keep coming back (see below). Each rule shows what it does, why the agent proposed it, how often it fired and when it expires, with Approve, Reject, Pause and Delete; below them, every action the rules took. The tab badge counts rules waiting for approval |
+| **Services** | the service inventory: each service's ports, monitoring coverage and its own vulnerabilities |
 | **Findings & triage** | what the sensors flagged, the triage model's verdict and one-line reasoning for each, evidence on click, and which ones wait for `kodeblue ack` |
-| **Monitors & rules** | **containment rules** (proposed by the agents for attacks that keep coming back: what each does, why, how often it fired, when it expires; Approve, Reject, Pause, Delete), the monitors the agents wrote (check, interval, ok/failing, runs, last output), the built-in sensors and their sweep counts, allow rules with hit counts |
+| **Monitors** | the monitors the agents wrote (check, interval, ok/failing, runs, last output), the built-in sensors and their sweep counts, allow rules with hit counts. Monitors only raise findings; they never act |
 | **Self-evaluation** | the reviewer's periodic self-score and write-up, each case's self-evaluation and confidence, false-positive rate, and the 7-day findings-by-rule outcome table |
 | **Activity** | containment actions taken, actions waiting for approval (with the exact `kodeblue respond approve` command), and the journal of every automatic decision |
 | **Knowledge** | the reports, skills and definitions the agents wrote on the server |
@@ -56,7 +59,7 @@ Operators can also **start learning** from the server's Overview (Learning row).
 - **Run learner**: the `blue-learner` agent reviews the baseline the server already has and writes or updates the profile, definitions, monitors and skills. Detection keeps running. Use it after picking models for a server that learned without them, or to refresh what the learner left.
 - **Relearn**: the whole learning phase again (baseline sweeps over `learning_minutes`, then the learner). Everything the server runs during the sweeps is absorbed as normal, so relearn after planned changes, never while you suspect a compromise.
 
-Operators can also **rule on containment rules** (Monitors & rules). For an attack that keeps coming back, an agent proposes a rule such as "block every address that brute-forces SSH"; it does nothing until approved. Approving shows the rule in full and relays the hash of exactly what was shown; the server's root helper checks it and keeps the approved copy. An approved rule acts without asking, so the server takes an approval from the hub only where its root allowed automatic actions from the hub (`accept_approvals`, and `[response] mode` or `hub_max_mode` = `contain`); elsewhere the hub shows the `sudo kodeblue rules approve <id>` command instead. Reject, Pause (both with a reason) and Delete are relayed the same way. A tab badge counts rules waiting for approval. Details in [kodeblue.md](kodeblue.md#containment-rules).
+Operators can also **rule on containment rules** on the server's **Auto-block** tab. For an attack that keeps coming back, an agent proposes a rule such as "block every address that brute-forces SSH"; it does nothing until approved. Approving shows the rule in full and relays the hash of exactly what was shown; the server's root helper checks it and keeps the approved copy. An approved rule acts without asking, so the server takes an approval from the hub only where its root allowed automatic actions from the hub (`accept_approvals`, and `[response] mode` or `hub_max_mode` = `contain`); elsewhere the hub shows the `sudo kodeblue rules approve <id>` command instead. Reject, Pause (both with a reason) and Delete are relayed the same way. The tab badge, and a badge in the Servers view, count rules waiting for approval. Details in [kodeblue.md](kodeblue.md#containment-rules).
 
 **Shared blocks.** When one server blocks an address, the hub tells the others, and each blocks it too under its own policy: automatically where `block_ip` runs without approval (`contain`), otherwise as a request in its Activity tab to approve or deny. Only public addresses are shared, never back to the server that blocked it, and never more than half of a server's hourly action limit; protected and infrastructure addresses are refused as always. **Settings → Shared blocks** turns sharing on or off for the fleet (on by default, audited) and lists what is shared now; each server's Overview says what it does with them. A server takes them only with `[hub] accept_shared_blocks` (root-owned, default `true`). Details in [kodeblue.md](kodeblue.md#shared-blocks).
 
@@ -146,6 +149,45 @@ The hub owns the fleet's Slack channel. Set it in **Settings** or with `kodeblue
 
 Servers never receive the webhook. A server that should also post on its own, as an independent channel, can set `[notify] direct = true`.
 
+### Telegram
+
+Telegram can be used instead of Slack or alongside it. In **Settings → Telegram**,
+enter a bot token and destination chat ID, save, and send a test message.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and keep its token secret.
+2. For private messages, open the bot and press **Start**. For a group, add the bot;
+   for a channel, add it as an administrator with permission to post messages.
+3. Use the numeric destination chat ID (groups often start with `-100`), or the
+   `@channelusername` of a public channel. For a private chat or group, send a
+   message there and inspect `getUpdates` using the official
+   [Bot API](https://core.telegram.org/bots/api#getupdates) from a trusted local
+   client. Do not paste a token into a third-party chat-ID lookup service.
+
+The token is stored only on the hub and never returned by the settings API,
+shown in the console, or handed to enrolled servers. CLI setup is also available;
+values are read from stdin without echo:
+
+```bash
+kodeblue-hub fleet set telegram-bot-token
+kodeblue-hub fleet set telegram-chat-id
+```
+
+Telegram has its own minimum severity setting. Each destination retries independently
+(exponential backoff, at most 8 attempts; permanent Telegram errors fail immediately and flood-control retry_after is honored), so a Telegram failure does not resend a
+successful Slack delivery. Notification history summarizes all destinations: it stays
+pending while any delivery is pending, then reports failure if any destination failed.
+Changing settings applies to pending and future notifications; historical skipped or
+completed deliveries are not replayed. Messages use an explicit preformatted entity with link previews disabled. IPs,
+paths and addresses remain copyable without inserted invisible characters.
+Standalone sends run destinations concurrently; acceptance by any destination
+counts as success, while other failures are logged. Use hub delivery when each
+destination needs durable independent retries.
+
+The hub exposes separate save, clear, minimum-severity and test-message controls
+for Telegram. This local preview has no bot token or chat configured.
+
+![Telegram notification settings in the hub](assets/telegram-settings.jpg)
+
 ### Fleet defaults
 
 So a server can be installed with one command, the hub hands the fleet's default model, its connection and that connection's key to new servers at enrollment. The other roles' models follow on the first sync. Set them in **Settings**, or set one connection (it appears as "Default") on the hub host:
@@ -189,6 +231,7 @@ Useful flags:
 | `--inference-url`, `--model` | the model endpoint (any OpenAI-compatible API) and model |
 | `--inference-key-file` | read the endpoint's API key from a file |
 | `--slack-webhook-file` | only for servers without a hub |
+| `--telegram-bot-token-file`, `--telegram-chat-id-file` | only for servers without a hub |
 | `--no-start` | install without starting |
 | `--uninstall [--purge]` | remove kodeblue |
 
@@ -202,8 +245,13 @@ kodeblue-hub serve [--data /var/lib/kodeblue-hub] [--listen :8443] (--tls-cert f
                    [--console-allow CIDR,…] [--trusted-proxy CIDR,…]    # --trusted-proxy needs --behind-proxy
 kodeblue-hub user add|del|list <name>
 kodeblue-hub server add <name> --public-url https://…    # install command from the CLI; pinned only if serve last ran --self-signed
-kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook
+kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook|telegram-bot-token|telegram-chat-id
 kodeblue-hub pin [--tls-cert f]                          # the self-signed certificate's pin, or f's
 ```
 
 Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
+
+Provider transport/5xx failures pause that worker for at most one second, while
+each failed item keeps its own durable exponential retry delay. A 429 pauses the
+provider for Retry-After. Provider wake channels are separate; saving settings
+clears its in-memory pause and makes pending items due again.

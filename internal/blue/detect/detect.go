@@ -16,6 +16,7 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/sensors"
 	"github.com/Problem99-io/kodeblue/internal/blue/store"
+	"github.com/Problem99-io/kodeblue/internal/blue/upgrade"
 )
 
 // Options tune the detector's noise controls.
@@ -290,6 +291,9 @@ func (d *Detector) Process(snap sensors.Snapshot, mode Mode) (Result, error) {
 		v := scoreChange(ch.kind, ch.item, ch.prev)
 		if d.isSelf(ch.item) {
 			v = Verdict{}
+		} else if d.isSelfUpgrade(ch.item) {
+			d.st.Journal("detector", "absorb.upgrade", v.Title+" (pid "+ch.item.Attrs["pid"]+" in "+ch.item.Attrs["unit"]+")")
+			v = Verdict{}
 		}
 		bi := store.BaselineItem{ID: ch.item.ID(), Collector: ch.item.Collector, Key: ch.item.Key, Value: ch.item.Value, Attrs: ch.item.Attrs}
 		if v.Rule == "" || v.Severity == SevInfo {
@@ -453,6 +457,17 @@ func (d *Detector) isSelf(it sensors.Item) bool {
 		return false
 	}
 	return d.self[exe]
+}
+
+// isSelfUpgrade reports whether a root process running from a replaced
+// (deleted) kodeblue binary is kodeblue's own upgrade: `kodeblue upgrade` in
+// its transient unit, whose installer swaps the binary under it. Only root
+// can start a process in that system unit (the root helper does, for a
+// checked newer release), so a deleted kodeblue anywhere else is reported.
+func (d *Detector) isSelfUpgrade(it sensors.Item) bool {
+	exe := itemExe(it)
+	return it.Collector == "process" && it.Attrs["deleted"] == "true" && it.Attrs["suspicious_location"] == "" &&
+		d.self[exe] && it.Key == exe+"@root" && it.Attrs["unit"] == upgrade.Unit+".service"
 }
 
 // itemExe extracts the executable path from the key of a process, cpu_hog

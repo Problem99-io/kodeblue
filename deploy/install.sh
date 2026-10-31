@@ -28,6 +28,8 @@
 #   --model M              model for triage and agents (with --inference-url)
 #   --inference-key-file F file holding the endpoint's API key (otherwise: hub default, or a prompt)
 #   --slack-webhook-file F Slack incoming-webhook URL, only for servers WITHOUT a hub (with a hub, Slack is set on the hub)
+#   --telegram-bot-token-file F Telegram bot token (standalone servers; set on the hub otherwise)
+#   --telegram-chat-id-file F   Telegram destination chat ID or @channelusername
 #   --no-start             install and enroll, but do not start the services
 #   --uninstall [--purge]  remove kodeblue (--purge also deletes its config and state)
 #
@@ -49,7 +51,7 @@ usage() {
 }
 
 # The token may arrive in the environment (preferred: never on a command line).
-HUB="" TOKEN="${KODEBLUE_ENROLL_TOKEN:-}" PIN="" CA="" NAME="" MODE="" HUBMAXMODE="" INFURL="" INFMODEL="" KEYFILE="" SLACKFILE="" START=1 UNINSTALL=0 PURGE=0
+HUB="" TOKEN="${KODEBLUE_ENROLL_TOKEN:-}" PIN="" CA="" NAME="" MODE="" HUBMAXMODE="" INFURL="" INFMODEL="" KEYFILE="" SLACKFILE="" TELEGRAMTOKENFILE="" TELEGRAMCHATFILE="" START=1 UNINSTALL=0 PURGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub) HUB=${2%/}; shift 2 ;;
@@ -66,6 +68,8 @@ while [ $# -gt 0 ]; do
     --model) INFMODEL=$2; shift 2 ;;
     --inference-key-file|--im-key-file) KEYFILE=$2; shift 2 ;;
     --slack-webhook-file) SLACKFILE=$2; shift 2 ;;
+    --telegram-bot-token-file) TELEGRAMTOKENFILE=$2; shift 2 ;;
+    --telegram-chat-id-file) TELEGRAMCHATFILE=$2; shift 2 ;;
     --no-start) START=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --purge) PURGE=1; shift ;;
@@ -202,6 +206,8 @@ if [ ! -f "$root/kodeblue" ] || [ ! -f "$root/kodeblue-engine" ] || [ ! -f "$her
   [ -n "$INFMODEL" ] && set -- "$@" --model "$INFMODEL"
   [ -n "$KEYFILE" ] && set -- "$@" --inference-key-file "$KEYFILE"
   [ -n "$SLACKFILE" ] && set -- "$@" --slack-webhook-file "$SLACKFILE"
+  [ -n "$TELEGRAMTOKENFILE" ] && set -- "$@" --telegram-bot-token-file "$TELEGRAMTOKENFILE"
+  [ -n "$TELEGRAMCHATFILE" ] && set -- "$@" --telegram-chat-id-file "$TELEGRAMCHATFILE"
   [ "$START" = 0 ] && set -- "$@" --no-start
   KODEBLUE_UNPACKED=1 KODEBLUE_ENROLL_TOKEN=$TOKEN sh "$tmp/kodeblue/deploy/install.sh" "$@"
   exit $?
@@ -270,7 +276,7 @@ if [ -s /etc/kodeblue/im.key ] && [ ! -s /etc/kodeblue/inference.key ]; then
   mv -f /etc/kodeblue/im.key /etc/kodeblue/inference.key
   sed -i 's|/etc/kodeblue/im.key|/etc/kodeblue/inference.key|' /etc/kodeblue/kodeblue.toml
 fi
-for f in inference.key slack.webhook hub.key; do
+for f in inference.key slack.webhook telegram.token telegram.chat hub.key; do
   [ -f "/etc/kodeblue/$f" ] || install -o root -g kodeblue -m 0640 /dev/null "/etc/kodeblue/$f"
 done
 install -d -o kodeblue -g kodeblue -m 0750 /var/lib/kodeblue
@@ -316,6 +322,12 @@ putsecret() { # value file
 if [ -n "$KEYFILE" ] && [ ! -s /etc/kodeblue/inference.key ]; then putsecret "$(tr -d '\r\n' < "$KEYFILE")" /etc/kodeblue/inference.key; fi
 if [ -n "$SLACKFILE" ] && [ ! -s /etc/kodeblue/slack.webhook ]; then putsecret "$(tr -d '\r\n' < "$SLACKFILE")" /etc/kodeblue/slack.webhook; fi
 
+valid_telegram_token() { [ "$(printf %s "$1" | wc -l)" -eq 0 ] && printf %s "$1" | LC_ALL=C grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; }
+valid_telegram_chat() { [ "$(printf %s "$1" | wc -l)" -eq 0 ] && printf %s "$1" | LC_ALL=C grep -Eq '^(-?[1-9][0-9]*|@[A-Za-z][A-Za-z0-9_]{4,})$'; }
+
+if [ -n "$TELEGRAMTOKENFILE" ] && [ ! -s /etc/kodeblue/telegram.token ]; then k=$(sed 's/\r$//' "$TELEGRAMTOKENFILE"); valid_telegram_token "$k" || die "Invalid Telegram token file"; putsecret "$k" /etc/kodeblue/telegram.token; fi
+if [ -n "$TELEGRAMCHATFILE" ] && [ ! -s /etc/kodeblue/telegram.chat ]; then k=$(sed 's/\r$//' "$TELEGRAMCHATFILE"); valid_telegram_chat "$k" || die "Invalid Telegram chat file"; putsecret "$k" /etc/kodeblue/telegram.chat; fi
+
 # ---- enroll with the hub ----
 if [ -n "$TOKEN" ]; then
   [ -n "$HUB" ] || die "--token needs --hub"
@@ -351,6 +363,19 @@ if [ -s /etc/kodeblue/hub.key ]; then
 elif [ ! -s /etc/kodeblue/slack.webhook ] && [ "$UPGRADE" = 0 ]; then
   k=$(readsecret "Slack incoming-webhook URL (optional, Enter to skip): ")
   if [ -n "$k" ]; then putsecret "$k" /etc/kodeblue/slack.webhook; fi
+fi
+
+if [ -s /etc/kodeblue/hub.key ]; then
+  [ ! -s /etc/kodeblue/telegram.token ] || warn "Local Telegram settings are ignored while enrolled (configure Telegram on the hub; set [notify] direct = true to also post directly)"
+elif [ "$UPGRADE" = 0 ]; then
+  if [ ! -s /etc/kodeblue/telegram.token ]; then
+    k=$(readsecret "Telegram bot token (optional, Enter to skip): ")
+    if [ -n "$k" ]; then valid_telegram_token "$k" || die "Invalid Telegram token"; putsecret "$k" /etc/kodeblue/telegram.token; fi
+  fi
+  if [ -s /etc/kodeblue/telegram.token ] && [ ! -s /etc/kodeblue/telegram.chat ]; then
+    k=$(readline "Telegram chat ID or @channelusername: ")
+    if [ -n "$k" ]; then valid_telegram_chat "$k" || die "Invalid Telegram chat ID"; putsecret "$k" /etc/kodeblue/telegram.chat; fi
+  fi
 fi
 
 # ---- services ----

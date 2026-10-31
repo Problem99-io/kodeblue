@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
+	"github.com/Problem99-io/kodeblue/internal/blue/notify"
 	"github.com/Problem99-io/kodeblue/internal/hub"
 )
 
@@ -186,7 +187,7 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go srv.Janitor(ctx)
-	go srv.SlackForwarder(ctx)
+	go srv.NotificationForwarder(ctx)
 	hs := &http.Server{Addr: listen, Handler: srv.Handler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	var local *http.Server
@@ -368,6 +369,8 @@ type fleetSetting struct {
 }
 
 var fleetSettings = map[string]fleetSetting{
+	"telegram-bot-token": {key: "telegram_bot_token", secret: true, check: notify.ValidateTelegramToken},
+	"telegram-chat-id":   {key: "telegram_chat_id", check: notify.ValidateTelegramChat},
 	"inference-url":      {key: hub.SettingInferenceURL, check: checkHTTPURL},
 	"inference-model":    {key: hub.SettingInferenceModel},
 	"inference-provider": {key: hub.SettingInferenceProvider},
@@ -426,8 +429,8 @@ func fleetCmd(st *hub.Store, pos []string) {
 			fatal(err)
 		}
 		st.Audit("cli", "fleet.set", "", pos[1], "")
-		if pos[1] == "slack-webhook" {
-			fmt.Println("slack-webhook saved: the hub posts every server's notifications to this channel")
+		if pos[1] == "slack-webhook" || strings.HasPrefix(pos[1], "telegram-") {
+			fmt.Println(pos[1], "saved: notification destinations are configured on the hub")
 		} else {
 			fmt.Println(pos[1], "saved; servers that enroll from now on receive it if they have none")
 		}
@@ -495,7 +498,7 @@ func usage() {
         [--endpoint-allow CIDR,…]        (loopback/link-local addresses the hub may reach model endpoints at; default none)
   user add|del|list <name>          (password read from stdin)
   server add <name> --public-url …  (prints the one-time install command; serve must have run once)
-  fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook
+  fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook|telegram-bot-token|telegram-chat-id
                                     (value read from stdin; inference-* set the "default" model connection and default model)
   pin | version`)
 }

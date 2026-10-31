@@ -3,10 +3,12 @@ package notify
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"time"
 )
 
 // Sender delivers notifications. With a hub, kodeblue queues them for the hub
-// (the control center owns Slack); without one it posts to Slack directly.
+// (the control center owns delivery); without one it posts directly.
 type Sender interface {
 	Send(ctx context.Context, m Message) error
 	Async(m Message, onErr func(error))
@@ -39,13 +41,32 @@ func (o *Outbox) Async(m Message, onErr func(error)) {
 type multi []Sender
 
 func (ms multi) Send(ctx context.Context, m Message) error {
-	var first error
-	for _, s := range ms {
-		if err := s.Send(ctx, m); err != nil && first == nil {
-			first = err
+	// Start every provider before waiting, so one stalled destination cannot
+	// consume another destination's opportunity to deliver.
+	results := make(chan error, len(ms))
+	for _, sender := range ms {
+		go func(sender Sender) {
+			child, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			results <- sender.Send(child, m)
+		}(sender)
+	}
+	var failures []error
+	accepted := false
+	for range ms {
+		if err := <-results; err != nil {
+			failures = append(failures, err)
+		} else {
+			accepted = true
 		}
 	}
-	return first
+	if accepted {
+		for _, err := range failures {
+			slog.Warn("notification partially delivered", "error", err)
+		}
+		return nil
+	}
+	return errors.Join(failures...)
 }
 
 func (ms multi) Async(m Message, onErr func(error)) {
@@ -54,27 +75,39 @@ func (ms multi) Async(m Message, onErr func(error)) {
 	}
 }
 
-// New picks the delivery path. hub: queue for the hub (and, when direct is
-// set and a local webhook exists, also post straight to Slack — an
-// independent channel the hub cannot suppress). No hub: the local webhook, or
-// nil when none is configured.
-func New(hub bool, q Queue, webhookURL, webhookFile string, direct bool) Sender {
-	local := FromConfig(webhookURL, webhookFile)
-	if !hub {
-		if local == nil {
-			return disabled{}
+// New queues for the hub when enrolled. Without a hub, or with direct=true,
+// it also delivers to local Slack and additional notification destinations.
+func New(hub bool, q Queue, webhookURL, webhookFile string, direct bool, additional ...Sender) Sender {
+	var senders multi
+	if hub {
+		senders = append(senders, &Outbox{Q: q})
+	}
+	if !hub || direct {
+		if slack := FromConfig(webhookURL, webhookFile); slack != nil {
+			senders = append(senders, slack)
 		}
-		return local
+		for _, sender := range additional {
+			// A missing Telegram configuration is a typed nil.
+			if telegram, ok := sender.(*Telegram); ok && telegram == nil {
+				continue
+			}
+			if sender != nil {
+				senders = append(senders, sender)
+			}
+		}
 	}
-	out := &Outbox{Q: q}
-	if direct && local != nil {
-		return multi{out, local}
+	switch len(senders) {
+	case 0:
+		return disabled{}
+	case 1:
+		return senders[0]
+	default:
+		return senders
 	}
-	return out
 }
 
-// ErrDisabled: no hub and no webhook configured.
-var ErrDisabled = errors.New("notifications are not configured (no hub, no Slack webhook)")
+// ErrDisabled: no hub and no local notification destination configured.
+var ErrDisabled = errors.New("notifications are not configured (no hub, no notification destination)")
 
 type disabled struct{}
 

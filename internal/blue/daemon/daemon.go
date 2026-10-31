@@ -161,7 +161,7 @@ var ErrRestart = errors.New("restarting to apply new settings")
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	env := &sensors.Env{Root: cfg.Server.Root, Logger: logger, State: sensors.NewCursorStore(cfg.CursorPath())}
 	env.Pkg = sensors.LoadPackageIndex(env)
-	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), sharedCh: make(chan struct{}, 1), following: map[int64]bool{}, followRetry: map[int64]time.Time{}, started: time.Now(), restartGap: 5 * time.Minute, relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct)}
+	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), sharedCh: make(chan struct{}, 1), following: map[int64]bool{}, followRetry: map[int64]time.Time{}, started: time.Now(), restartGap: 5 * time.Minute, relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct, notify.TelegramFromConfigWithLogger(logger, cfg.Notify.TelegramBotToken, cfg.Notify.TelegramBotTokenFile, cfg.Notify.TelegramChatID, cfg.Notify.TelegramChatIDFile))}
 	d.newEngine = func() agentEngine { return runtime.New(cfg, logger) }
 	d.engCheckEvery, d.engMinBackoff, d.wakeGap = 30*time.Second, time.Minute, 10*time.Second
 	d.learnRetry = 10 * time.Minute
@@ -875,7 +875,7 @@ func (d *Daemon) incidentBrief(in *store.Incident, findings []store.Finding) str
 	return b.String()
 }
 
-// agentPosted reports whether the responder already told Slack about this
+// agentPosted reports whether the responder already alerted the team about this
 // incident, so the automatic outcome notice would only repeat it.
 func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 	if !notify.Enabled(d.slack) {
@@ -883,7 +883,7 @@ func (d *Daemon) agentPosted(id int64, since time.Time) bool {
 	}
 	tag := fmt.Sprintf("incident=%d ", id)
 	for _, j := range d.st.JournalSince(since, 500) {
-		if j.Action == "slack.agent" && strings.HasPrefix(j.Detail, tag) {
+		if (j.Action == "alert.agent" || j.Action == "slack.agent") && strings.HasPrefix(j.Detail, tag) {
 			return true
 		}
 	}
@@ -1614,7 +1614,7 @@ func (d *Daemon) prune() {
 
 // notify sends an automatic update to Slack (one-way incoming webhook) when
 // severity is at or above the threshold. Agents send their own narrative
-// updates with the notify_slack tool; these are the system's guaranteed ones.
+// updates with the send_alert tool; these are the system's guaranteed ones.
 func (d *Daemon) notify(kind, severity, title, body string, incident int64) {
 	if detect.Rank(severity) < detect.Rank(d.cfg.Notify.MinSeverity) && kind != "needs_ack" {
 		return

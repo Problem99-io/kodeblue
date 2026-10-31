@@ -75,7 +75,7 @@ func (s *Server) containmentRulePropose(ctx context.Context, args json.RawMessag
 	}
 	s.slack.Async(notify.Message{Server: s.cfg.Server.Name, Kind: "action", Severity: "high",
 		Title: "Approval needed: containment rule " + v.ID,
-		Body: fmt.Sprintf("%s\nWhen a %s finding names a target in %q: %s it (at most %d an hour, for %d days once approved).\n\n%s\n\nApprove on the hub (Monitors & rules) or on the server: sudo kodeblue rules approve %s",
+		Body: fmt.Sprintf("%s\nWhen a %s finding names a target in %q: %s it (at most %d an hour, for %d days once approved).\n\n%s\n\nApprove on the hub (the server's Auto-block tab) or on the server: sudo kodeblue rules approve %s",
 			v.Title, v.When.Rule, v.When.Field, v.Action, v.MaxPerHour, v.Days, truncate(v.Why, 1500), v.ID),
 		Fields: map[string]string{"Rule": v.ID}}, nil)
 	return fmt.Sprintf("Proposed containment rule %s. It does nothing until a person approves it (hub, or sudo kodeblue rules approve %s on the server); the team was asked on Slack.", v.ID, v.ID), nil

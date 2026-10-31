@@ -2,7 +2,11 @@ package notify
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type memQueue struct{ n []string }
@@ -35,4 +39,46 @@ func TestRouting(t *testing.T) {
 	}
 	var nilSender Sender = New(false, nil, "", "", false)
 	nilSender.Async(Message{}, nil) // must not panic
+}
+
+type resultSender struct {
+	stall bool
+	fail  bool
+	sent  atomic.Int32
+}
+
+func (s *resultSender) Send(ctx context.Context, _ Message) error {
+	if s.stall {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	s.sent.Add(1)
+	if s.fail {
+		return errors.New("destination unavailable")
+	}
+	return nil
+}
+func (s *resultSender) Async(m Message, f func(error)) {
+	if err := s.Send(context.Background(), m); err != nil && f != nil {
+		f(err)
+	}
+}
+func TestMultiPartialSuccessAndConcurrentDeadlines(t *testing.T) {
+	for _, stall := range []bool{false, true} {
+		t.Run(fmt.Sprint(stall), func(t *testing.T) {
+			good, bad := &resultSender{}, &resultSender{stall: stall, fail: true}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			if err := (multi{bad, good}).Send(ctx, Message{}); err != nil || good.sent.Load() != 1 {
+				t.Fatalf("backup failed: %v sends=%d", err, good.sent.Load())
+			}
+		})
+	}
+	a, b := &resultSender{fail: true}, &resultSender{fail: true}
+	if err := (multi{a, b}).Send(context.Background(), Message{}); err == nil {
+		t.Fatal("total failure hidden")
+	}
 }

@@ -14,6 +14,8 @@ dist/
 im.key
 hub.key
 slack.webhook
+telegram.token
+telegram.chat
 
 # SQLite databases
 *.db

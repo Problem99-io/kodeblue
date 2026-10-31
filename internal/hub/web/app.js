@@ -554,9 +554,9 @@ async function openBell(anchor) {
         n.status !== "delivered" ? h("span", { class: n.status === "failed" ? "c-red" : "" }, n.status) : null, h("span", null, ago(n.at)))));
   menu(anchor, [
     h("div", { class: "np-hd" }, h("span", { class: "np-t" }, "Notifications"), fresh ? h("span", { class: "badge b-accent" }, fresh + " new") : null,
-      h("div", { class: "sp" }), h("a", { class: "ibtn", href: "#/settings", title: "Slack settings", "aria-label": "Slack settings" }, ic("sliders", 13))),
+      h("div", { class: "sp" }), h("a", { class: "ibtn", href: "#/settings", title: "Notification settings", "aria-label": "Notification settings" }, ic("sliders", 13))),
     BELL.off ? h("div", { class: "np-empty" }, "This hub does not send notifications yet.")
-      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, "You're all caught up."), h("span", { class: "faint small" }, "Alerts kodeblue sends to Slack show up here."))
+      : !list.length ? h("div", { class: "np-empty" }, ic("bell", 18), h("span", null, "You're all caught up."), h("span", { class: "faint small" }, "Alerts kodeblue sends to configured destinations show up here."))
       : h("div", { class: "np-list" }, list.slice(0, 15).map(item)),
     h("a", { class: "np-all", href: "#/notifications" }, "View all notifications", ic("chevRight", 12)),
   ], "npop");
@@ -587,7 +587,7 @@ async function renderView(r) {
   }
   app.appendChild(main);
   if (r.view === "board") return vBoard(r, main, srv);
-  const views = { overview: vOverview, services: vServices, findings: vFindings, monitors: vMonitors, evaluation: vEvaluation, activity: vActivity, knowledge: vKnowledge, notifications: vNotifications, settings: vServerSettings };
+  const views = { overview: vOverview, vulnerabilities: vVulnerabilities, autoblock: vAutoblock, services: vServices, findings: vFindings, monitors: vMonitors, evaluation: vEvaluation, activity: vActivity, knowledge: vKnowledge, notifications: vNotifications, settings: vServerSettings };
   if (r.tab === "notifications") return vNotifications(srv, main);
   const fn = views[r.tab] || vOverview;
   const draw = async () => { try { await fn(srv, main, r.item); } catch (e) { if (e.status !== 401) console.error(e); } };
@@ -599,8 +599,8 @@ async function renderView(r) {
 }
 
 // ---------- server bar ----------
-const STABS = [["board", "Board"], ["overview", "Overview"], ["services", "Services"], ["findings", "Findings & triage"], ["monitors", "Monitors & rules"],
-  ["evaluation", "Self-evaluation"], ["activity", "Activity"], ["knowledge", "Knowledge"], ["notifications", "Notifications"], ["settings", "Settings"]];
+const STABS = [["board", "Board"], ["overview", "Overview"], ["vulnerabilities", "Vulnerabilities"], ["autoblock", "Auto-block"], ["services", "Services"],
+  ["findings", "Findings & triage"], ["monitors", "Monitors"], ["evaluation", "Self-evaluation"], ["activity", "Activity"], ["knowledge", "Knowledge"], ["notifications", "Notifications"], ["settings", "Settings"]];
 function serverBar(srv, tab) {
   const st = srv.status || {};
   const c = srv.counts;
@@ -627,8 +627,8 @@ function serverBar(srv, tab) {
     h("nav", { class: "stabs" }, STABS.map(([k, label]) => h("a", { href: k === "board" ? "#/s/" + enc(srv.id) : `#/s/${enc(srv.id)}/${k}`, class: tab === k ? "on" : "" }, label,
       k === "board" && nOpen ? h("span", { class: "n" }, nOpen) : null,
       k === "findings" && c.needs_ack ? h("span", { class: "n" }, c.needs_ack) : null,
-      k === "services" && openVulns(c) ? h("span", { class: "n" + (worstVuln(c) ? " warn" : ""), title: "open vulnerabilities" }, openVulns(c)) : null,
-      k === "monitors" && c.rules_waiting ? h("span", { class: "n warn", title: "containment rules waiting for approval" }, c.rules_waiting) : null,
+      k === "vulnerabilities" && openVulns(c) ? h("span", { class: "n" + (worstVuln(c) ? " warn" : ""), title: "open vulnerabilities" }, openVulns(c)) : null,
+      k === "autoblock" && c.rules_waiting ? h("span", { class: "n warn", title: "auto-block rules waiting for approval" }, c.rules_waiting) : null,
       k === "activity" && c.pending_actions ? h("span", { class: "n warn" }, c.pending_actions) : null))),
     learnWaitAlert(st));
 }
@@ -1745,7 +1745,7 @@ function learningControls(srv, cmds, after) {
       : await ask("Relearn " + srv.name + "?", [
         h("p", null, "kodeblue collects the baseline again and treats everything the server runs during that window as normal, then runs the learner (if models are on)."),
         h("p", null, h("b", null, "Do this after planned changes, not while you suspect a compromise:"), " anything malicious running now would be learned as normal."),
-        h("p", { class: "muted small" }, "The run is announced in Slack.")], "Relearn", true);
+        h("p", { class: "muted small" }, "The run is announced through configured notification destinations.")], "Relearn", true);
     if (!ok) return;
     btn.disabled = true;
     try {
@@ -1940,7 +1940,7 @@ function paintApprovals() {
 function noteEvent(n) {
   const bad = n.status === "failed";
   return h("div", { class: "turn" }, h("div", { class: "sysev" + (bad ? " bad" : "") }, ic("bell", 12),
-    h("span", null, n.status === "skipped" ? "Not posted to Slack (skipped)" : n.status === "pending" ? "Posting to Slack…" : bad ? "Slack post failed" : "Posted to Slack"),
+    h("span", null, n.status === "skipped" ? "Not posted (skipped)" : n.status === "pending" ? "Delivering notification…" : bad ? "Notification delivery failed" : "Notification delivered"),
     h("span", { class: "sep" }, "·"), h("span", { class: "sev-" + (SEV.includes(n.severity) ? n.severity : "info") }, n.severity || "info"),
     h("span", { class: "sep" }, "·"), h("span", { class: "sev-title" }, n.title || n.kind || "notification"),
     bad && n.error ? h("span", { class: "err" }, "(" + n.error + ")") : null,
@@ -2263,9 +2263,11 @@ async function vFleet(main) {
           SEV.filter((k) => sev[k]).map((k) => h("span", { class: "badge b-" + k }, sev[k] + " " + k)),
           s.counts.investigating ? h("span", { class: "badge b-accent" }, h("span", { class: "pulse" }), s.counts.investigating + " live") : null,
           Object.keys(sev).length ? null : h("span", { class: "faint" }, "none"))),
-        h("td", null, need ? h("span", { class: "badge b-warn" }, String(need)) : h("span", { class: "faint" }, "0")),
+        h("td", null, need ? h("span", { class: "badge b-warn" }, String(need)) : s.counts.rules_waiting ? null : h("span", { class: "faint" }, "0"),
+          s.counts.rules_waiting ? h("a", { class: "badge b-warn" + (need ? " ml" : ""), href: `#/s/${enc(s.id)}/autoblock`, title: "auto-block rules waiting for approval", on: { click: (e) => e.stopPropagation() } },
+            s.counts.rules_waiting + " auto-block") : null),
         h("td", null, s.counts.monitors, s.counts.failing_monitors ? h("span", { class: "badge b-bad ml" }, s.counts.failing_monitors + " failing") : null),
-        h("td", null, h("div", { class: "sev-strip" },
+        h("td", null, h("a", { class: "sev-strip", href: `#/s/${enc(s.id)}/vulnerabilities`, title: "Open the server's vulnerabilities", on: { click: (e) => e.stopPropagation() } },
           VSEV.filter((k) => (s.counts.open_vulnerabilities || {})[k]).map((k) => h("span", { class: "badge b-" + k }, s.counts.open_vulnerabilities[k] + " " + k)),
           openVulns(s.counts) ? null : h("span", { class: "faint" }, s.counts.services ? "none open" : "—"))),
         h("td", null, h("div", { class: "small" }, usd(st.spend_today_usd), budget ? h("span", { class: "faint" }, " / " + usd(budget)) : null), bar),
@@ -2322,7 +2324,7 @@ async function vOverview(srv, body) {
           h("dt", null, "Messages"), h("dd", null, !st.phase ? "—" : st.accepts_messages ? "accepted from the hub" : "disabled on the server"),
           h("dt", null, "Shared blocks"), h("dd", null, sharedBlocksText(st)),
           h("dt", null, "Kernel"), h("dd", { class: "mono" }, st.kernel || "—")))),
-        softwarePanel(srv, st.software),
+        vulnSummary(srv),
         panel("Model spend today by purpose", h("div", { class: "bd" }, purposes.length ? h("dl", { class: "kv" }, purposes.map(([k, v]) => [h("dt", null, k), h("dd", null, usd(v))])) : h("div", { class: "faint" }, "Nothing spent today.")), null, "purple"),
         panel("What kodeblue learned is normal", h("div", { class: "bd" }, base.length ? h("dl", { class: "kv" }, base.map(([k, v]) => [h("dt", null, k), h("dd", null, v.toLocaleString())])) : h("div", { class: "faint" }, "No baseline yet.")), null, "green")),
       h("div", { class: "stack" },
@@ -2343,9 +2345,20 @@ function sharedBlocksText(st) {
   return "not applied: block_ip is off on this server";
 }
 
+// vulnSummary is the Overview's pointer to the Vulnerabilities tab.
+function vulnSummary(srv) {
+  const c = srv.counts || {}, sw = (srv.status || {}).software || {};
+  const ov = c.open_vulnerabilities || {};
+  const n = openVulns(c);
+  return panel("Vulnerabilities", h("div", { class: "bd stack" },
+    h("div", { class: "btns" }, n ? VSEV.filter((k) => ov[k]).map((k) => h("span", { class: "badge b-" + k }, ov[k] + " " + k)) : h("span", { class: "c-green" }, "none open"),
+      sw.security_updates ? h("span", { class: "badge b-high" }, sw.security_updates + " security update" + (sw.security_updates > 1 ? "s" : "") + " waiting") : null)),
+  h("a", { href: `#/s/${enc(srv.id)}/vulnerabilities`, class: "small" }, "All vulnerabilities"), n ? (worstVuln(c) ? "red" : "orange") : "green");
+}
+
 // softwarePanel shows the daily software check: how up to date the server
 // is and the new CVEs naming its software. The reviewer confirms each one
-// against the installed version; confirmed ones are on the Services tab.
+// against the installed version; confirmed ones are on the Vulnerabilities tab.
 const FEED_SOURCES = { nvd: "NIST NVD", cisa_kev: "CISA known exploited" };
 function softwarePanel(srv, sw) {
   if (!sw) return panel("Software and new CVEs", h("div", { class: "bd faint" }, "Not reported yet: the server checks once a day (kodeblue v0.1.5 or newer)."), null, "blue");
@@ -2495,7 +2508,7 @@ function approveRuleDialog(srv, r, after) {
     return;
   }
   const go = h("button", { class: "btn primary", type: "button", on: { click: async () => { m.close(); await ruleCommand(srv, r, "rule_approve", "", after); } } }, "Approve rule");
-  const m = modal("Approve containment rule", [h("div", { class: "stack" },
+  const m = modal("Approve auto-block rule", [h("div", { class: "stack" },
     h("div", { class: "strong" }, r.title),
     r.pending_change ? h("div", { class: "small strong c-orange" }, "This is a changed version of an active rule. Approving makes this version active:") : null,
     h("div", { class: "callout warn" }, ruleSummary(r)),
@@ -2520,7 +2533,7 @@ function rulesPanel(srv, list, after, msgs) {
     old ? h("button", { class: "btn small ghost", type: "button", on: { click: () => { S.open.has("rules-old") ? S.open.delete("rules-old") : S.open.add("rules-old"); after(); } } },
       S.open.has("rules-old") ? "Hide rejected and deleted" : `Show rejected and deleted (${old})`) : null);
   const cols = ["Rule", "Status", "Fired", "Last fired", "Expires"];
-  return panel(`Containment rules (${active} active)`, h("div", { class: "bd flush tbl-wrap" }, shown.length ? h("table", null,
+  return panel(`Auto-block rules (${active} active)`, h("div", { class: "bd flush tbl-wrap" }, shown.length ? h("table", null,
     h("thead", null, h("tr", null, cols.map((t, i) => h("th", { class: i === 2 ? "num" : "" }, t)))),
     h("tbody", null, shown.map((r) => {
       const key = "cr" + r.id;
@@ -2549,22 +2562,53 @@ function rulesPanel(srv, list, after, msgs) {
         h("td", { class: "nowrap small muted" }, validTime(r.last_fired) ? ago(r.last_fired) : "—"),
         h("td", { class: "nowrap small muted" }, validTime(r.expires_at) ? when(r.expires_at) : "—"));
       return [row, ex];
-    }))) : h("div", { class: "empty" }, "No containment rules. When the same attack keeps coming back, the reviewer or responder proposes one here; it acts only after you approve it.")), extra, "red");
+    }))) : h("div", { class: "empty" }, "No auto-block rules yet. When the same attack keeps coming back, the reviewer or responder proposes one here; it acts only after you approve it.")), extra, "red");
+}
+
+// vAutoblock: the containment rules, what kodeblue does by itself once a
+// person approved it, and the actions they took.
+async function vAutoblock(srv, body) {
+  const [crules, msgs, acts] = await Promise.all([recs(srv.id, "containment_rule", "?limit=500").then((x) => x.map(parse)),
+    api("GET", `/api/servers/${enc(srv.id)}/messages`).then((m) => m.filter((x) => String(x.command || "").startsWith("rule_"))).catch(() => []),
+    recs(srv.id, "action", "?limit=500").then((x) => x.map(parse).filter((a) => String(a.requested_by || "").startsWith("rule:")))]);
+  const again = () => { if (body.isConnected) vAutoblock(srv, body); };
+  // While a ruling is on its way, look again until the server answered.
+  if (msgs.some(decOpen)) setTimeout(again, 4000);
+  const st = srv.status || {};
+  const cur = st.version || srv.version || "";
+  const old = newerVer("v0.1.8", cur);
+  const at = (a) => validTime(a.done_at) || validTime(a.requested_at) || 0;
+  acts.sort((a, b) => at(b) - at(a));
+  const live = crules.filter((r) => r.status === "active").length;
+  const waiting = crules.filter((r) => r.status === "proposed" || r.pending_change).length;
+  const narrow = window.innerWidth < 760;
+  sync(body, h("div", { class: "stack" },
+    h("div", { class: "grid g4" },
+      stat("Active rules", live, live ? "acting on their own" : "nothing acts on its own", live ? "red" : "green"),
+      stat("Waiting for you", waiting, waiting ? "approve or reject below" : "no proposals", waiting ? "orange" : "green"),
+      stat("Actions by rules", acts.length, acts.length ? "last " + ago(at(acts[0])) : "none yet", "blue"),
+      old ? stat("Approve from the hub", "update first", `auto-block arrived in v0.1.8; this server runs ${cur}`, "yellow")
+        : stat("Approve from the hub", st.accepts_rule_approvals ? "yes" : "no", st.accepts_rule_approvals ? "this server takes hub approvals"
+          : "on the server: sudo kodeblue rules approve", st.accepts_rule_approvals ? "green" : "yellow")),
+    h("div", { class: "callout info" }, h("div", { class: "lbl" }, "How auto-block works"),
+      "When the same attack keeps coming back, the reviewer or responder agent proposes a rule, such as \"block every address that brute-forces SSH\". ",
+      "A proposal does nothing: you read it here and approve or reject it. Once approved, kodeblue takes that one action on every match without asking, within the rule's limits (actions per hour, addresses or paths it may touch) and only until it expires. ",
+      "Protected addresses and paths are still refused, and Pause stops a rule at once. In the code and on the server these are called containment rules."),
+    rulesPanel(srv, crules, again, msgs),
+    panel(`What the rules did (${acts.length})`, h("div", { class: "bd flush" }, acts.length
+      ? (narrow ? h("div", { class: "pad pb" }, actionCards(acts, false, srv.id, [], again)) : actionTable(acts, false, srv.id, [], again))
+      : h("div", { class: "empty" }, "No rule has acted yet.")), h("a", { href: `#/s/${enc(srv.id)}/activity`, class: "small" }, "All containment actions"), "red")));
 }
 
 async function vMonitors(srv, body) {
   const [mons, rules] = await Promise.all([recs(srv.id, "monitor", "?limit=500"), recs(srv.id, "allow_rule", "?limit=500")]);
-  const [crules, msgs] = await Promise.all([recs(srv.id, "containment_rule", "?limit=500").then((x) => x.map(parse)),
-    api("GET", `/api/servers/${enc(srv.id)}/messages`).then((m) => m.filter((x) => String(x.command || "").startsWith("rule_"))).catch(() => [])]);
-  const again = () => { if (body.isConnected) vMonitors(srv, body); };
-  // While a ruling is on its way, look again until the server answered.
-  if (msgs.some(decOpen)) setTimeout(again, 4000);
   const st = srv.status || {};
   const ml = mons.map(parse).sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const rl = rules.map(parse);
   const coll = Object.entries(st.collector_runs || {}).sort();
   sync(body, h("div", { class: "stack" },
-    rulesPanel(srv, crules, again, msgs),
+    h("div", { class: "note" }, "Monitors watch and raise findings; they never act. Rules that block or quarantine by themselves are on the ",
+      h("a", { href: `#/s/${enc(srv.id)}/autoblock` }, "Auto-block"), " tab."),
     panel(`Agent-written monitors (${ml.filter((m) => !m.disabled).length} active)`, h("div", { class: "bd flush tbl-wrap" }, ml.length ? h("table", null,
       h("thead", null, h("tr", null, ["Monitor", "Check", "Status", "Runs", "Fails", "Last run", "By"].map((t, i) => h("th", { class: i === 3 || i === 4 ? "num" : "" }, t)))),
       h("tbody", null, ml.map((m) => {
@@ -2620,8 +2664,10 @@ function acceptDialog(srv, v, after) {
     h("label", { class: "field" }, "Why the team keeps this risk", why))], [go]);
   why.focus();
 }
-function vulnTable(srv, list, after) {
-  const cols = ["Vulnerability", "Sev", "Status", "Check", "Found"];
+// vulnTable lists vulnerabilities; withService adds the service each is in,
+// for the server-wide list.
+function vulnTable(srv, list, after, withService) {
+  const cols = withService ? ["Vulnerability", "Service", "Sev", "Status", "Check", "Found"] : ["Vulnerability", "Sev", "Status", "Check", "Found"];
   return h("div", { class: "tbl-wrap" }, h("table", null,
     h("thead", null, h("tr", null, cols.map((t) => h("th", null, t)))),
     h("tbody", null, list.map((v) => {
@@ -2629,6 +2675,7 @@ function vulnTable(srv, list, after) {
       const row = h("tr", { class: "click", on: { click: () => { S.open.has(key) ? S.open.delete(key) : S.open.add(key); ex.hidden = !S.open.has(key); } } },
         h("td", null, h("div", { class: "fg strong" }, v.title),
           h("div", { class: "faint small mono" }, v.id, v.category ? " · " + v.category : "", (v.cves || []).length ? " · " + v.cves.join(", ") : "")),
+        withService ? h("td", { class: "small" }, v.service || h("span", { class: "faint" }, "host")) : null,
         h("td", null, sevBadge(v.severity)),
         h("td", null, vulnStatus(v)),
         h("td", { class: "nowrap" }, vulnCheck(v)),
@@ -2670,6 +2717,53 @@ function servicePanel(srv, svc, vulns, after) {
     h("div", null, h("div", { class: "small faint" }, "Vulnerabilities"), vulns.length ? vulnTable(srv, vulns, after) : h("div", { class: "faint small" }, svc.role === "system" ? "None recorded." : "None found yet."))),
   extra, (svc.missing || []).length ? "red" : open ? "orange" : "green");
 }
+// vVulnerabilities is everything known to be weak on the server in one list,
+// the hub's view of the server's VULNERABILITIES.md. The filters redraw only
+// the list, so the search box keeps its focus.
+const VULN_ST = [["open", "Open"], ["accepted", "Risk accepted"], ["resolved", "Fixed"], ["", "All"]];
+async function vVulnerabilities(srv, body) {
+  const vv = await recs(srv.id, "vulnerability", "?limit=1000");
+  const st = srv.status || {};
+  if (unchanged(body, "vulnerabilities", [vv, st.software])) return;
+  const after = () => { body.dataset.sig = ""; vVulnerabilities(srv, body); };
+  const vulns = vv.map(parse).sort((a, b) => vulnRank(a) - vulnRank(b) || String(a.id).localeCompare(String(b.id)));
+  const open = vulns.filter((v) => v.status === "open");
+  const by = (sev) => open.filter((v) => v.severity === sev).length;
+  const f = S.cache.vulnF || (S.cache.vulnF = { status: "open", sev: "", svc: "", q: "" });
+  const n = (s) => (s ? vulns.filter((v) => v.status === s).length : vulns.length);
+  const statusSel = h("select", { "aria-label": "Status" }, VULN_ST.map(([k, l]) => h("option", { value: k, selected: f.status === k }, `${l} (${n(k)})`)));
+  const sevSel = h("select", { "aria-label": "Severity" }, h("option", { value: "" }, "Any severity"), VSEV.map((k) => h("option", { value: k, selected: f.sev === k }, k)));
+  const svcs = [...new Set(vulns.map((v) => v.service || ""))].sort();
+  const svcSel = h("select", { "aria-label": "Service" }, h("option", { value: "" }, "Every service"),
+    svcs.map((k) => h("option", { value: k || "-", selected: f.svc === (k || "-") }, k || "host")));
+  const q = h("input", { type: "search", placeholder: "Search title, CVE, id…", "aria-label": "Search vulnerabilities", autocomplete: "off", spellcheck: "false", value: f.q });
+  const list = h("div");
+  const draw = () => {
+    const qq = f.q.trim().toLowerCase();
+    const shown = vulns.filter((v) => (!f.status || v.status === f.status) && (!f.sev || v.severity === f.sev) &&
+      (!f.svc || (v.service || "-") === f.svc) &&
+      (!qq || [v.title, v.id, v.service, v.category, ...(v.cves || [])].some((x) => String(x || "").toLowerCase().includes(qq))));
+    clear(list);
+    list.appendChild(shown.length ? vulnTable(srv, shown, after, true)
+      : h("div", { class: "empty" }, vulns.length ? "Nothing matches these filters." : "No vulnerabilities recorded yet. The assessment runs after learning, then the reviewer and the daily CVE feed add to it."));
+  };
+  statusSel.addEventListener("change", () => { f.status = statusSel.value; draw(); });
+  sevSel.addEventListener("change", () => { f.sev = sevSel.value; draw(); });
+  svcSel.addEventListener("change", () => { f.svc = svcSel.value; draw(); });
+  q.addEventListener("input", () => { f.q = q.value; draw(); });
+  draw();
+  sync(body, h("div", { class: "stack" },
+    h("div", { class: "grid g4" },
+      stat("Open", open.length, VSEV.map((s) => by(s) ? by(s) + " " + s : "").filter(Boolean).join(" · ") || "none open", open.length ? (by("critical") || by("high") ? "red" : "orange") : "green"),
+      stat("Critical or high", by("critical") + by("high"), "fix these first", by("critical") + by("high") ? "red" : "green"),
+      stat("Fixed or accepted", vulns.length - open.length, n("resolved") + " fixed, " + n("accepted") + " accepted", "green"),
+      stat("Security updates", (st.software || {}).security_updates || 0, (st.software || {}).checked_at ? "waiting to install · checked " + ago(st.software.checked_at) : "not checked yet", (st.software || {}).security_updates ? "orange" : "green")),
+    h("div", { class: "note" }, "Everything known to be weak on this server: what the vulnerability assessment, the reviewer and the CVE feed confirmed. Open one for its evidence and how to fix it. On the server the same list is in ",
+      h("code", null, "/var/lib/kodeblue/workspace/VULNERABILITIES.md"), " and ", h("code", null, "sudo kodeblue vulnerabilities"), "."),
+    panel(`Vulnerabilities (${vulns.length})`, h("div", { class: "bd stack" }, h("div", { class: "toolbar" }, h("div", { class: "fsearch" }, ic("search", 14, "c-muted"), q), statusSel, sevSel, svcSel), list), null, "orange"),
+    softwarePanel(srv, st.software)));
+}
+
 async function vServices(srv, body) {
   const [sv, vv] = await Promise.all([recs(srv.id, "service", "?limit=500"), recs(srv.id, "vulnerability", "?limit=1000")]);
   if (unchanged(body, "services", [sv, vv])) return;
@@ -2814,21 +2908,21 @@ async function vNotifications(srv, main) {
   const body = h("div", { class: "stack" }, h("div", { class: "empty" }, "Loading…"));
   status.addEventListener("change", () => { S.cache.noteStatus = status.value; body.dataset.sig = ""; draw(); });
   main.append(h("div", { class: "toolbar" }, srv ? null : h("h1", null, "Notifications"),
-    h("span", { class: "muted small" }, "What kodeblue sent to Slack" + (srv ? " from " + srv.name : " across the fleet") + ", newest first."),
-    h("div", { class: "sp" }), status, h("a", { class: "btn small", href: "#/settings" }, ic("sliders", 12), "Slack settings")), body);
+    h("span", { class: "muted small" }, "What kodeblue sent to notification destinations" + (srv ? " from " + srv.name : " across the fleet") + ", newest first."),
+    h("div", { class: "sp" }), status, h("a", { class: "btn small", href: "#/settings" }, ic("sliders", 12), "Notification settings")), body);
   const draw = async () => {
     let list;
     try { list = await api("GET", "/api/notifications?limit=200" + (srv ? "&server_id=" + enc(srv.id) : "")); }
     catch (e) {
       if (e.status === 401) return;
       if (unchanged(body, "err", e.message)) return;
-      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, e.status === 404 ? "This hub does not deliver Slack notifications yet." : "Could not load notifications: " + e.message)));
+      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, e.status === 404 ? "This hub does not deliver notifications yet." : "Could not load notifications: " + e.message)));
       return;
     }
     list = (list || []).filter((n) => !S.cache.noteStatus || n.status === S.cache.noteStatus);
     if (unchanged(body, "notes", list)) return;
     if (!list.length) {
-      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : "Nothing sent to Slack yet.")));
+      sync(body, h("div", { class: "panel" }, h("div", { class: "empty" }, S.cache.noteStatus ? "No " + S.cache.noteStatus + " notifications." : "No notifications sent yet.")));
       return;
     }
     sync(body, h("div", { class: "panel" }, h("div", { class: "nlist" }, list.map((n) => {
@@ -2947,6 +3041,7 @@ async function vSettings(main) {
     if (r && r.ok) say("Test message delivered to Slack."); else say("Test failed: " + ((r && r.error) || "unknown error"), true);
   }));
   const agents = h("div", { class: "stack" });
+  const telegram = h("div");
   body.append(agents,
     panel("Slack", h("div", { class: "bd stack" },
       h("div", { class: "setrow" }, h("span", { class: "fg" }, "Incoming webhook"), status),
@@ -2958,10 +3053,12 @@ async function vSettings(main) {
       h("div", { class: "btns" }, test, h("a", { class: "small", href: "#/notifications" }, "Notification history")),
       msg), null, "purple"),
     sharedBlocksPanel(),
+    telegram,
     panel("Hub", h("div", { class: "bd" }, h("dl", { class: "kv" },
       h("dt", null, "Signed in as"), h("dd", null, S.me ? S.me.name : "—"),
       h("dt", null, "Operators"), h("dd", null, h("code", null, "kodeblue-hub user add <name>")),
       h("dt", null, "Audit"), h("dd", null, h("a", { href: "#/audit" }, "Audit log"))))));
+  vTelegramSettings(telegram);
   fleetAgents(agents);
   try { paint(await api("GET", "/api/settings/slack")); }
   catch (e) {
@@ -2971,6 +3068,73 @@ async function vSettings(main) {
     say(e.status === 404 ? "This hub does not support Slack settings yet." : "Could not load Slack settings: " + e.message, true);
   }
 }
+
+async function vTelegramSettings(main) {
+  const body = h("div", { class: "stack narrow" });
+  main.append(body);
+  const status = h("span", { class: "badge" }, "…");
+  const url = h("input", { type: "password", class: "full", autocomplete: "off", spellcheck: "false", placeholder: "BotFather token", "aria-label": "Telegram bot token" });
+  const chat = h("input", { class: "full", autocomplete: "off", spellcheck: "false", placeholder: "-1001234567890 or @channelusername", "aria-label": "Telegram chat ID" });
+  const save = h("button", { class: "btn primary", type: "button" }, "Save Telegram");
+  const clr = h("button", { class: "btn danger", type: "button" }, "Clear");
+  const sev = h("select", { class: "sel", "aria-label": "Minimum severity" }, ["info", "low", "medium", "high", "critical"].map((s) => h("option", { value: s }, s)));
+  const test = h("button", { class: "btn", type: "button" }, ic("send", 12), "Send test message");
+  const msg = h("div", { class: "smsg", role: "status" });
+  const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  let cur = null;
+  const paint = (s) => {
+    cur = s;
+    chat.value = s.chat_id || "";
+    status.className = "badge " + (s.configured ? "b-ok" : "");
+    status.textContent = s.configured ? "configured" : "not configured";
+    test.disabled = !s.configured;
+    test.title = s.configured ? "" : "Save a bot token and chat ID first";
+    if (s.min_severity) sev.value = s.min_severity;
+    url.placeholder = s.configured ? "Leave blank to keep the stored token" : "BotFather token";
+  };
+  const busy = async (btn, fn) => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { if (e.status !== 401) say(e.status === 0 ? "Can't reach the hub." : e.message, true); }
+    finally { btn.disabled = false; if (cur) paint(cur); }
+  };
+  save.addEventListener("click", () => busy(save, async () => {
+    const v = url.value.trim();
+    if (!chat.value.trim() || (!v && !(cur && cur.configured))) { say("Enter a bot token and chat ID first.", true); url.focus(); return; }
+    paint(await api("PUT", "/api/settings/telegram", { ...(v ? { bot_token: v } : {}), chat_id: chat.value.trim() }));
+    url.value = "";
+    say("Telegram saved. Use “Send test message” to check it.");
+  }));
+  url.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
+  clr.addEventListener("click", async () => {
+    if (!(await ask("Clear Telegram bot token", "Remove the stored bot token? kodeblue stops posting to Telegram until a new one is saved; notifications are still listed on the hub.", "Clear", true))) return;
+    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); say("Telegram cleared."); });
+  });
+  sev.addEventListener("change", () => busy(sev, async () => { paint(await api("PUT", "/api/settings/telegram", { min_severity: sev.value })); say("Minimum severity set to " + sev.value + "."); }));
+  test.addEventListener("click", () => busy(test, async () => {
+    say("Sending…");
+    const r = await api("POST", "/api/settings/telegram/test", {});
+    if (r && r.ok) say("Test message delivered to Telegram."); else say("Test failed: " + ((r && r.error) || "unknown error"), true);
+  }));
+  body.append(
+    panel("Telegram", h("div", { class: "bd stack" },
+      h("div", { class: "setrow" }, h("span", { class: "fg" }, "Bot notifications"), status),
+      h("div", { class: "note" }, "Create a bot with @BotFather. Start it privately, or add it to your group or channel with permission to send messages. Enter the destination chat ID or public channel username. The bot token is secret and never shown again. Notifications are one-way; replies do not run commands."),
+      h("label", { class: "field" }, "Bot token", url),
+      h("label", { class: "field" }, "Chat ID", chat),
+      h("div", { class: "btns" }, save, clr),
+      h("div", { class: "setrow" }, h("label", { class: "field inline" }, "Minimum severity", sev),
+        h("span", { class: "note" }, "Notifications below this severity are listed on the hub but not posted.")),
+      h("div", { class: "btns" }, test, h("a", { class: "small", href: "#/notifications" }, "Notification history")),
+      msg), null, "purple"));
+  try { paint(await api("GET", "/api/settings/telegram")); }
+  catch (e) {
+    if (e.status === 401) return;
+    status.textContent = "unavailable";
+    [url, chat, save, clr, sev, test].forEach((x) => { x.disabled = true; });
+    say(e.status === 404 ? "This hub does not support Telegram settings yet." : "Could not load Telegram settings: " + e.message, true);
+  }
+}
+
 
 // ---------- agent settings (fleet and per server) ----------
 // Operators pick the model endpoint, a model per agent role, extra
@@ -3564,7 +3728,7 @@ async function vServerSettings(srv, body) {
           : h("div", { class: "faint small" }, "No fleet instructions for this agent.")))), null, "green"),
       panel("Response mode", h("div", { class: "bd stack" },
         h("div", { class: "note" }, "What kodeblue does when it finds an attack on this server. Off: agents only recommend actions in their reports. Recommend: every action waits for an operator's approval. Contain: actions run at once, including monitor reflexes that kill a payload or quarantine a dropped file seconds after it appears. The hub can switch up to what the server's root-owned ",
-          h("code", null, "/etc/kodeblue/kodeblue.toml"), " allows (its mode, or hub_max_mode), never above it. Every change is announced in Slack."),
+          h("code", null, "/etc/kodeblue/kodeblue.toml"), " allows (its mode, or hub_max_mode), never above it. Every change is announced through configured notification destinations."),
         h("div", { class: "frows" }, h("div", { class: "frow c3" }, h("span", { class: "frow-l" }, "Mode"), modeSel, modeNow)),
         modeCap), null, "red"),
       panel("Containment approvals", h("div", { class: "bd stack" },

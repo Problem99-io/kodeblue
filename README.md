@@ -42,13 +42,17 @@ Each step is one command plus your model's API key, on Linux with systemd (amd64
 curl -fsSL https://github.com/Problem99-io/kodeblue/releases/latest/download/install.sh | sudo sh -s -- --inference-url https://openrouter.ai/api --model <model>
 ```
 
-Use any OpenAI-compatible endpoint, with or without `/v1` at the end. The installer asks for its API key and an optional Slack webhook (input is not echoed), and starts kodeblue. kodeblue takes snapshots of the server for about 30 minutes. A learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours.
+Use any OpenAI-compatible endpoint, with or without `/v1` at the end. The installer asks for its API key, an optional Slack webhook, and optional Telegram bot credentials (secret input is not echoed), and starts kodeblue. kodeblue takes snapshots of the server for about 30 minutes. A learning session then explores the server and an assessment records its vulnerabilities (each can take up to 45 minutes), so expect it to start watching within one to two hours.
 
 Without `--inference-url`, kodeblue starts watching after the snapshots, and the learning session and assessment wait until you set a model; they then run on their own. Set or change the model, and its key, with one command (it asks for the key and restarts kodeblue):
 
 ```bash
 sudo kodeblue inference --url https://openrouter.ai/api --model <model> --key-file -
 ```
+
+Telegram notifications can be used alone or alongside Slack. Standalone servers
+configure them during installation; hub users configure **Settings → Telegram**.
+See [Telegram setup](docs/hub.md#telegram) for bot and chat-ID instructions.
 
 Then review the policy (response mode, protected users, IPs and units, budget) with `sudoedit /etc/kodeblue/kodeblue.toml`, and follow along with `sudo journalctl -fu kodeblue`.
 
