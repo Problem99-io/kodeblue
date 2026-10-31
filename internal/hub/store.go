@@ -88,7 +88,13 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 			return err
 		}
 	}
-	return s.migrateSlack()
+	if err := s.migrateSlack(); err != nil {
+		return err
+	}
+	if err := s.migrateWarRoom(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) addColumn(table, col, def string) error {
@@ -407,6 +413,11 @@ ON CONFLICT(server_id,kind,rid) DO UPDATE SET updated_at=excluded.updated_at, re
 		if _, err := stmt.Exec(id, r.Kind, r.ID, r.UpdatedAt.Unix(), now, string(r.Data)); err != nil {
 			return false, err
 		}
+		if r.Kind == "finding" {
+			if err := indexWarFinding(tx, id, r.ID, r.Data); err != nil {
+				return false, err
+			}
+		}
 	}
 	for kind, ids := range keep {
 		rows, err := tx.Query(`SELECT rid FROM records WHERE server_id=? AND kind=?`, id, kind)
@@ -711,6 +722,8 @@ func (s *Store) Prune(keep time.Duration) {
 	_, _ = s.db.Exec(`DELETE FROM web_sessions WHERE expires_at<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<?`, time.Now().Add(-365*24*time.Hour).Unix())
 	_, _ = s.db.Exec(`DELETE FROM notifications WHERE at<?`, cut)
+	_, _ = s.db.Exec(`DELETE FROM war_events WHERE NOT EXISTS (SELECT 1 FROM records f WHERE f.server_id=war_events.server_id AND f.kind='finding' AND f.rid=war_events.finding_id)`)
+	_, _ = s.db.Exec(`DELETE FROM war_sources WHERE looked_at<? AND NOT EXISTS(SELECT 1 FROM war_events WHERE war_events.ip=war_sources.ip)`, time.Now().Add(-7*24*time.Hour).Unix())
 }
 
 // ---- messages ----

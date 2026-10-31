@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><meta name="referrer" content="no-referrer">
+<title>Behavioral research · kodeblue</title>
+<link rel="icon" href="/assets/icon.svg"><link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/research.css">
+<script src="/assets/research.js" defer></script>
+</head>
+<body>
+<main class="research-page">
+<header class="research-heading"><div><h2>Behavioral research layer</h2><p>One War room · source locations and evidence relationships.</p></div><span class="badge">Experimental foundation</span></header>
+<p id="status" role="status">Loading research status…</p>
+<section id="workspace" hidden>
+<div class="research-controls"><label>Site <select id="site"></select></label><label>Report day <input id="day" type="date"></label><button id="refresh" class="btn">Load evidence</button></div>
+<p class="research-note">Daily totals cover the selected site and day. Geographic links also follow War room's time/server filters and reuse known locations only. No model runs automatically; fingerprint matches do not establish an actor.</p>
+<div id="metrics" class="research-metrics"></div>
+<section class="research-panel"><h2>Traffic overview</h2><p id="period"></p><div id="traffic"></div></section>
+<section class="research-panel"><h2>Activity needing review</h2><div id="findings"></div></section>
+<section class="research-panel"><h2>Evidence network</h2><p>Solid: producer-reported connection. Dashed: fingerprint observation. Inspect a link for its source evidence.</p><svg id="network" viewBox="0 0 900 380" role="group" aria-label="Bounded evidence network"></svg><div id="network-links" class="research-link-controls"></div><p id="graph-note"></p><div id="evidence" aria-live="polite"></div></section>
+<section class="research-panel"><h2>Coverage and limits</h2><div id="coverage"></div></section>
+</section>
+<details id="configuration" hidden class="research-panel"><summary>Configure a research site</summary>
+<form id="site-form"><div class="research-form">
+<label>Site ID<input id="config-id" required maxlength="96" pattern="[A-Za-z0-9_-]+" placeholder="website-prod"></label>
+<label>Name<input id="config-name" required maxlength="100" placeholder="Production website"></label>
+<label>Timezone<input id="config-timezone" value="UTC" required placeholder="Asia/Jerusalem"></label>
+<label>Allowed browser origins, one per line<textarea id="config-origins" placeholder="https://www.example.com"></textarea></label>
+<label>Allowed browser paths, one per line<textarea id="config-paths" placeholder="/&#10;/services&#10;/booking"></textarea></label>
+<label>Enrolled source server IDs, one per line<textarea id="config-servers" placeholder="srv_…"></textarea></label>
+<label class="research-check"><input id="config-browser" type="checkbox"> Enable optional browser collection</label>
+</div><p>Browser events remain untrusted claims. Configure your site's privacy gate before enabling the SDK. No external enrichment or model calls are started.</p><button class="btn" type="submit">Save site</button></form>
+</details>
+</main>
+</body></html>
