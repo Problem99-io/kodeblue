@@ -358,6 +358,11 @@ if [ ! -s /etc/kodeblue/inference.key ] && grep -q '^base_url *= *"' /etc/kodebl
   if [ -n "$k" ]; then putsecret "$k" /etc/kodeblue/inference.key; fi
 fi
 if [ -s /etc/kodeblue/hub.key ]; then
+  # On a hub, model keys belong on the hub: hand this server's key to it and
+  # remove every copy here (the server then calls its models through the hub).
+  kb move-keys || warn "model keys stay on this server for now; to move them later: sudo kodeblue move-keys"
+fi
+if [ -s /etc/kodeblue/hub.key ]; then
   # The hub (control center) owns Slack: this server queues notifications for it.
   [ -s /etc/kodeblue/slack.webhook ] && warn "/etc/kodeblue/slack.webhook is ignored while this server reports to a hub (Slack is configured on the hub; set [notify] direct = true to also post directly)"
 elif [ ! -s /etc/kodeblue/slack.webhook ] && [ "$UPGRADE" = 0 ]; then

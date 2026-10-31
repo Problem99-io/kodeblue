@@ -5,8 +5,11 @@
 package hubproto
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -15,6 +18,16 @@ const (
 	PathEnroll   = "/api/agent/v1/enroll"
 	PathSync     = "/api/agent/v1/sync"
 	PathMessages = "/api/agent/v1/messages" // GET long-poll; POST /{id}/reply
+	// PathModels + {connection} + /v1/chat/completions (POST) or /v1/models
+	// (GET): the hub's model proxy. It adds the connection's key, so servers
+	// that use it never hold one.
+	PathModels = "/api/agent/v1/models/"
+	// PathMoveKeys (POST): a server hands its own model endpoint and key to
+	// the hub (kodeblue move-keys, run by the installer), which takes them
+	// over as a connection for that server; the server then keeps no key.
+	PathMoveKeys = "/api/agent/v1/move-keys"
+	// MaxModelRequestBytes bounds one proxied chat completion request.
+	MaxModelRequestBytes = 32 << 20
 	// MaxSyncBytes bounds one sync request body on both sides.
 	MaxSyncBytes = 16 << 20
 )
@@ -24,6 +37,9 @@ type EnrollRequest struct {
 	Name     string `json:"name"`
 	Hostname string `json:"hostname"`
 	Version  string `json:"version"`
+	// ModelProxy: the server calls models through the hub, so enrollment
+	// hands it no model key.
+	ModelProxy bool `json:"model_proxy,omitempty"`
 }
 
 type EnrollResponse struct {
@@ -88,6 +104,14 @@ type Status struct {
 	// (hub.accept_settings). SettingsVersion is the version it has applied.
 	AcceptsSettings bool   `json:"accepts_settings"`
 	SettingsVersion string `json:"settings_version,omitempty"`
+	// ModelProxy: the server calls hub connections through the hub's model
+	// proxy, so the hub sends it connections without their keys.
+	ModelProxy bool `json:"model_proxy,omitempty"`
+	// InferenceKeySum is KeySum of the server's own [inference] key, so the
+	// hub can tell it is still a key of one of its connections (left by an
+	// older enrollment). SweepSeconds is how often the heartbeat is written.
+	InferenceKeySum string `json:"inference_key_sum,omitempty"`
+	SweepSeconds    int    `json:"sweep_seconds,omitempty"`
 	// AcceptsLearning: hub operators may start a learning run
 	// (hub.accept_learning). Learning is true while one runs.
 	AcceptsLearning bool `json:"accepts_learning"`
@@ -203,6 +227,9 @@ type SyncResponse struct {
 	// it reported differs from the hub's. A Settings with an empty Version
 	// clears what the server applied before.
 	Settings *Settings `json:"settings,omitempty"`
+	// HubVersion is the hub's version: once it is at least the server's,
+	// the server moves any model key it still holds to the hub.
+	HubVersion string `json:"hub_version,omitempty"`
 }
 
 // Model roles: Default covers every role without its own model. Critical is
@@ -300,6 +327,46 @@ type Connection struct {
 	Name    string `json:"name,omitempty"`
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
+	// ViaHub: the server reaches this connection through the hub's model
+	// proxy (PathModels), so BaseURL and APIKey are empty.
+	ViaHub bool `json:"via_hub,omitempty"`
+	// Direct (hub only): servers call this endpoint themselves, with its
+	// key, because only they can reach it.
+	Direct bool `json:"direct,omitempty"`
+}
+
+// MoveKeysRequest is a server's own [inference] endpoint, its key and the
+// models its roles use there (role -> model, Connection empty). An empty Key
+// moves nothing: the hub only confirms the server calls its models through
+// the hub from now on, and answers with its version. A Key with no BaseURL
+// is a key the server holds but does not call an endpoint with (a key file
+// next to an inline key, or left by an older enrollment); SeenWith is the
+// server's endpoint, if it has one, for the hub operator's information.
+type MoveKeysRequest struct {
+	BaseURL  string              `json:"base_url,omitempty"`
+	Key      string              `json:"key,omitempty"`
+	Models   map[string]ModelRef `json:"models,omitempty"`
+	SeenWith string              `json:"seen_with,omitempty"`
+}
+
+// MoveKeysResponse names the hub connection that now holds the key, or says
+// the hub keeps it aside (Kept: a key no connection has, which an operator
+// may turn into a connection or delete); both empty when nothing was moved.
+// HubVersion is the hub's version: a server moves keys only to a hub at
+// least as new as itself.
+type MoveKeysResponse struct {
+	Connection string   `json:"connection,omitempty"`
+	Created    bool     `json:"created,omitempty"`
+	Roles      []string `json:"roles,omitempty"`
+	Kept       bool     `json:"kept,omitempty"`
+	HubVersion string   `json:"hub_version,omitempty"`
+}
+
+// KeySum identifies an API key without revealing it: the first 16 hex
+// digits of its SHA-256.
+func KeySum(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ModelRef is a model on a connection. Provider is the vendor label the
