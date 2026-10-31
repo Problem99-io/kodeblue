@@ -37,7 +37,7 @@ Source turns return a small JSON contribution: `kind` (`evidence`, `answer`,
 Accepted facts need references actually returned by that job's broker, in the form
 `event:<sequence>` or `record:<source>:<kind>:<id>`. The hub records at most 256
 reference keys per grant, outside the analytics database. Chat entries are capped
-at 2.4 KiB including JSON escaping; long model text is marked as an excerpt with
+at 2,400 bytes including JSON escaping; long model text is marked as an excerpt with
 a link to the full native report. Oversized admin messages are rejected before
 admission rather than silently shortened. A source contribution
 has at most eight references, four addressed entries and 2,000 bytes of text.
