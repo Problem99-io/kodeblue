@@ -3,10 +3,12 @@
   "use strict";
   const $ = id => root?.querySelector(`#${id}`);
   let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null;
+  let investigatorTimer=null;
+  let pendingQuestion="";
   const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = String(text); return e; };
   async function api(path, options = {}) {
     const res = await fetch(path, { ...options, headers: { "Content-Type": "application/json", "X-Kodeblue-CSRF": csrf, ...options.headers } });
-    const data = await res.json(); if (!res.ok) throw new Error(data.error || "Research unavailable"); return data;
+    let data;try{data=await res.json();}catch{throw new Error(`Research request failed (HTTP ${res.status})`);} if (!res.ok) throw new Error(data.error || "Research unavailable"); return data;
   }
   const text = (id, value) => { $(id).textContent = value; };
   function table(target, headings, rows) {
@@ -61,7 +63,7 @@
       text("coverage",`Accepted since site creation: ${c.accepted}. Rejected batches: ${c.rejected}. Detail evicted by capacity: ${c.detail_evicted}. Summary buckets evicted: ${c.summary_evicted}. Detail TTL: ${c.detail_hours}h; summaries: ${c.summary_days}d. ${c.notes.join(" ")}`);
       graphSnapshot={map,observations:page.observations};graph(map,page.observations);
       onGraph?.(map);
-      text("status","Loaded. No model or external enrichment was called.");
+      text("status","Loaded passive evidence. The investigator runs only when requested.");
     } catch(e) { if (mine === generation) text("status",e.message); }
   }
   async function refreshSites() {
@@ -74,10 +76,36 @@
     if (sites.some(s=>s.id===selected)) $("site").value=selected;
     if (!sites.length) { text("status","No research sites configured. Add a site below; collection starts only when you connect a source."); $("configuration").open=true; }
     else await load();
+    await loadInvestigator();
+  }
+  async function loadInvestigator(){
+    clearTimeout(investigatorTimer);
+    const mounted=root,site=$("site")?.value;if(!mounted?.isConnected||!site)return;
+    $("investigator-submit").disabled=true;
+    try{
+      const [servers,jobs]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`)]);
+      if(root!==mounted||$("site").value!==site)return;
+      const allowed=sites.find(s=>s.id===site)?.servers||[],worker=$("investigator-worker"),previous=worker.value;
+      const candidates=servers.filter(s=>allowed.includes(s.id)&&!s.revoked&&s.status?.supports_investigator&&s.status?.accepts_messages&&s.status?.models_enabled);
+      worker.replaceChildren(...candidates.map(s=>{const o=node("option",s.name);o.value=s.id;return o;}));if(candidates.some(s=>s.id===previous))worker.value=previous;
+      $("investigator-submit").disabled=!candidates.length;
+      if(!candidates.length)text("investigator-status","No investigator-capable worker with a running model is available. Update an enrolled site source and enable hub messages. Configure Investigator under the normal agent model settings.");
+      $("investigator-jobs").replaceChildren(...jobs.map(job=>{
+        const card=node("details"),title=node("summary",`Job #${job.id} · ${job.status} · $${Number(job.cost_usd||0).toFixed(4)}`),question=node("p",job.body),report=node("pre",job.reply||"Waiting for the worker's report. Live progress and Stop are available on its normal case board."),link=node("a","Open worker cases and live sessions");
+        link.href=`#/s/${encodeURIComponent(job.server_id)}`;report.className="research-evidence";card.append(title,question,report,link);return card;
+      }));
+      if(jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,10000);
+    }catch(e){if(root===mounted)text("investigator-status",e.message);}
   }
   function bind(){
   $("day").value=new Date(Date.now()-86400000).toISOString().slice(0,10);
-  $("refresh").addEventListener("click",load); $("site").addEventListener("change",load);
+  $("refresh").addEventListener("click",()=>{load();loadInvestigator();}); $("site").addEventListener("change",()=>{load();loadInvestigator();});
+  $("investigator-form").addEventListener("submit",async e=>{
+    e.preventDefault();const mounted=root,button=$("investigator-submit");button.disabled=true;
+    try{const job=await api(`/api/research/sites/${encodeURIComponent($("site").value)}/investigate`,{method:"POST",body:JSON.stringify({server_id:$("investigator-worker").value,date:$("day").value,question:$("investigator-question").value.trim()})});if(root!==mounted)return;text("investigator-status",`Investigation #${job.id} queued through the normal agent message channel.`);await loadInvestigator();}
+    catch(err){if(root===mounted)text("investigator-status",err.message);}
+    finally{if(root===mounted)button.disabled=!$("investigator-worker").options.length;}
+  });
   $("site-form").addEventListener("submit",async e=>{
     e.preventDefault(); const id=$("config-id").value.trim();
     const list=id=>$(id).value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
@@ -86,6 +114,7 @@
   });
   }
   window.KodeBlueResearch = {
+    prefillQuestion(question){pendingQuestion=question;if(root?.isConnected){$("investigator-question").value=question;$("investigator-question").scrollIntoView({block:"center"});}},
     async mount(host,options={}) {
       const token=++generation;
       const response=await fetch("/assets/research-panel.html");
@@ -95,11 +124,11 @@
       const doc=new DOMParser().parseFromString(markup,"text/html");
       root=document.importNode(doc.querySelector("main.research-page"),true);
       root.querySelector(".research-heading a")?.remove();
-      host.replaceChildren(root);onGraph=options.onGraph||null;bind();
+      host.replaceChildren(root);onGraph=options.onGraph||null;bind();if(pendingQuestion)$("investigator-question").value=pendingQuestion;
       graphSnapshot=null;graphResize?.disconnect();graphResize=new ResizeObserver(()=>{if(root?.isConnected&&graphSnapshot)graph(graphSnapshot.map,graphSnapshot.observations);});graphResize.observe($("network"));
       try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();}
       catch {if(token===generation && root?.isConnected)text("status","Research unavailable; geography and incident evidence remain available.");}
     },
-    close(){generation++;root=null;onGraph=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
+    close(){generation++;clearTimeout(investigatorTimer);root=null;onGraph=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
   };
 })();

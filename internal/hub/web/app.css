@@ -160,7 +160,7 @@ h3 { font-size: 14px; }
   border: 1px solid rgb(var(--fg-muted) / .3); color: rgb(var(--fg-dark)); background: rgb(var(--bg-dark) / .4); white-space: nowrap; }
 .chip2 i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
 .chip2.k-learning { color: rgb(var(--cyan)); border-color: rgb(var(--cyan) / .3); background: rgb(var(--cyan) / .1); }
-.chip2.k-review { color: rgb(var(--purple)); border-color: rgb(var(--purple) / .3); background: rgb(var(--purple) / .1); }
+.chip2.k-review, .chip2.k-research { color: rgb(var(--purple)); border-color: rgb(var(--purple) / .3); background: rgb(var(--purple) / .1); }
 .chip2.k-operator { color: rgb(var(--green)); border-color: rgb(var(--green) / .3); background: rgb(var(--green) / .1); }
 .chip2.k-incident { color: rgb(var(--blue)); border-color: rgb(var(--blue) / .3); background: rgb(var(--blue) / .1); }
 .chip2.k-coverage { color: rgb(var(--orange)); border-color: rgb(var(--orange) / .3); background: rgb(var(--orange) / .1); }
@@ -177,7 +177,7 @@ h3 { font-size: 14px; }
 .kind { flex: none; display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid; line-height: 16px; }
 .k-incident { color: rgb(var(--blue)); background: rgb(var(--blue) / .12); border-color: rgb(var(--blue) / .3); }
 .k-learning { color: rgb(var(--cyan)); background: rgb(var(--cyan) / .12); border-color: rgb(var(--cyan) / .3); }
-.k-review { color: rgb(var(--purple)); background: rgb(var(--purple) / .12); border-color: rgb(var(--purple) / .3); }
+.k-review, .k-research { color: rgb(var(--purple)); background: rgb(var(--purple) / .12); border-color: rgb(var(--purple) / .3); }
 .k-operator { color: rgb(var(--green)); background: rgb(var(--green) / .12); border-color: rgb(var(--green) / .3); }
 .k-coverage { color: rgb(var(--orange)); background: rgb(var(--orange) / .12); border-color: rgb(var(--orange) / .3); }
 
@@ -612,9 +612,9 @@ details.fleet-i .ftext { margin-top: 6px; max-height: 14rem; overflow: auto; whi
 .card-r2 { padding: 6px 12px 9px; }
 .card-meta { font-size: 11.5px; }
 .chip2 { border-radius: 4px; border-color: rgb(var(--line-strong)); background: transparent; color: rgb(var(--fg-dark)); }
-.chip2.k-incident, .chip2.k-learning, .chip2.k-review, .chip2.k-operator, .chip2.k-coverage { background: transparent; border-color: rgb(var(--line-strong)); }
+.chip2.k-incident, .chip2.k-learning, .chip2.k-review, .chip2.k-research, .chip2.k-operator, .chip2.k-coverage { background: transparent; border-color: rgb(var(--line-strong)); }
 .chip2.k-incident { color: rgb(var(--blue)); } .chip2.k-learning { color: rgb(var(--cyan)); }
-.chip2.k-review { color: rgb(var(--purple)); } .chip2.k-operator { color: rgb(var(--green)); }
+.chip2.k-review, .chip2.k-research { color: rgb(var(--purple)); } .chip2.k-operator { color: rgb(var(--green)); }
 .chip2.k-coverage { color: rgb(var(--orange)); }
 .card-live { border: 1px solid rgb(var(--line)); background: rgb(var(--bg-dark)); box-shadow: none; margin: 0 8px 8px; }
 .card-live .lt { color: rgb(var(--fg-dark)); }

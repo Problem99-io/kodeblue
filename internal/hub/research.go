@@ -15,6 +15,7 @@ import (
 )
 
 func (s *Server) researchRoutes() {
+	s.researchAgentRoutes()
 	s.mux.HandleFunc("GET /assets/research.html", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/#war-room-research", http.StatusSeeOther)
 	})
@@ -31,7 +32,7 @@ func (s *Server) researchRoutes() {
 			return
 		}
 		bytes, _ := s.opt.Research.PhysicalBytes()
-		writeJSON(w, 200, map[string]any{"enabled": true, "sites": sites, "physical_bytes": bytes, "prototype": true, "investigator_enabled": false})
+		writeJSON(w, 200, map[string]any{"enabled": true, "sites": sites, "physical_bytes": bytes, "prototype": true, "investigator_enabled": true})
 	}))
 	s.mux.HandleFunc("PUT /api/research/sites/{site}", s.op(s.handleResearchSite))
 	s.mux.HandleFunc("DELETE /api/research/sites/{site}", s.op(func(w http.ResponseWriter, r *http.Request, c *opCtx) {

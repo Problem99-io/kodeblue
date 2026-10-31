@@ -13,10 +13,10 @@ func TestAgentsParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"blue-learner": false, "blue-responder": false, "blue-reviewer": false, "blue-operator": false, "blue-assessor": false}
+	want := map[string]bool{"blue-learner": false, "blue-responder": false, "blue-reviewer": false, "blue-operator": false, "blue-assessor": false, "blue-investigator": false}
 	for _, a := range agents {
 		want[a.Name] = true
-		if len(a.Tools) < 5 || a.Instructions == "" || a.MaxIterations == 0 {
+		if len(a.Tools) == 0 || (a.Name != "blue-investigator" && len(a.Tools) < 5) || a.Instructions == "" || a.MaxIterations == 0 {
 			t.Errorf("%s incomplete: %+v", a.Name, a)
 		}
 		for _, tool := range a.Tools {

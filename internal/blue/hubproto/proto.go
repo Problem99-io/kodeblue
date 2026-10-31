@@ -75,8 +75,9 @@ type Status struct {
 	CollectorRuns  map[string]int     `json:"collector_runs,omitempty"`
 	Profile        string             `json:"profile,omitempty"`
 	// FindingStats7d is rule -> status -> count: the raw false-positive picture.
-	FindingStats7d  map[string]map[string]int `json:"finding_stats_7d,omitempty"`
-	AcceptsMessages bool                      `json:"accepts_messages"`
+	FindingStats7d       map[string]map[string]int `json:"finding_stats_7d,omitempty"`
+	SupportsInvestigator bool                      `json:"supports_investigator,omitempty"`
+	AcceptsMessages      bool                      `json:"accepts_messages"`
 	// AcceptsApprovals: hub operators may approve or deny containment the
 	// agent asked for (hub.accept_approvals).
 	AcceptsApprovals bool `json:"accepts_approvals"`
@@ -208,23 +209,24 @@ type SyncResponse struct {
 // Model roles: Default covers every role without its own model. Critical is
 // the responder on critical incidents.
 const (
-	RoleDefault   = "default"
-	RoleTriage    = "triage"
-	RoleLearner   = "learner"
-	RoleResponder = "responder"
-	RoleReviewer  = "reviewer"
-	RoleOperator  = "operator"
-	RoleCritical  = "critical"
+	RoleDefault      = "default"
+	RoleTriage       = "triage"
+	RoleLearner      = "learner"
+	RoleResponder    = "responder"
+	RoleReviewer     = "reviewer"
+	RoleInvestigator = "investigator"
+	RoleOperator     = "operator"
+	RoleCritical     = "critical"
 	// RoleAll in Instructions applies to every agent.
 	RoleAll = "all"
 )
 
 // ModelRoles are the keys Settings.Models accepts.
-var ModelRoles = []string{RoleDefault, RoleTriage, RoleLearner, RoleResponder, RoleReviewer, RoleOperator, RoleCritical}
+var ModelRoles = []string{RoleDefault, RoleTriage, RoleLearner, RoleResponder, RoleReviewer, RoleInvestigator, RoleOperator, RoleCritical}
 
 // InstructionRoles are the keys Settings.Instructions accepts. Triage has
 // none: its answer must stay strict JSON.
-var InstructionRoles = []string{RoleAll, RoleLearner, RoleResponder, RoleReviewer, RoleOperator}
+var InstructionRoles = []string{RoleAll, RoleLearner, RoleResponder, RoleReviewer, RoleInvestigator, RoleOperator}
 
 // MaxInstructions bounds one role's extra instructions.
 const MaxInstructions = 8000
@@ -375,7 +377,8 @@ type OperatorMessage struct {
 const (
 	// CommandLearn runs the learner agent now on the baseline the server
 	// already has; detection keeps running.
-	CommandLearn = "learn"
+	CommandLearn       = "learn"
+	CommandInvestigate = "investigate"
 	// CommandRelearn runs the whole learning phase again: baseline sweeps
 	// (changes seen meanwhile are absorbed as normal), then the learner.
 	CommandRelearn = "relearn"

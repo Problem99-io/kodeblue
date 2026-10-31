@@ -162,7 +162,7 @@ function verdictBadge(v) {
   const cls = { true_positive: "b-bad", malicious: "b-bad", suspicious: "b-warn", inconclusive: "b-warn", false_positive: "b-ok", benign_change: "b-ok", benign: "b-ok", error: "b-bad" }[v] || "";
   return h("span", { class: "badge " + cls }, v.replace(/_/g, " "));
 }
-function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "operator", "coverage"].includes(k) ? k : "incident") }, k || "case"); }
+function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "research", "operator", "coverage"].includes(k) ? k : "incident") }, k || "case"); }
 function phaseBadge(p) {
   const cls = { watching: "b-ok", learning: "b-accent", maintenance: "b-warn" }[p] || "b-warn";
   return h("span", { class: "badge " + cls, title: p ? null : "enrolled, but no report received yet" }, p || "not reporting yet");
@@ -867,7 +867,7 @@ async function vBoard(r, main, srv) {
 const DROP_HINT = { live: "Ask the agent to look again", human: "Move to Needs human", done: "Mark resolved" };
 
 // ----- board filters (kept in this browser) and pins (shared on the hub)
-const KINDS = ["incident", "learning", "review", "operator", "coverage"];
+const KINDS = ["incident", "learning", "review", "research", "operator", "coverage"];
 const sevOf = (t) => (SEV.includes(t.severity) ? t.severity : "info");
 const kindOf = (t) => (KINDS.includes(t.kind) ? t.kind : "incident");
 // needsYou: waiting on a person: approvals, or the Needs human column.
@@ -1201,7 +1201,7 @@ function sevChip(sev) {
   return h("span", { class: "chip2 s-" + k, title: "severity" }, h("i"), k);
 }
 function kindChip(kind) {
-  const k = ["incident", "learning", "review", "operator", "coverage"].includes(kind) ? kind : "incident";
+  const k = ["incident", "learning", "review", "research", "operator", "coverage"].includes(kind) ? kind : "incident";
   return h("span", { class: "chip2 k-" + k }, k);
 }
 function liveRow(text, at) {
@@ -1441,6 +1441,10 @@ async function sendMessage(text) {
   text = text.trim();
   if (!text || P.busy) return;
   const st = P.st;
+  if(st.inc?.kind==="research"){
+    openWarRoom();toggleWarResearch(true,true);window.KodeBlueResearch.prefillQuestion(text);
+    P.comp.setNote("Select the research scope in War room and ask the investigator there.");return;
+  }
   let srv = st.srv;
   const body = { body: text, incident_id: 0, conversation_id: "" };
   if (st.isNew) {
@@ -3086,7 +3090,7 @@ async function vTelegramSettings(main) {
 // Operators pick the model endpoint, a model per agent role, extra
 // instructions per agent and a rule per containment action. The fleet has
 // one set; a server can override single entries. Empty means "not set here".
-const ROLE_NAMES = { default: "Default (every agent)", triage: "Triage", learner: "Learner", responder: "Responder (incidents)", reviewer: "Reviewer",
+const ROLE_NAMES = { default: "Default (every agent)", triage: "Triage", learner: "Learner", responder: "Responder (incidents)", reviewer: "Reviewer", investigator: "Investigator (behavioral research)",
   operator: "Operator (hub chats)", critical: "Critical incidents", all: "All agents" };
 const ACTION_NAMES = { block_ip: "Block an IP", disable_ssh_key: "Disable an SSH key", kill_process: "Kill a process", lock_user: "Lock a user",
   quarantine_file: "Quarantine a file", stop_unit: "Stop a service" };

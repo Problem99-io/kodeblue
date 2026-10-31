@@ -248,6 +248,10 @@ func ValidateEndpointURL(raw string) error {
 // hash; it is empty when nothing is set.
 func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 	fleet, own := s.FleetAgentSettings(), s.ServerAgentSettings(id)
+	var capability hubproto.Status
+	if server := s.GetServer(id); server != nil {
+		_ = json.Unmarshal(server.Status, &capability)
+	}
 	merge := func(a, b map[string]string) map[string]string {
 		out := map[string]string{}
 		for k, v := range a {
@@ -266,6 +270,14 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 		Approvals:    merge(fleet.Approvals, own.Approvals),
 		ResponseMode: fleet.ResponseMode,
 	}
+	// Older workers reject an entire settings update containing an unknown
+	// role. Keep their existing agents working and do not send unused keys.
+	if !capability.SupportsInvestigator {
+		delete(out.Instructions, hubproto.RoleInvestigator)
+		if len(out.Instructions) == 0 {
+			out.Instructions = nil
+		}
+	}
 	if own.ResponseMode != "" {
 		out.ResponseMode = own.ResponseMode
 	}
@@ -282,6 +294,9 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 	used := map[string]bool{}
 	for _, m := range []map[string]hubproto.ModelRef{fleet.Models, own.Models} {
 		for role, r := range m {
+			if role == hubproto.RoleInvestigator && !capability.SupportsInvestigator {
+				continue
+			}
 			if r.Connection != "" && !slices.ContainsFunc(conns, func(c hubproto.Connection) bool { return c.ID == r.Connection }) {
 				continue // its connection was removed
 			}

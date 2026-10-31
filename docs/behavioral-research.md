@@ -4,7 +4,9 @@ This experimental module is the first implementation slice of KodeBlue's
 behavioral intelligence layer. It adds passive analytics/evidence storage,
 deterministic daily counts, a bounded relationship graph and a research layer
 inside the existing War room. It does not change existing agent procedures,
-run a new model, issue containment actions or deploy anything to a reference site.
+issue containment actions or deploy anything to a reference site. The additional
+[native investigator](behavioral-investigator.md) runs only on an explicit admin
+request; passive collection and these deterministic reports do not run a model.
 
 ## Run and configure
 
@@ -175,7 +177,10 @@ capacity-loss counters, retention limits and known interpretation limitations.
 
 ## Investigator and War room council contract
 
-The following is the next integration stage, **not enabled in this prototype**.
+The native investigator's scoped broker, sessions, UI, model settings, billing and
+notifications are implemented as an additional feature; see
+[Behavioral investigator](behavioral-investigator.md). The multi-agent council
+described below remains a future integration, not enabled functionality.
 
 War room is the shared workspace for the full picture: geographic sources,
 relationship map, timeline, evidence references and specialist discussion. The
@@ -227,8 +232,8 @@ mutation, raw container-control or secret-reading tools.
 
 - Passive adapters for gateway/workload streams; no existing tap is silently
   forwarded by this prototype.
-- Read-only investigator broker, scoped job grants, lifecycle/billing/cancellation
-  and the extensible participant registry/council routing.
+- Extensible council participant capabilities and council routing beyond the
+  native on-demand investigator.
 - Advisory ballots, admin proposal-version approval and existing-policy handoff.
 - Validated sequence/recurrence rules, comparable-day baselines, query usefulness
   measurement and precision/abstention evaluation on held-out scenarios.
