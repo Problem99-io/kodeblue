@@ -58,6 +58,7 @@ func main() {
 	listen := fs.String("listen", envOr("KODEBLUE_HUB_LISTEN", ":8443"), "listen address")
 	certFile := fs.String("tls-cert", os.Getenv("KODEBLUE_HUB_TLS_CERT"), "TLS certificate (PEM)")
 	keyFile := fs.String("tls-key", os.Getenv("KODEBLUE_HUB_TLS_KEY"), "TLS private key (PEM)")
+	disableIP := fs.Bool("disable-ip-enrichment", envOr("KODEBLUE_HUB_DISABLE_IP_ENRICHMENT", "") == "1", "disable third-party IP enrichment regardless of console settings")
 	selfSigned := fs.Bool("self-signed", envOr("KODEBLUE_HUB_SELF_SIGNED", "") == "1", "generate a self-signed certificate in <data>/tls; servers pin its public key")
 	behindProxy := fs.Bool("behind-proxy", envOr("KODEBLUE_HUB_BEHIND_PROXY", "") == "1", "plain HTTP behind a TLS-terminating reverse proxy (believes its X-Forwarded-For)")
 	trustedProxies := fs.String("trusted-proxy", os.Getenv("KODEBLUE_HUB_TRUSTED_PROXIES"), "with --behind-proxy: addresses/CIDRs of the proxies whose X-Forwarded-For is believed (default loopback)")
@@ -83,7 +84,7 @@ func main() {
 
 	switch cmd {
 	case "serve":
-		serve(logger, *data, *listen, *httpListen, *certFile, *keyFile, *selfSigned, *behindProxy, *trustedProxies, *consoleAllow, *endpointAllow, *publicURL, *dist, *enrollTTL)
+		serve(logger, *data, *listen, *httpListen, *certFile, *keyFile, *selfSigned, *behindProxy, *trustedProxies, *consoleAllow, *endpointAllow, *publicURL, *dist, *enrollTTL, *disableIP)
 	case "user":
 		st := mustStore(*data)
 		defer st.Close()
@@ -124,8 +125,8 @@ func main() {
 	}
 }
 
-func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile string, selfSigned, behindProxy bool, trustedProxies, consoleAllow, endpointAllow, publicURL, dist string, enrollTTL time.Duration) {
-	opt := hub.Options{DataDir: data, DistDir: dist, PublicURL: publicURL, BehindProxy: behindProxy, EnrollTTL: enrollTTL}
+func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile string, selfSigned, behindProxy bool, trustedProxies, consoleAllow, endpointAllow, publicURL, dist string, enrollTTL time.Duration, disableIP bool) {
+	opt := hub.Options{DisableIPEnrichment: disableIP, DataDir: data, DistDir: dist, PublicURL: publicURL, BehindProxy: behindProxy, EnrollTTL: enrollTTL}
 	var err error
 	if opt.TrustedProxies, err = hub.ParsePrefixes(trustedProxies); err != nil {
 		fatal(fmt.Errorf("--trusted-proxy: %w", err))
@@ -188,6 +189,7 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	defer stop()
 	go srv.Janitor(ctx)
 	go srv.NotificationForwarder(ctx)
+	srv.StartWarRoom(ctx)
 	hs := &http.Server{Addr: listen, Handler: srv.Handler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	var local *http.Server

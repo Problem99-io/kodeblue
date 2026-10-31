@@ -30,7 +30,7 @@ fast watch (5s) ─► sensors (60s, 0 tokens) ─► deterministic filters (0 t
               daily review session ◄─ reports/skills/monitors ◄─ one agent session per incident ─► respond (policy) ─► Slack
 ```
 
-An optional **hub** (`kodeblue-hub`) gives a fleet one console: every server's incidents, reports, the agents' reasoning and tool calls (live), monitors, findings and pending approvals, and a way to message the agents. Servers only dial out to it, always over TLS (plain HTTP is allowed only to a hub on the same machine).
+An optional **hub** (`kodeblue-hub`) gives a fleet one console: every server's incidents, reports, the agents' reasoning and tool calls (live), monitors, findings and pending approvals, and a way to message the agents. Servers only dial out to it, always over TLS (plain HTTP is allowed only to a hub on the same machine). Its **War room** drawer maps registered source-IP activity and links locations to incident context ([details](docs/hub.md#war-room)).
 
 ## Quick start
 
