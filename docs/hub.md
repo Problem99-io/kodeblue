@@ -61,6 +61,8 @@ Operators can also **start learning** from the server's Overview (Learning row).
 
 Operators can also **rule on containment rules** on the server's **Auto-block** tab. For an attack that keeps coming back, an agent proposes a rule such as "block every address that brute-forces SSH"; it does nothing until approved. Approving shows the rule in full and relays the hash of exactly what was shown; the server's root helper checks it and keeps the approved copy. An approved rule acts without asking, so the server takes an approval from the hub only where its root allowed automatic actions from the hub (`accept_approvals`, and `[response] mode` or `hub_max_mode` = `contain`); elsewhere the hub shows the `sudo kodeblue rules approve <id>` command instead. Reject, Pause (both with a reason) and Delete are relayed the same way. The tab badge, and a badge in the Servers view, count rules waiting for approval. Details in [kodeblue.md](kodeblue.md#containment-rules).
 
+**Shared blocks.** When one server blocks an address, the hub tells the others, and each blocks it too under its own policy: automatically where `block_ip` runs without approval (`contain`), otherwise as a request in its Activity tab to approve or deny. Only public addresses are shared, never back to the server that blocked it, and never more than half of a server's hourly action limit; protected and infrastructure addresses are refused as always. **Settings → Shared blocks** turns sharing on or off for the fleet (on by default, audited) and lists what is shared now; each server's Overview says what it does with them. A server takes them only with `[hub] accept_shared_blocks` (root-owned, default `true`). Details in [kodeblue.md](kodeblue.md#shared-blocks).
+
 One learning run at a time per server. Every run is in the hub audit log, the server journal and Slack. On the server the same is `kodeblue relearn && systemctl restart kodeblue`.
 
 Operators can also **configure the agents** (Settings for the fleet, and a Settings tab per server that overrides single entries):
@@ -81,20 +83,21 @@ Servers pick settings up on their next sync and restart kodeblue to apply them o
 
 While a server learns, its page and the Servers list show how far the baseline is (snapshot 7 of 10, the last around 01:35), and whether the model the learning session needs is on the server, on its way from the hub, or missing.
 
-The hub **cannot** loosen a server's policy or create containment of its own. Approval rules only tighten the root-owned `[response]` policy, and the root helper never reads them:
+The hub **cannot** loosen a server's policy or create containment of its own (it only relays the blocks servers made, which each server applies under its own policy: see shared blocks above). Approval rules only tighten the root-owned `[response]` policy, and the root helper never reads them:
 - an action is automatic only where the server runs `contain`: its own policy says `mode = "contain"`, or root set `hub_max_mode = "contain"` and an operator switched it to contain here. In the default `recommend` mode everything still needs a human
 - in `off` mode, or for an action outside `allowed_actions`, nothing runs
 - protected detections still need `kodeblue ack` on the server
 - protected users, IPs and services from the hub only add to the server's own, and the hub's containment limit only lowers the server's; agents' requests are checked against both before they reach the root helper, which applies the server's own
 - server settings cannot turn off detectors, lower the confidence that auto-accepts a finding as benign, or change the opt-outs below
 
-A stolen hub session can therefore approve containment an agent asked for, point the agents at another model endpoint, give them instructions, relearn a server (announced in Slack), start an upgrade to the hub's version (only a newer, published release, downloaded and checked by the server itself) or mark a vulnerability as an accepted risk (journaled on the server with the operator's name and reason), but not make a server act on its own, unless that server's root set `hub_max_mode = "contain"`, which lets the hub switch it to contain. Instructions cannot widen what agents may do either: their tools, the response policy and the protected users, IPs and units stay as the server configures them. Servers where that is too much set `accept_approvals = false`, `accept_settings = false`, `accept_learning = false` and `accept_upgrades = false`.
+A stolen hub session can therefore approve containment an agent asked for, point the agents at another model endpoint, give them instructions, relearn a server (announced in Slack), start an upgrade to the hub's version (only a newer, published release, downloaded and checked by the server itself) or mark a vulnerability as an accepted risk (journaled on the server with the operator's name and reason), but not make a server act on its own, unless that server's root set `hub_max_mode = "contain"`, which lets the hub switch it to contain. On a server that runs `contain`, a compromised hub (or a compromised server, whose blocks the hub shares) can make it block public addresses that are not protected, within half its hourly action limit; `accept_shared_blocks = false` closes that. Instructions cannot widen what agents may do either: their tools, the response policy and the protected users, IPs and units stay as the server configures them. Servers where that is too much set `accept_approvals = false`, `accept_settings = false`, `accept_learning = false` and `accept_upgrades = false`.
 
 A server can opt out entirely, or limit what the hub sees, in `[hub]`:
 - `accept_approvals = false`: approve/deny, and approving or deleting containment rules, only on the server
 - `accept_settings = false`: the console's model, instruction and approval settings are ignored
 - `accept_learning = false`: learning and relearning only on the server
 - `accept_upgrades = false`: upgrades only on the server (`sudo kodeblue upgrade <version>`)
+- `accept_shared_blocks = false`: addresses other servers blocked are not blocked here
 - `accept_messages = false`: no remote instructions, and vulnerabilities can be accepted, reopened or rechecked only by the server's agents and kodeblue itself
 - `share_transcripts = false`: no agent reasoning or tool output leaves the server
 - `messages_per_hour`: rate limit (default 20)

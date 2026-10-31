@@ -59,9 +59,13 @@ type Daemon struct {
 	// software is set while the daily software check runs (software.go);
 	// cveClient fetches its feeds (tests point it at a fake).
 	software atomic.Bool
-	// ruleRun carries out what an approved containment rule asks for (the
-	// root helper; tests replace it).
+	// ruleRun carries out what an approved containment rule asks for, and
+	// the blocks the fleet shared (the root helper; tests replace it).
 	ruleRun containment.Invoker
+	// sharedCh signals a new list of blocks shared by the fleet; sharing is
+	// set while they are applied (sharedblocks.go).
+	sharedCh chan struct{}
+	sharing  atomic.Bool
 	// upgradeMu serializes reads and writes of the upgrade status file
 	// (upgrade.go): the main loop and the hub link both settle it.
 	upgradeMu sync.Mutex
@@ -157,7 +161,7 @@ var ErrRestart = errors.New("restarting to apply new settings")
 func New(cfg config.Config, st *store.Store, logger *slog.Logger) *Daemon {
 	env := &sensors.Env{Root: cfg.Server.Root, Logger: logger, State: sensors.NewCursorStore(cfg.CursorPath())}
 	env.Pkg = sensors.LoadPackageIndex(env)
-	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), following: map[int64]bool{}, followRetry: map[int64]time.Time{}, started: time.Now(), restartGap: 5 * time.Minute, relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct, notify.TelegramFromConfigWithLogger(logger, cfg.Notify.TelegramBotToken, cfg.Notify.TelegramBotTokenFile, cfg.Notify.TelegramChatID, cfg.Notify.TelegramChatIDFile))}
+	d := &Daemon{cfg: cfg, log: logger, st: st, env: env, wakeCh: make(chan struct{}, 1), triageReq: make(chan struct{}, 1), restartNow: make(chan struct{}, 1), decided: make(chan struct{}, 1), sharedCh: make(chan struct{}, 1), following: map[int64]bool{}, followRetry: map[int64]time.Time{}, started: time.Now(), restartGap: 5 * time.Minute, relearnNow: make(chan struct{}, 1), queuedNotified: map[int64]bool{}, released: map[int64]bool{}, claimGrace: time.Minute, live: map[string]int64{}, stuckReported: map[string]time.Time{}, slack: notify.New(cfg.Hub.Enabled(), st, cfg.Notify.SlackWebhookURL, cfg.Notify.SlackWebhookFile, cfg.Notify.Direct, notify.TelegramFromConfigWithLogger(logger, cfg.Notify.TelegramBotToken, cfg.Notify.TelegramBotTokenFile, cfg.Notify.TelegramChatID, cfg.Notify.TelegramChatIDFile))}
 	d.newEngine = func() agentEngine { return runtime.New(cfg, logger) }
 	d.engCheckEvery, d.engMinBackoff, d.wakeGap = 30*time.Second, time.Minute, 10*time.Second
 	d.learnRetry = 10 * time.Minute
@@ -280,6 +284,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.maybeSoftwareCheck(ctx) // once a day; at startup so a new server is checked without waiting for the first tick
 	d.resumeQueued(ctx)
 	d.requestTriage()
+	d.startSharedBlocks(ctx)
 	for {
 		d.expectProgress(sweepEvery + loopGrace)
 		select {
@@ -305,8 +310,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.resumeQueued(ctx)
 			// Decisions made on the server (kodeblue respond approve).
 			d.followUpDecisions(ctx)
+			// Shared blocks that waited for the hour's actions.
+			d.startSharedBlocks(ctx)
 		case <-d.decided:
 			d.followUpDecisions(ctx)
+		case <-d.sharedCh:
+			d.startSharedBlocks(ctx)
 		case <-review.C:
 			d.maybeSoftwareCheck(ctx)
 			d.maybeReview(ctx)

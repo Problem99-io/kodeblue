@@ -67,6 +67,9 @@ type Agent interface {
 	// last one asked for.
 	Upgrade(m hubproto.OperatorMessage) hubproto.MessageReply
 	UpgradeStatus() *hubproto.UpgradeStatus
+	// SharedBlocksChanged is called after the hub sent a new list of the
+	// addresses other servers blocked (saved under SharedBlocksKey).
+	SharedBlocksChanged()
 }
 
 type Link struct {
@@ -327,6 +330,9 @@ func (l *Link) syncOnce(ctx context.Context) error {
 	if resp.Settings != nil {
 		l.saveSettings(resp.Settings)
 	}
+	if resp.SharedBlocks != nil {
+		l.saveSharedBlocks(resp.SharedBlocks)
+	}
 	l.mu.Lock()
 	for k, h := range pending {
 		l.hashes[k] = h
@@ -375,7 +381,8 @@ func (l *Link) status() hubproto.Status {
 		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
 		AcceptsUpgrades: l.cfg.Hub.AcceptUpgrades, Upgrade: l.agent.UpgradeStatus(),
-		Models: l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
+		AcceptsSharedBlocks: l.cfg.Hub.AcceptSharedBlocks,
+		Models:              l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
 	}
 	for _, a := range respond.ActionNames() {
 		s.Actions[a] = l.cfg.ActionRule(a)
@@ -391,7 +398,38 @@ func (l *Link) status() hubproto.Status {
 	if l.savedSettings != nil && *l.savedSettings != l.cfg.HubSettingsVersion {
 		s.SettingsSaved = *l.savedSettings
 	}
+	if s.AcceptsSharedBlocks {
+		s.SharedBlocksVersion = LoadSharedBlocks(l.st).Version
+	}
 	return s
+}
+
+// SharedBlocksKey holds the last list of shared blocks the hub sent.
+const SharedBlocksKey = "shared_blocks"
+
+// LoadSharedBlocks returns the last list of shared blocks the hub sent.
+func LoadSharedBlocks(st *store.Store) hubproto.SharedBlocks {
+	var sb hubproto.SharedBlocks
+	_ = json.Unmarshal([]byte(st.Get(SharedBlocksKey)), &sb)
+	return sb
+}
+
+// saveSharedBlocks keeps the hub's list of addresses other servers blocked
+// and hands it to the daemon, which blocks them under this server's own
+// policy. Nothing in it is trusted beyond being a list to check.
+func (l *Link) saveSharedBlocks(sb *hubproto.SharedBlocks) {
+	if !l.cfg.Hub.AcceptSharedBlocks || sb.Version == LoadSharedBlocks(l.st).Version {
+		return
+	}
+	if len(sb.Blocks) > hubproto.MaxSharedBlocks {
+		sb.Blocks = sb.Blocks[:hubproto.MaxSharedBlocks]
+	}
+	b, _ := json.Marshal(sb)
+	if err := l.st.Set(SharedBlocksKey, string(b)); err != nil {
+		l.log.Warn("could not save the fleet's shared blocks", "error", err)
+		return
+	}
+	l.agent.SharedBlocksChanged()
 }
 
 // saveSettings stores settings the hub sent and asks the daemon to restart
