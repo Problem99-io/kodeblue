@@ -2320,6 +2320,7 @@ async function vOverview(srv, body) {
           h("dt", null, "kodeblue"), h("dd", null, upgradeControls(srv, upCmds, () => { body.dataset.sig = ""; vOverview(srv, body); })),
           h("dt", null, "Last review"), h("dd", null, when(st.last_review_at)),
           h("dt", null, "Messages"), h("dd", null, !st.phase ? "—" : st.accepts_messages ? "accepted from the hub" : "disabled on the server"),
+          h("dt", null, "Shared blocks"), h("dd", null, sharedBlocksText(st)),
           h("dt", null, "Kernel"), h("dd", { class: "mono" }, st.kernel || "—")))),
         softwarePanel(srv, st.software),
         panel("Model spend today by purpose", h("div", { class: "bd" }, purposes.length ? h("dl", { class: "kv" }, purposes.map(([k, v]) => [h("dt", null, k), h("dd", null, usd(v))])) : h("div", { class: "faint" }, "Nothing spent today.")), null, "purple"),
@@ -2329,6 +2330,17 @@ async function vOverview(srv, body) {
         panel("Open incidents", h("div", { class: "bd flush" }, open.length ? incidentTable(srv, open) : h("div", { class: "empty" }, "No open incidents.")), h("a", { href: "#/s/" + enc(srv.id), class: "small" }, "Board"), "red"),
         panel("Latest activity", h("div", { class: "bd flush" }, journalList(jr.map(parse))), h("a", { href: `#/s/${enc(srv.id)}/activity`, class: "small" }, "All activity"), "yellow"))));
   sync(body, node);
+}
+
+// sharedBlocksText says what this server does when another server of the
+// fleet blocks an address.
+function sharedBlocksText(st) {
+  if (!st.phase) return "—";
+  if (!st.accepts_shared_blocks) return "not taken (older kodeblue, or hub.accept_shared_blocks = false on the server)";
+  const rule = (st.actions || {}).block_ip;
+  if (rule === "auto") return "blocked here automatically when another server blocks an address";
+  if (rule === "approve") return "each needs approval here (Activity) when another server blocks an address";
+  return "not applied: block_ip is off on this server";
 }
 
 // softwarePanel shows the daily software check: how up to date the server
@@ -2736,8 +2748,8 @@ async function vActivity(srv, body) {
   const actions = (l, p) => narrow ? h("div", { class: "pad pb" }, actionCards(l, p, srv.id, decs, again)) : actionTable(l, p, srv.id, decs, again);
   sync(body, h("div", { class: "stack" },
     pl.length ? panel(`Containment waiting for approval (${pl.length})`, h("div", { class: "bd flush" }, h("div", { class: "note pad" },
-      acceptsApprovals(srv.id) ? "Policy on this server is recommend: an agent asked for these. Approving runs the action on the server through its root helper, under the server's own policy."
-        : "Policy on this server is recommend: an agent asked for these. This server takes approvals on its own CLI only (older kodeblue, or hub.accept_approvals = false)."),
+      acceptsApprovals(srv.id) ? "Policy on this server is recommend: an agent asked for these, or another server of the fleet blocked them. Approving runs the action on the server through its root helper, under the server's own policy."
+        : "Policy on this server is recommend: an agent asked for these, or another server of the fleet blocked them. This server takes approvals on its own CLI only (older kodeblue, or hub.accept_approvals = false)."),
     actions(pl, true)), null, "orange") : null,
     panel("Containment actions taken", h("div", { class: "bd flush" }, acts.length ? actions(acts.map(parse)) : h("div", { class: "empty" }, "No containment actions.")), null, "red"),
     panel("Journal", h("div", { class: "bd flush" }, h("div", { class: "toolbar pad" }, q), journalList(jr.map(parse))), null, "blue")));
@@ -2746,7 +2758,8 @@ function actionTable(list, pending, srvId, decs, after) {
   return h("div", { class: "tbl-wrap" }, h("table", null,
     h("thead", null, h("tr", null, ["Id", "Action", "Target", "Why", pending ? "Decision" : "Result", "When"].map((t) => h("th", null, t)))),
     h("tbody", null, list.map((a) => h("tr", null,
-      h("td", { class: "mono small" }, a.id), h("td", null, h("span", { class: "badge" }, a.action), a.incident_id ? h("div", { class: "faint small" }, "incident #" + a.incident_id) : null),
+      h("td", { class: "mono small" }, a.id), h("td", null, h("span", { class: "badge" }, a.action), a.incident_id ? h("div", { class: "faint small" }, "incident #" + a.incident_id) : null,
+        fleetShared(a) ? h("div", { class: "faint small" }, "shared by the fleet") : null),
       h("td", { class: "mono small" }, Object.entries(a.params || {}).map(([k, v]) => k + "=" + v).join(" ")),
       h("td", { class: "small why" }, a.justification),
       h("td", { class: "small" }, pending ? approvalControls(srvId, a, decs, after) : [statusBadge(a.status), " ", h("span", { class: "muted" }, a.result || ""),
@@ -2754,10 +2767,14 @@ function actionTable(list, pending, srvId, decs, after) {
       h("td", { class: "nowrap small muted" }, ago(a.done_at && !String(a.done_at).startsWith("0001") ? a.done_at : a.requested_at)))))));
 }
 
+// fleetShared: the action is a block another server of the fleet made.
+const fleetShared = (a) => /^fleet(\+|$)/.test(a.requested_by || "");
+
 // actionCards is actionTable for the narrow task-panel side panel.
 function actionCards(list, pending, srvId, decs, after) {
   return h("div", { class: "acards" }, list.map((a) => h("div", { class: "acard" },
-    h("div", { class: "ahd" }, h("span", { class: "badge" + (pending ? " b-warn" : "") }, a.action), pending ? null : statusBadge(a.status), h("div", { class: "sp" }),
+    h("div", { class: "ahd" }, h("span", { class: "badge" + (pending ? " b-warn" : "") }, a.action), pending ? null : statusBadge(a.status),
+      fleetShared(a) ? h("span", { class: "faint small" }, "shared by the fleet") : null, h("div", { class: "sp" }),
       h("span", { class: "faint small" }, ago(a.done_at && !String(a.done_at).startsWith("0001") ? a.done_at : a.requested_at))),
     Object.keys(a.params || {}).length ? h("div", { class: "mono small atgt" }, Object.entries(a.params || {}).map(([k, v]) => k + "=" + v).join(" ")) : null,
     a.justification ? h("div", { class: "small muted" }, a.justification) : null,
@@ -2843,6 +2860,47 @@ async function vNotifications(srv, main) {
 }
 
 // ---------- settings ----------
+// sharedBlocksPanel turns sharing blocks across the fleet on or off, and
+// lists the addresses shared now.
+function sharedBlocksPanel() {
+  const on = h("input", { type: "checkbox", disabled: true });
+  const list = h("div", { class: "bd flush" }, h("div", { class: "empty" }, "Loading…"));
+  const msg = h("div", { class: "smsg", role: "status" });
+  const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  const paint = (v) => {
+    on.checked = !!v.enabled;
+    on.disabled = false;
+    sync(list, !v.enabled ? h("div", { class: "empty" }, "Sharing is off: each server keeps its blocks to itself.") :
+      v.blocks.length ? h("div", { class: "tbl-wrap" }, h("table", null,
+        h("thead", null, h("tr", null, ["Address", "Blocked on", "Why", "When"].map((t) => h("th", null, t)))),
+        h("tbody", null, v.blocks.slice(0, 100).map((b) => h("tr", null,
+          h("td", { class: "mono small" }, b.ip),
+          h("td", { class: "small" }, h("a", { href: "#/s/" + enc(b.server_id) + "/activity" }, b.server)),
+          h("td", { class: "small why" }, b.why || ""),
+          h("td", { class: "nowrap small muted" }, ago(b.at))))))) :
+      h("div", { class: "empty" }, `No server blocked a public address in the last ${v.days} days.`));
+  };
+  on.addEventListener("change", async () => {
+    on.disabled = true;
+    try {
+      paint(await api("PUT", "/api/settings/shared-blocks", { enabled: on.checked }));
+      say(on.checked ? "Sharing on: servers pick the list up on their next sync." : "Sharing off: blocks no longer shared are withdrawn where they still wait for approval.");
+    } catch (e) {
+      on.checked = !on.checked;
+      on.disabled = false;
+      if (e.status !== 401) say(e.status === 0 ? "Can't reach the hub." : e.message, true);
+    }
+  });
+  api("GET", "/api/settings/shared-blocks").then(paint).catch((e) => {
+    if (e.status === 401) return;
+    sync(list, h("div", { class: "empty" }, e.status === 404 ? "This hub does not share blocks yet." : "Could not load shared blocks: " + e.message));
+  });
+  return panel("Shared blocks", [h("div", { class: "bd stack" },
+    h("label", { class: "chk" }, on, h("span", null, "Share blocks across the fleet")),
+    h("div", { class: "note" }, "When a server blocks a public address, every other server blocks it too, under its own policy: automatically where block_ip runs without approval (contain), otherwise as a request to approve in its Activity. Protected and infrastructure addresses are never blocked, shared blocks use at most half of a server's hourly action limit, and a server takes them only with hub.accept_shared_blocks (on by default). Undoing a block on its server withdraws the requests still waiting elsewhere; blocks already in place stay until undone there."),
+    msg), list], null, "red");
+}
+
 async function vSettings(main) {
   const body = h("div", { class: "stack narrow" });
   main.append(h("div", { class: "toolbar" }, h("h1", null, "Settings")), body);
@@ -2899,6 +2957,7 @@ async function vSettings(main) {
         h("span", { class: "note" }, "Notifications below this severity are listed on the hub but not posted.")),
       h("div", { class: "btns" }, test, h("a", { class: "small", href: "#/notifications" }, "Notification history")),
       msg), null, "purple"),
+    sharedBlocksPanel(),
     panel("Hub", h("div", { class: "bd" }, h("dl", { class: "kv" },
       h("dt", null, "Signed in as"), h("dd", null, S.me ? S.me.name : "—"),
       h("dt", null, "Operators"), h("dd", null, h("code", null, "kodeblue-hub user add <name>")),

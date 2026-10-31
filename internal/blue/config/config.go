@@ -216,6 +216,13 @@ type Hub struct {
 	// [upgrade] release_url and must match its SHA256SUMS; downgrades are
 	// refused. Nothing upgrades without an operator asking.
 	AcceptUpgrades bool `toml:"accept_upgrades"`
+	// AcceptSharedBlocks takes the addresses other servers of the fleet
+	// blocked, which the hub relays, and blocks them here under this
+	// server's own block_ip rule: automatically where block_ip runs without
+	// asking (mode contain), otherwise as a request an operator approves.
+	// Protected and infrastructure addresses are never blocked, and shared
+	// blocks use at most half of max_actions_per_hour.
+	AcceptSharedBlocks bool `toml:"accept_shared_blocks"`
 }
 
 // Upgrade is where releases come from, for an upgrade a hub operator
@@ -259,7 +266,7 @@ func Default() Config {
 		Notify:   Notify{SlackWebhookFile: "/etc/kodeblue/slack.webhook", MinSeverity: "high", AgentMessagesPerHour: 20},
 		Engine:   Engine{},
 		CVEFeed:  CVEFeed{Enabled: true, NVD: true, KEV: true},
-		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true, AcceptUpgrades: true},
+		Hub:      Hub{KeyFile: "/etc/kodeblue/hub.key", SyncSeconds: 15, AcceptMessages: true, ShareTranscripts: true, MessagesPerHour: 20, AcceptApprovals: true, AcceptSettings: true, AcceptLearning: true, AcceptUpgrades: true, AcceptSharedBlocks: true},
 		Upgrade:  Upgrade{ReleaseURL: upgrade.DefaultReleaseURL},
 	}
 }

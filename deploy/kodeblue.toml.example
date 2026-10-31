@@ -107,6 +107,9 @@ agent_messages_per_hour = 20     # cap on the agents' notify_slack tool
 #                                        # rules from the hub console; rules can only tighten [response] above
 # accept_learning = true                 # operators can run the learner or relearn the baseline from the hub
 # accept_upgrades = true                 # operators can start an upgrade to the hub's version (Update); never automatic
+# accept_shared_blocks = true            # block addresses other servers of the fleet blocked, under block_ip's rule here:
+#                                        # automatic in contain mode, an approval request otherwise; never protected
+#                                        # or infrastructure addresses, and at most half of max_actions_per_hour
 
 # [upgrade] — where `kodeblue upgrade` and Update in the hub get releases from.
 # The release must match that release's SHA256SUMS; downgrades are refused.

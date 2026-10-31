@@ -83,6 +83,8 @@ type Server struct {
 
 	decideMu sync.Mutex // handleDecision: check for an open ruling and queue one
 
+	blocks blockCache // the fleet's shared blocks (sharedblocks.go)
+
 	deviceOnce sync.Once
 	devKey     []byte
 }
@@ -161,6 +163,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
 	s.slackRoutes()
 	s.settingsRoutes()
+	s.sharedBlockRoutes()
 
 	// Console.
 	sub, _ := fs.Sub(webFS, "web")
@@ -296,6 +299,10 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, id string) {
 	if added {
 		s.wakeSlack()
 	}
+	// New containment actions may be blocks to share: read them again.
+	if slices.ContainsFunc(req.Records, func(r hubproto.Record) bool { return r.Kind == "action" }) {
+		s.forgetFleetBlocks()
+	}
 	if err != nil {
 		s.log.Error("apply sync", "server", id, "error", err)
 		writeErr(w, http.StatusInternalServerError, "store failed")
@@ -306,6 +313,12 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, id string) {
 	if req.Status.AcceptsSettings {
 		if eff := s.st.EffectiveSettings(id); eff.Version != req.Status.SettingsVersion {
 			resp.Settings = eff
+		}
+	}
+	// So do the fleet's shared blocks, when the server takes them.
+	if req.Status.AcceptsSharedBlocks {
+		if sb := s.SharedBlocksFor(id); sb.Version != req.Status.SharedBlocksVersion {
+			resp.SharedBlocks = sb
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -740,6 +753,7 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request, c *o
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.forgetFleetBlocks() // its blocks are shared no more
 	s.st.Audit(c.user.Name, "server.delete", srv.ID, srv.Name, c.ip)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -771,6 +785,7 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request, c *opCtx) 
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.forgetFleetBlocks() // its blocks are shared no more
 	s.st.Audit(c.user.Name, "server.revoke", srv.ID, srv.Name, c.ip)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
