@@ -91,3 +91,27 @@ test('first-use board disables archives and tolerates a missing redraw handler',
   assert.equal(run('main.children[0].children.find(x=>x.attrs?.class?.includes("arch-t")).attrs.disabled'),true);
   run('main.children[0].children.find(x=>x.attrs?.class?.includes("arch-t")).attrs.on.click()');
 });
+test('a message is not blocked when the server list could not load', async () => {
+  const {run} = runtime();
+  run(`P.st = {isNew:true}; P.newSrv = {value:'s1'}; S.servers = []; P.key = 'k'; P.comp = {setNote:(text) => globalThis.note=text, send:{}};
+    api = async (method, path) => { globalThis.sent = path; throw Object.assign(Error('offline'), {status: 0}); };`);
+  await run('sendMessage("Investigate").catch(() => {})');
+  assert.equal(run('sent'), '/api/servers/s1/messages');
+});
+test('the fleet settings form does not claim values come from a server', () => {
+  const {run} = runtime();
+  run(`globalThis.tf = tuningForm([{key:'budget', kind:'usd', group:'Budget', label:'Daily budget'}], {budget:'5'});`);
+  const label = (reported) => run(`tf.paint(() => "each server's own", ${reported}); (function find(n) { if (n && n.attrs && /frow-now/.test(n.attrs.class || '')) return n; for (const c of (n && n.children) || []) { const r = find(c); if (r) return r; } })(tf.el).textContent`);
+  assert.equal(label('null'), '');
+  assert.equal(label('{}'), 'Not reported');
+  assert.equal(label('{budget:"3"}'), 'Running: $3');
+});
+test('notification empty states cover Slack and Telegram', async () => {
+  const {run} = runtime();
+  run(`api = async (m, path) => path.endsWith('/telegram') ? {configured:true} : {configured:false};`);
+  assert.equal(await run('deliveryConfigured()'), true);
+  run(`api = async () => ({configured:false});`);
+  assert.equal(await run('deliveryConfigured()'), false);
+  run(`api = async () => { throw Error('forbidden'); };`);
+  assert.equal(await run('deliveryConfigured()'), null);
+});

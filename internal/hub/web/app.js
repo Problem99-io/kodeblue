@@ -1506,7 +1506,7 @@ async function sendMessage(text) {
     else body.incident_id = Number(st.inc.id);
   } else return;
   const target = S.servers.find((x) => x.id === srv);
-  if (!target || !target.enrolled || target.revoked || target.status?.accepts_messages === false) { P.comp.setNote("This server cannot receive messages. Check its connection and settings.", true); return; }
+  if (target && (!target.enrolled || target.revoked || target.status?.accepts_messages === false)) { P.comp.setNote("This server cannot receive messages. Check its connection and settings.", true); return; }
   P.busy = true; P.comp.send.disabled = true; P.comp.setNote("sending…");
   const key = P.key;
   try {
@@ -3144,6 +3144,13 @@ async function vTelegramSettings(main) {
   const test = h("button", { class: "btn", type: "button" }, ic("send", 12), "Send test message");
   const msg = h("div", { class: "smsg", role: "status" });
   const say = (text, bad) => { msg.textContent = text; msg.className = "smsg " + (bad ? "bad" : "ok"); };
+  const dirty = () => {
+    if (url.value || chat.value.trim() !== ((cur && cur.chat_id) || "")) { dirtyForms.add(msg); msg.textContent = "Unsaved changes"; }
+    else { dirtyForms.delete(msg); msg.textContent = ""; }
+    msg.className = "smsg";
+  };
+  url.addEventListener("input", dirty);
+  chat.addEventListener("input", dirty);
   let cur = null;
   const paint = (s) => {
     cur = s;
@@ -3165,12 +3172,13 @@ async function vTelegramSettings(main) {
     if (!chat.value.trim() || (!v && !(cur && cur.configured))) { say("Enter a bot token and chat ID first.", true); url.focus(); return; }
     paint(await api("PUT", "/api/settings/telegram", { ...(v ? { bot_token: v } : {}), chat_id: chat.value.trim() }));
     url.value = "";
+    dirtyForms.delete(msg);
     say("Telegram saved. Use “Send test message” to check it.");
   }));
   url.addEventListener("keydown", (e) => { if (e.key === "Enter") save.click(); });
   clr.addEventListener("click", async () => {
     if (!(await ask("Clear Telegram bot token", "Remove the stored bot token? kodeblue stops posting to Telegram until a new one is saved; notifications are still listed on the hub.", "Clear", true))) return;
-    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); say("Telegram cleared."); });
+    busy(clr, async () => { paint(await api("PUT", "/api/settings/telegram", { bot_token: "", chat_id: "" })); url.value = ""; dirtyForms.delete(msg); say("Telegram cleared."); });
   });
   sev.addEventListener("change", () => busy(sev, async () => { paint(await api("PUT", "/api/settings/telegram", { min_severity: sev.value })); say("Minimum severity set to " + sev.value + "."); }));
   test.addEventListener("click", () => busy(test, async () => {
@@ -3650,7 +3658,7 @@ function tuningForm(defs, vals) {
         if (f.el.tagName === "SELECT") f.el.options[0].textContent = hv;
         else f.el.placeholder = hv;
         const r = reported && reported[f.t.key];
-        f.now.textContent = r != null && r !== "" ? "Running: " + fmtTuning(f.t, r) : reported ? "Not reported" : "Inherited from server";
+        f.now.textContent = !reported ? "" : r != null && r !== "" ? "Running: " + fmtTuning(f.t, r) : "Not reported";
       }
     },
     values() {
