@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
       -ldflags "-s -w -X github.com/Problem99-io/kodeblue/internal/blue/hubproto.Version=$VERSION" \
       -o /out/kodeblue-hub ./cmd/kodeblue-hub
 
-FROM alpine:3.22
+FROM alpine:3.24
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="kodeblue-hub" \
       org.opencontainers.image.description="kodeblue hub: one console for a fleet of kodeblue servers" \
