@@ -65,6 +65,28 @@ var errRedirect = errors.New("the endpoint redirected to another host; use the f
 // check), following redirects only within the same scheme and host, and
 // connecting only to addresses endpointAddrErr allows.
 func endpointClient(allow []netip.Prefix) *http.Client {
+	return &http.Client{Transport: endpointTransport(allow, 15*time.Second), Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return errors.New("the endpoint redirected too many times")
+			}
+			if req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host {
+				return errRedirect
+			}
+			return nil
+		}}
+}
+
+// proxyClient is the model proxy's client: the same guarded connections,
+// but no overall time limit (the request's context bounds a streamed
+// answer), a model's time to its first byte, and no redirects at all, which
+// would replay a server's request somewhere else.
+func proxyClient(allow []netip.Prefix) *http.Client {
+	return &http.Client{Transport: endpointTransport(allow, 10*time.Minute),
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}
+}
+
+func endpointTransport(allow []netip.Prefix, headerTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
 		// Control sees the resolved address of every connection attempt, so
 		// a name that resolves (or rebinds) to a refused address fails too.
@@ -75,24 +97,14 @@ func endpointClient(allow []netip.Prefix) *http.Client {
 			}
 			return endpointAddrErr(ap.Addr(), allow)
 		}}
-	tr := &http.Transport{
+	return &http.Transport{
 		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
-	return &http.Client{Transport: tr, Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return errors.New("the endpoint redirected too many times")
-			}
-			if req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host {
-				return errRedirect
-			}
-			return nil
-		}}
 }

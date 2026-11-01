@@ -321,7 +321,7 @@ The password is read from stdin (without echo on a terminal). `user add` for an 
 
 ### From the console
 
-1. Once: in **Settings**, **Add connection** and paste your model's API key. When no default model is set yet, the hub asks which model every agent should use. New servers receive it, with its key, when they enroll, so the install asks nothing. Without one, servers watch with their deterministic detection, and their learning waits until you add a model.
+1. Once: in **Settings**, **Add connection** and paste your model's API key. When no default model is set yet, the hub asks which model every agent should use. New servers use it through the hub, which keeps the key, so the install asks nothing. Without one, servers watch with their deterministic detection, and their learning waits until you add a model.
 2. **Add server**, give it a name. The hub shows a one-line command with a single-use token (`kbe_…`), valid for 2 hours by default (`--enroll-ttl`).
 3. Run the command on the server, as root or as a user who can `sudo` (it uses `sudo` only when not root):
 
@@ -474,10 +474,30 @@ Without a hub, unpack the new release and run `sudo ./kodeblue/deploy/install.sh
 An upgrade:
 - opens a journaled 10-minute maintenance window first, so kodeblue replacing its own binaries is not reported as tampering
 - replaces the binaries and the systemd units, and restarts kodeblue
-- keeps `/etc/kodeblue/kodeblue.toml`, the keys and all state (`--mode` is not applied to an existing config)
+- keeps `/etc/kodeblue/kodeblue.toml`, the keys and all state (`--mode` is not applied to an existing config), except model keys on a server with a hub: those move to the hub (`kodeblue move-keys`, below)
 - migrates kodeblue's database on start and refreshes the bundled skills; skills the agents wrote are kept
 
 Servers never upgrade themselves. The hub shows each server's version, and marks the ones older than the hub with "update available".
+
+### Model keys move to the hub
+
+On a server with a hub, every install and upgrade runs `kodeblue move-keys` as root, and so can you (`sudo kodeblue move-keys`). It:
+- hands the server's own model endpoint and key (`[inference]` `base_url` and `api_key_file` or `api_key`) to the hub, which takes them over as a connection for that server, named after it, and picks the same models on it: the default model, and each role whose model differs from it (the others follow the default, also when you change it on the hub later). When the hub already has a connection with that endpoint and key, such as the default one an older enrollment copied here, it uses that one.
+- hands over a key the server holds without using it too: a different key in `/etc/kodeblue/inference.key` next to an inline `api_key`, or a key file an older enrollment left with no endpoint. When no connection has that key, the hub keeps it aside (Settings, **Model connections**, **Keys taken from servers**), where an operator can make it a connection, only to the endpoint the server named next to it, or delete it. The console never shows the key.
+- then removes every copy on the server: `/etc/kodeblue/inference.key` is emptied, an inline `api_key` is deleted from `kodeblue.toml`, and `base_url` is commented out. Hub settings an older hub saved on the server with connection keys are replaced, without keys, on kodeblue's first sync after the upgrade (keys of connections marked **Servers call this endpoint themselves** stay, as chosen on the hub).
+
+From then on the server calls those models through the hub, and root on it finds no model key.
+
+Keys move only to a hub at least as new as the server: `move-keys` first asks the hub its version. Upgrade the hub first. A server upgraded before its hub keeps its keys, and moves them by itself once the hub is upgraded: every sync tells the server the hub's version, and when it has caught up, kodeblue asks its root helper to run `kodeblue move-keys` (in the unit `kodeblue-move-keys`; `journalctl -u kodeblue-move-keys`). It asks once for each pair of hub and server versions. This needs systemd, as hub-started upgrades do; elsewhere, run `sudo kodeblue move-keys` after upgrading the hub.
+
+Nothing changes when the hub cannot take the key. These keep it, and the command says why:
+- a hub older than the server (until it is upgraded, above)
+- an endpoint on the server itself (`127.0.0.1`, `localhost`): the hub cannot reach it
+- an endpoint the hub cannot reach or the key does not work on: the hub checks with a model list before it takes the key (why it failed goes to the hub's log, not to the server)
+- a key in an environment variable, which kodeblue cannot remove
+- `[hub] accept_settings = false`, where the hub cannot give the server its models
+
+A server may move one endpoint of its own to the hub, the hub keeps at most 4 unused keys per server (64 in all), and at most five attempts an hour count against a server; each move is in the audit log (`server.keys_moved`, `server.keys_kept`). Rotate a moved key at the provider afterwards: it was on the server.
 
 ## Backups
 

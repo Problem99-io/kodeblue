@@ -80,7 +80,14 @@ type Server struct {
 	slackReset        chan struct{}
 	telegramReset     chan struct{}
 	models            modelCache
+	proxy             *http.Client   // the model proxy's client (modelproxy.go)
+	modelCalls        map[string]int // server id -> model calls in flight
+	grants            grantCache
+	keys              keysCache
+	applied           sync.Map // server id -> settings version it last reported applied
 	telegramTestLimit *limiter
+	moveLimit         *limiter   // move-keys attempts per server
+	moveMu            sync.Mutex // one move-keys at a time
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -102,7 +109,10 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 		loginUser: newLimiter(loginMaxPerUser, 15*time.Minute), hashCheck: make(chan struct{}, max(1, runtime.NumCPU()/2)), knownCheck: make(chan struct{}, 1),
 		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1), telegramWake: make(chan struct{}, 1), slackReset: make(chan struct{}, 1), telegramReset: make(chan struct{}, 1)}
 	s.models.client = endpointClient(opt.EndpointAllow)
+	s.proxy = proxyClient(opt.EndpointAllow)
+	s.modelCalls = map[string]int{}
 	s.telegramTestLimit = newLimiter(3, time.Minute)
+	s.moveLimit = newLimiter(5, time.Hour)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -164,6 +174,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
+	s.modelRoutes()
+	s.moveKeysRoutes()
 	s.slackRoutes()
 	s.settingsRoutes()
 
@@ -279,9 +291,13 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	s.st.Audit("server:"+srv.Name, "enroll", srv.ID, "hostname "+trim(req.Hostname, 100), ip)
 	s.log.Info("server enrolled", "server", srv.ID, "name", srv.Name, "ip", ip)
 	resp := hubproto.EnrollResponse{ServerID: srv.ID, Name: srv.Name, APIKey: key}
-	// The fleet's default model and its connection become the server's own
-	// endpoint, so it has models before its first settings sync.
-	if ref, conn, ok := s.st.fleetDefaultModel(); ok {
+	if req.ModelProxy {
+		s.st.markModelProxy(srv.ID)
+	}
+	// An older server makes the fleet's default model and its connection its
+	// own endpoint, so it has models before its first settings sync. One that
+	// uses the model proxy gets them with that sync instead, and no key.
+	if ref, conn, ok := s.st.fleetDefaultModel(); ok && !s.usesProxy(srv.ID, req.ModelProxy) {
 		resp.InferenceKey = conn.APIKey
 		resp.Inference = &hubproto.InferenceDefaults{BaseURL: conn.BaseURL, Provider: ref.Provider, Model: ref.Model}
 		if ref.Provider == "" {
@@ -306,11 +322,16 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, id string) {
 		writeErr(w, http.StatusInternalServerError, "store failed")
 		return
 	}
-	resp := hubproto.SyncResponse{OK: true, ServerTime: time.Now().UTC(), Pending: s.st.QueuedCount(id)}
+	resp := hubproto.SyncResponse{OK: true, ServerTime: time.Now().UTC(), Pending: s.st.QueuedCount(id), HubVersion: hubproto.Version}
+	if req.Status.ModelProxy {
+		s.st.markModelProxy(id)
+	}
+	s.applied.Store(id, req.Status.SettingsVersion)
 	// Settings travel only when the server takes them and has another version.
 	if req.Status.AcceptsSettings {
-		if eff := s.st.EffectiveSettings(id); eff.Version != req.Status.SettingsVersion {
+		if eff := s.settingsFor(id, req.Status.ModelProxy); eff.Version != req.Status.SettingsVersion {
 			resp.Settings = eff
+			s.st.recordSent(id, eff, req.Status.SettingsVersion)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -664,18 +685,25 @@ type fleetRow struct {
 	Host
 	Online bool   `json:"online"`
 	Counts Counts `json:"counts"`
+	// ModelKeys is why this server holds a key of one of the hub's model
+	// connections (keysOld, keysDirect, keysStale), or empty.
+	ModelKeys string `json:"model_keys,omitempty"`
+}
+
+func (s *Server) fleetRow(h Host) fleetRow {
+	return fleetRow{Host: h, Online: online(h), Counts: s.st.Counts(h.ID), ModelKeys: s.modelKeys(h)}
 }
 
 func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request, c *opCtx) {
 	out := []fleetRow{}
 	for _, srv := range s.st.Servers() {
-		out = append(out, fleetRow{Host: srv, Online: online(srv), Counts: s.st.Counts(srv.ID)})
+		out = append(out, s.fleetRow(srv))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func online(srv Host) bool {
-	return !srv.Revoked && srv.Enrolled && time.Since(srv.LastSeen) < 2*time.Minute
+	return !srv.Revoked && srv.Enrolled && time.Since(srv.LastSeen) < offlineAfter
 }
 
 func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request, c *opCtx) {
@@ -713,7 +741,7 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, c *opCtx) 
 	if srv == nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, fleetRow{Host: *srv, Online: online(*srv), Counts: s.st.Counts(srv.ID)})
+	writeJSON(w, http.StatusOK, s.fleetRow(*srv))
 }
 
 func (s *Server) handleRenameServer(w http.ResponseWriter, r *http.Request, c *opCtx) {

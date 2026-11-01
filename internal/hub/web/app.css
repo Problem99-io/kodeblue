@@ -473,6 +473,8 @@ details.fleet-i .ftext { margin-top: 6px; max-height: 14rem; overflow: auto; whi
 .callout.warn .lbl { color: rgb(var(--yellow)); }
 .callout.info { border-color: rgb(var(--blue) / .25); background: rgb(var(--blue) / .06); }
 .callout.info .lbl { color: rgb(var(--blue)); }
+.untrusted { display: flex; gap: 6px; align-items: flex-start; margin: 6px 0 10px; font-size: 11.5px; line-height: 1.45; color: rgb(var(--yellow)); }
+.untrusted .ic { flex: none; margin-top: 2px; }
 .savebar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 0; background: rgb(var(--bg)); border-top: 1px solid rgb(var(--line)); }
 .savebar .smsg { min-height: 0; }
 

@@ -1113,6 +1113,25 @@ func TestSettingsRestartWaitsForGap(t *testing.T) {
 	}
 }
 
+// The first hub settings apply after firstSettingsGap, not the whole gap: a
+// server enrolled on the model proxy has no models until then.
+func TestFirstSettingsRestartSooner(t *testing.T) {
+	d, _, _, _ := newTestDaemon(t)
+	d.restartGap, d.cfg.HubSettingsVersion = time.Hour, ""
+	d.ApplySettings()
+	if d.restartDue() {
+		t.Fatal("restart due right after the start")
+	}
+	d.started = time.Now().Add(-firstSettingsGap - time.Second)
+	if !d.restartDue() {
+		t.Fatal("first settings wait for the whole gap")
+	}
+	d.cfg.HubSettingsVersion = "v1"
+	if d.restartDue() {
+		t.Fatal("later settings skip the gap")
+	}
+}
+
 // A change of the response mode, above all to contain from the hub, is
 // announced once; a first start on the server's own mode is not.
 func TestAnnounceMode(t *testing.T) {
