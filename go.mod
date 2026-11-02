@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	golang.org/x/sys v0.49.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
