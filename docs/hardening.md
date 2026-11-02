@@ -16,11 +16,11 @@ Addresses in the examples:
 
 | From | To | Why |
 |---|---|---|
-| each server | hub, HTTPS | enrollment, sync every 15 s, message long-poll, installer downloads |
+| each server | hub, HTTPS | enrollment, sync every 15 s, message long-poll, installer downloads, model calls for hub connections (the model proxy) |
 | operators' browsers | hub, HTTPS | the console |
-| each server | its model endpoint, HTTPS | triage and agent sessions |
+| server with its own `[inference]` endpoint, or a hub connection on loopback | that model endpoint | triage and agent sessions |
 | hub | Slack, HTTPS | posting notifications |
-| hub | model connections, HTTPS | listing models and the connection test in **Settings** |
+| hub | model connections, HTTPS | servers' model calls (the model proxy), listing models and the connection test in **Settings** |
 | server (`[notify] direct = true`, or no hub) | Slack, HTTPS | posting notifications |
 
 The hub never connects to a server, and nothing on a server listens for the hub. Servers need no inbound rule for kodeblue. Servers honor `HTTPS_PROXY` for their connection to the hub.
@@ -189,7 +189,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/hub.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/hub.example.com/privkey.pem;
 
-    client_max_body_size 20m;
+    client_max_body_size 40m;
     proxy_read_timeout   90s;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $remote_addr;
@@ -198,6 +198,11 @@ server {
     location ~ ^/(api/agent/v1/|dist/|install\.sh$) {
         allow 198.51.100.0/24;
         deny  all;
+        # Model calls go through here (the model proxy): a model may think
+        # for minutes before it answers, and streamed answers must not wait
+        # in a buffer.
+        proxy_read_timeout 16m;
+        proxy_buffering    off;
         proxy_pass http://127.0.0.1:8080;
     }
 
@@ -209,6 +214,8 @@ server {
     }
 }
 ```
+
+Servers' model calls pass through the proxy too (requests up to 32 MB, answers up to 15 minutes, streamed). Caddy needs nothing more: it passes streamed answers on at once and sets no read timeout. For nginx, keep `client_max_body_size` above 32m and give the agent API a long `proxy_read_timeout` with `proxy_buffering off`, as above; with the 60 s default, long model calls fail with 504.
 
 `--console-allow` limits only the console and operator API. Limiting which addresses reach the agent API and the installer still takes the firewall or the proxy.
 
@@ -389,7 +396,7 @@ Sign in at `https://10.66.0.1:8443` from a laptop peer. **Add server** prints a 
 f=$(mktemp) && r=$([ "$(id -u)" = 0 ] || echo sudo) && { curl -fsSL --proto =https --proto-redir =https -k --pinnedpubkey sha256//… -o "$f" https://10.66.0.1:8443/install.sh && echo "<sha256>  $f" | sha256sum -c - && printf '%s\n' kbe_… | $r sh "$f" --hub https://10.66.0.1:8443 --pin sha256//… --token-file -; s=$?; rm -f "$f"; (exit "$s"); }
 ```
 
-Run it on a server whose tunnel is up. Each server still reaches its model endpoint directly, outside the tunnel, unless you route that through a private network too.
+Run it on a server whose tunnel is up. Model calls for hub connections go to the hub, inside the tunnel. A server with its own `[inference]` endpoint still reaches it directly, outside the tunnel, unless you route that through a private network too.
 
 ### Tailscale or Headscale
 
@@ -519,9 +526,9 @@ sudo stat -c '%U:%G %a %n' /etc/kodeblue /etc/kodeblue/* /var/lib/kodeblue /var/
 | `/etc/kodeblue/kodeblue.toml`, `inference.key`, `hub.key`, `slack.webhook` | `root:kodeblue 640` |
 | `/var/lib/kodeblue` | `kodeblue:kodeblue 750` |
 | `/var/lib/kodeblue-respond` | `root:kodeblue 750` (root helper state: action journal, quarantined files, `ssh-keys/` backups; beside the kodeblue-owned state dir so the kodeblue user cannot replace it) |
-| `/var/lib/kodeblue/hub-settings.json` (model connections and keys from the hub) | `kodeblue 600` |
+| `/var/lib/kodeblue/hub-settings.json` (settings from the hub; model keys only from a hub older than the model proxy) | `kodeblue 600` |
 
-Do not add people to the `kodeblue` group. Members can read the server's hub key and model key.
+Do not add people to the `kodeblue` group. Members can read the server's hub key, and its own model key if it has one.
 
 ### Budget
 
@@ -542,19 +549,25 @@ Without a reported cost or these prices, calls count as $0 and the daily budget 
 | Destination | What | How to keep it in |
 |---|---|---|
 | model endpoint | finding details and evidence, the server profile, and in agent sessions the output of read-only tools: file contents (secret paths are refused), log lines, process and network lists, package data | use a self-hosted OpenAI-compatible endpoint on your network (vLLM, Ollama, LiteLLM), and set `accept_settings = false` so the hub cannot repoint the server; or run without a model |
-| hub | status, incidents, findings, monitors, allow rules, journal, containment actions and requests, reports, skills, definitions, notifications; agent transcripts unless `share_transcripts = false` | `share_transcripts = false`, or no hub |
+| hub | status, incidents, findings, monitors, allow rules, journal, containment actions and requests, reports, skills, definitions, notifications; agent transcripts unless `share_transcripts = false`; model calls for hub connections, in transit (the hub passes them on and keeps none of it) | `share_transcripts = false`; a server's own `[inference]` endpoint with `accept_settings = false`; or no hub |
 | Slack | notification text (escaped, links disabled) | do not configure Slack |
 
 ## Model keys
 
-- **Where they live.** Model connection keys are stored in the hub database (`hub.db`, mode 0600 in a 0700 directory) and are never shown back in the console. A server receives only the connections its agent roles use, with their keys, and keeps them in `/var/lib/kodeblue/hub-settings.json` (0600). The fleet's default key is written to `/etc/kodeblue/inference.key` at enrollment. A server's own key, if you set one, stays in `/etc/kodeblue/inference.key`.
-- **Every server that uses a connection holds its key.** A compromised server exposes the keys of the connections its roles use.
+- **Where they live.** Model connection keys are stored in the hub database (`hub.db`, mode 0600 in a 0700 directory) and are never shown back in the console. They stay there: servers call hub connections through the hub's model proxy, which adds the key. A server's own key, if you set one with `kodeblue inference`, stays in `/etc/kodeblue/inference.key`.
+- **What a compromised server gets.** No hub connection key. Its hub key lets it call, through the hub, only the models the hub picked for it, at most 8 calls at once, until you **Revoke** it, which ends its model access along with everything else. The spend a server reports is its own figure, which a compromised server can fake, and the hub does not meter these calls: keep the spend limit at the provider.
+- **How a server calls the proxy.** The daemon runs a forwarder on `127.0.0.1` that only its own triage and agent engine can use (a token handed to them at start, which changes on every restart). The forwarder adds the server's hub key; the hub checks that the connection and model are ones it picked for that server and adds the connection's key. The engine never sees either key.
+- **What the hub passes on.** Exactly one `model` field, naming a model the hub picked for that server, and only the fields a chat completion needs (messages, tools, sampling and caching options). A request with any other field, such as OpenRouter's `models` fallback list or `provider` routing, or with `model` twice or in another case, is refused, and the request is re-encoded, so the endpoint reads what the hub checked. No query string is passed on except the catalog's `provider`.
+- **Servers from before the model proxy** still receive their connections' keys, as before, until they are updated: the console marks them **holds model keys**, and the Servers page lists them. The hub decides this, not the server: once a server has used the proxy, the hub remembers it and never sends it a key again, whatever it later claims. When none is listed, stop key delivery for good with `echo off | kodeblue-hub fleet set model-keys` (an older server that is left then loses its hub models until it is updated), and rotate every connection's key at the provider, because the old keys were on those servers.
+- **Keys move off servers on upgrade.** Installing or upgrading a server with a hub runs `kodeblue move-keys` as root: the server's own endpoint key, and any other key in `/etc/kodeblue/inference.key`, go to the hub (a connection for that server, the existing one with the same key, or kept aside for an operator when no connection has it), and every copy on the server is removed. Keys go only to a hub at least as new as the server; a server upgraded first moves them once the hub catches up, through its root helper. See [deploy.md](deploy.md#model-keys-move-to-the-hub) for what it changes and when a key stays. The hub checks it can use the endpoint before it takes a key, and a server may create one connection this way, so a server cannot fill the hub with endpoints or use it to probe addresses for long (five attempts an hour). A kept key never leaves the hub: an operator can only make it a connection to the host the server named next to it, or delete it. kodeblue also reports a fingerprint of its key file (the first 16 hex digits of the key's SHA-256, which does not reveal it); while it matches one of the hub's connection keys, the console marks the server **holds model keys**. Rotate moved keys at the provider: they were on the servers.
+- **Models only servers can reach.** A connection on loopback (such as `http://127.0.0.1:11434`, a model on every server) is one the hub cannot reach, so servers keep calling it themselves and receive it as before; its key is whatever the local model expects. For an endpoint the hub cannot reach but the servers can, such as a gateway on their private network, tick **Servers call this endpoint themselves** on the connection. Its key then goes to every server that uses it, where root can read it, so the console asks for the key again before it marks a connection that way; a stolen console session cannot hand a stored key out by ticking the box. `model-keys off` does not apply to these: sending their key is the choice you made.
 - **Least privilege.** Create a dedicated key for kodeblue at the provider, limited to inference (no admin, billing or fine-tuning scope) and, where the provider allows it, to the models you picked.
 - **Limits.** Set a monthly spend limit and, where available, an expiry on each key at the provider. kodeblue's own budget is a second line, not a substitute.
-- **Separate keys per risk.** Use different connections (and keys) for groups of servers with different exposure, and pick models per server in its **Settings** tab, so one leaked key does not cover the fleet.
+- **Separate keys per risk.** With the model proxy a server never holds a connection's key, but a leak from the hub covers every server that uses the connection. Use different connections (and keys) for groups of servers with different exposure where that matters, and pick models per server in its **Settings** tab.
 - **A key stays with its endpoint.** The console never shows a stored key, and it never moves one to another endpoint: changing a connection's scheme, host or port needs the key pasted again. The audit log records every URL change.
-- **What the hub calls.** The hub calls model endpoints itself only to test a connection and list models, and posts to the Slack webhook. All of these go through the same guard. It refuses loopback, link-local and cloud-metadata addresses unless `--endpoint-allow` lists them ([hub.md](hub.md#connection-and-security-model)), so an operator cannot point it at the hub host's own services or the cloud metadata service. Leave `--endpoint-allow` unset unless a model gateway runs on the hub host.
-- **Rotate.** Create the new key at the provider, paste it into the connection in **Settings**, and revoke the old key once servers have synced (the server's **Settings** tab shows whether it applied the change). Servers with `accept_settings = false` keep their own key: run `sudo kodeblue inference --key-file -` on each, which asks for the new key, stores it and restarts kodeblue. Rotate the fleet default with `kodeblue-hub fleet set inference-key` (value on stdin).
+- **What the hub calls.** The hub calls model endpoints to pass on servers' model calls, to test a connection and to list models, and posts to the Slack webhook. All of these go through the same guard. It refuses loopback, link-local and cloud-metadata addresses unless `--endpoint-allow` lists them ([hub.md](hub.md#connection-and-security-model)), so an operator cannot point it at the hub host's own services or the cloud metadata service. Leave `--endpoint-allow` unset unless a model gateway runs on the hub host.
+- **Changing models.** A server applies new settings only when it restarts, once its agent sessions end. Until it reports the new version, the proxy also allows the models of the settings version it runs (the hub keeps the last five it sent each server), so changing a model on the hub does not cut off a running investigation.
+- **Rotate.** Create the new key at the provider, paste it into the connection in **Settings**, and revoke the old key. Servers on the model proxy use the new key at once; servers from before it get it with their next sync (their **Settings** tab shows whether they applied the change). Servers with `accept_settings = false` keep their own key: run `sudo kodeblue inference --key-file -` on each, which asks for the new key, stores it and restarts kodeblue. Rotate the fleet default with `kodeblue-hub fleet set inference-key` (value on stdin).
 
 ## Keeping kodeblue itself healthy
 
@@ -570,7 +583,8 @@ The install command the console prints pins the sha256 of the hub's `install.sh`
 - **Coming back up.** The unit (`deploy/kodeblue.service`) brings kodeblue back from whatever takes it down, with no limit on the number of restarts (`StartLimitIntervalSec=0`): a crash, a kill or the OOM killer (`Restart=always`, 5 seconds later), and a hang. kodeblue pings the systemd watchdog (`WatchdogSec=2min`) only while its main loop keeps sweeping; when the loop misses its deadline (10 minutes past its next sweep, longer while a triage batch or the learner runs), it journals `watchdog.stalled`, systemd sends `SIGABRT` (every goroutine's stack goes to `journalctl -u kodeblue`) and starts it again. `OOMScoreAdjust=-900` makes it one of the last processes the kernel kills when memory runs out, and starting kodeblue also starts its containment socket. It starts at boot. A deliberate `systemctl stop` is not undone: see *Stopped for good*.
 - **Stuck sensors.** A sensor whose read does not return within 60 seconds (hung storage, a dead network filesystem, a watched path made to block) is left behind: the sweep, the other sensors and the monitors keep running, and that sensor is skipped until its read returns, when the next sweep uses its late result. A sensor stuck for 5 minutes raises a `kodeblue.sensor_stuck` finding, because it is blind until then.
 - **Monitoring gaps.** kodeblue writes a heartbeat. If it was not running for 10 minutes or more, it raises a finding on the next start ("kodeblue was not running for …").
-- **Stopped for good.** A gap finding needs kodeblue to start again. To notice a server whose kodeblue stays down, watch it from outside: the console's **Servers** view marks a server offline after 2 minutes without a sync, but the hub does not post that to Slack. Add an external check, for example `systemctl is-active kodeblue` from your existing monitoring, or alert on the hub's `GET /healthz` and on servers going offline.
+- **Stopped for good.** A gap finding needs kodeblue to start again. To notice a server whose kodeblue stays down, watch it from outside: the hub marks a server offline after 2 minutes without a sync and posts that to Slack and Telegram (`server_offline`, high), and again when it is back. Keep your channel's minimum severity at high or below. The hub cannot tell a stopped kodeblue from a host that is down or cut off, and it is silent while the hub itself is down, so also alert on the hub's `GET /healthz` from your existing monitoring.
+- **What the offline alert cannot catch.** Root on a server can read its hub key, stop kodeblue and keep syncing with the key, so the server looks online. Nothing kodeblue can compute on the server is safe from root, so the hub cannot fully tell these syncs from kodeblue's. It checks what it can: kodeblue reports the heartbeat its watch loop writes on every sweep, and a server that keeps syncing while that heartbeat stays unchanged for 20 minutes is posted as `server_stalled` (high), once per stall. The hub times this on its own clock, so a server's clock being off does not matter, and allows longer for a server that sweeps rarely (twice its `sweep_seconds`, plus 10 minutes). A careful attacker can fake the heartbeat too. Treat a root compromise as ending what kodeblue tells you about that server, and **Revoke** its key as soon as you suspect one: the key is then refused, and the server shows as offline.
 - **Logs.** `journalctl -u kodeblue` on servers, `journalctl -u kodeblue-hub` on the hub. Failed syncs log `hub sync failed` with the retry delay.
 - **Spend.** `sudo kodeblue status` shows spend against the budget; the console's Overview shows it per server.
 - **Planned work.** Open a maintenance window (`sudo kodeblue maintenance 2h "reason"`) before changing a server. Every window is journaled and posted to Slack, because anyone with root can open one. An unexpected window is itself a signal.

@@ -32,8 +32,8 @@ func (c Config) ReadHubSettings() *hubproto.Settings {
 	return &s
 }
 
-// SaveHubSettings stores settings from the hub (0600: they can hold the
-// endpoint's API key). An empty Version removes them.
+// SaveHubSettings stores settings from the hub (0600: an older hub sends
+// endpoint keys in them). An empty Version removes them.
 func (c Config) SaveHubSettings(s *hubproto.Settings) error {
 	path := c.HubSettingsPath()
 	if s == nil || s.Version == "" {
@@ -79,7 +79,13 @@ func (c Config) applyHubSettings(s *hubproto.Settings) Config {
 	c.HubSettingsVersion = s.Version
 	c.Inference.Connections = map[string]hubproto.Connection{}
 	for _, conn := range s.Connections {
-		if hubproto.ValidConnectionID(conn.ID) && strings.TrimSpace(conn.BaseURL) != "" {
+		if !hubproto.ValidConnectionID(conn.ID) {
+			continue
+		}
+		if conn.ViaHub {
+			conn.BaseURL, conn.APIKey = "", ""
+			c.Inference.Connections[conn.ID] = conn
+		} else if strings.TrimSpace(conn.BaseURL) != "" {
 			conn.BaseURL = strings.TrimRight(strings.TrimSpace(conn.BaseURL), "/")
 			c.Inference.Connections[conn.ID] = conn
 		}
@@ -173,8 +179,20 @@ func (c Config) EngineProvider(r hubproto.ModelRef) string {
 	return r.Connection + ":" + p
 }
 
+// UsesHubModels reports whether a connection goes through the hub's model
+// proxy, which needs the daemon's forwarder.
+func (c Config) UsesHubModels() bool {
+	for _, conn := range c.Inference.Connections {
+		if conn.ViaHub {
+			return true
+		}
+	}
+	return false
+}
+
 // Endpoint returns the base URL and key of a connection; "" is the
-// server's own [inference] endpoint.
+// server's own [inference] endpoint. A connection via the hub is the
+// daemon's loopback forwarder and its token: the server holds no key for it.
 func (c Config) Endpoint(connection string) (baseURL, key string, err error) {
 	if connection == "" {
 		key, err = c.APIKey()
@@ -184,6 +202,12 @@ func (c Config) Endpoint(connection string) (baseURL, key string, err error) {
 	if !ok {
 		return "", "", fmt.Errorf("unknown model connection %q", connection)
 	}
+	if conn.ViaHub {
+		if c.Inference.HubProxyURL == "" {
+			return "", "", fmt.Errorf("model connection %q goes through the hub, and the forwarder to it is not running", connection)
+		}
+		return c.Inference.HubProxyURL + "/" + connection, c.Inference.HubProxyToken, nil
+	}
 	if strings.TrimSpace(conn.APIKey) == "" {
 		return "", "", fmt.Errorf("model connection %q has no API key", connection)
 	}
@@ -191,8 +215,19 @@ func (c Config) Endpoint(connection string) (baseURL, key string, err error) {
 }
 
 // ModelsReady reports why the model layers cannot run, or nil: triage and
-// the agents each need a model on an endpoint with a key.
+// the agents each need a model on an endpoint with a key, or on a hub
+// connection while the server reports to a hub.
 func (c Config) ModelsReady() error {
+	return c.modelsReady(false)
+}
+
+// ModelsRunnable is ModelsReady for the running daemon: a hub connection
+// also needs its forwarder.
+func (c Config) ModelsRunnable() error {
+	return c.modelsReady(true)
+}
+
+func (c Config) modelsReady(running bool) error {
 	for _, role := range []string{hubproto.RoleTriage, hubproto.RoleResponder} {
 		r := c.ModelRef(role)
 		if strings.TrimSpace(r.Model) == "" {
@@ -200,6 +235,12 @@ func (c Config) ModelsReady() error {
 				return errors.New("no models: set [inference] triage_model and agent_model, or pick models on the hub")
 			}
 			return errors.New("no agent model: set [inference] agent_model, or pick one on the hub")
+		}
+		if conn := c.Inference.Connections[r.Connection]; r.Connection != "" && conn.ViaHub && !running {
+			if !c.Hub.Enabled() {
+				return fmt.Errorf("model connection %q goes through the hub, and this server has no hub", r.Connection)
+			}
+			continue
 		}
 		if _, _, err := c.Endpoint(r.Connection); err != nil {
 			return err
@@ -216,9 +257,9 @@ func (c Config) GatewayKeys() map[string]string {
 	if k, err := c.APIKey(); err == nil {
 		keys["gateway"] = k
 	}
-	for id, conn := range c.Inference.Connections {
-		if conn.APIKey != "" {
-			keys["gateway:"+id] = conn.APIKey
+	for id := range c.Inference.Connections {
+		if _, key, err := c.Endpoint(id); err == nil && key != "" {
+			keys["gateway:"+id] = key
 		}
 	}
 	return keys

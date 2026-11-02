@@ -208,13 +208,14 @@ type connectionView struct {
 	Name    string   `json:"name"`
 	BaseURL string   `json:"base_url"`
 	HasKey  bool     `json:"has_key"`
+	Direct  bool     `json:"direct"`
 	UsedBy  []string `json:"used_by"`
 }
 
 func (s *Server) connectionViews() []connectionView {
 	out := []connectionView{}
 	for _, c := range s.st.Connections() {
-		out = append(out, connectionView{ID: c.ID, Kind: c.Kind, Name: c.Name, BaseURL: c.BaseURL, HasKey: c.APIKey != "", UsedBy: s.st.connectionUsers(c.ID)})
+		out = append(out, connectionView{ID: c.ID, Kind: c.Kind, Name: c.Name, BaseURL: c.BaseURL, HasKey: c.APIKey != "", Direct: c.Direct, UsedBy: s.st.connectionUsers(c.ID)})
 	}
 	return out
 }
@@ -234,6 +235,9 @@ type connectionReq struct {
 	BaseURL  string `json:"base_url"`
 	APIKey   string `json:"api_key"`
 	ClearKey bool   `json:"clear_key"`
+	// Direct: servers call the endpoint themselves, so its key goes to them.
+	// Absent (an older console) keeps the stored choice.
+	Direct *bool `json:"direct"`
 }
 
 func (req *connectionReq) check() error {
@@ -280,13 +284,13 @@ func (s *Server) handleConnectionCreate(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusBadRequest, "at most 32 connections")
 		return
 	}
-	conn := hubproto.Connection{ID: newConnectionID(req.Name, req.Kind, list), Kind: req.Kind, Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey}
+	conn := hubproto.Connection{ID: newConnectionID(req.Name, req.Kind, list), Kind: req.Kind, Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey, Direct: req.Direct != nil && *req.Direct}
 	if err := s.st.setConnections(append(list, conn)); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store failed")
 		return
 	}
 	s.models.forget(conn.ID)
-	s.st.Audit(c.user.Name, "settings.connection_add", conn.ID, fmt.Sprintf("kind=%s url=%s", conn.Kind, conn.BaseURL), c.ip)
+	s.st.Audit(c.user.Name, "settings.connection_add", conn.ID, fmt.Sprintf("kind=%s url=%s direct=%t", conn.Kind, conn.BaseURL, conn.Direct), c.ip)
 	writeJSON(w, http.StatusOK, map[string]any{"id": conn.ID, "connections": s.connectionViews()})
 }
 
@@ -338,6 +342,18 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusBadRequest, "the endpoint moved to another host: enter its API key again (a stored key never follows a connection to a new host)")
 		return
 	}
+	// Marking a connection direct hands its key to every server that uses
+	// it, so, like a move to another host, it needs the key pasted again: a
+	// stolen console session cannot send a stored key out.
+	if req.Direct != nil && *req.Direct && !conn.Direct && req.APIKey == "" && conn.APIKey != "" {
+		s.st.Audit(c.user.Name, "settings.connection_edit_refused", id, "direct without a new key", c.ip)
+		writeErr(w, http.StatusBadRequest, "servers will call this endpoint themselves and receive its key: enter the API key again to confirm")
+		return
+	}
+	oldDirect := conn.Direct
+	if req.Direct != nil {
+		conn.Direct = *req.Direct
+	}
 	conn.Name, conn.BaseURL = req.Name, req.BaseURL
 	switch {
 	case req.ClearKey:
@@ -357,6 +373,9 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request, 
 	detail := fmt.Sprintf("url=%s key=%s", conn.BaseURL, key)
 	if oldURL != conn.BaseURL {
 		detail = fmt.Sprintf("url=%s -> %s key=%s", oldURL, conn.BaseURL, key)
+	}
+	if oldDirect != conn.Direct {
+		detail += fmt.Sprintf(" direct=%t", conn.Direct)
 	}
 	s.st.Audit(c.user.Name, "settings.connection_edit", id, detail, c.ip)
 	writeJSON(w, http.StatusOK, map[string]any{"connections": s.connectionViews()})

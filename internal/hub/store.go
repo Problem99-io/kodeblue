@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,7 +23,10 @@ import (
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db  *sql.DB
+	gen atomic.Uint64 // bumped on every settings write (settingsGen)
+}
 
 func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -71,6 +75,10 @@ CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE, incident_id INTEGER NOT NULL,
   col TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL,
   PRIMARY KEY(server_id, incident_id));
+CREATE TABLE IF NOT EXISTS kept_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, server_name TEXT NOT NULL DEFAULT '',
+  key TEXT NOT NULL, sum TEXT NOT NULL UNIQUE, seen_with TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sent_settings (server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE, version TEXT NOT NULL,
+  models TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(server_id, version));
 `)
 	if err != nil {
 		return err
@@ -83,6 +91,12 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 		{"messages", "rule_hash", "TEXT NOT NULL DEFAULT ''"},
 		{"case_state", "pinned_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"case_state", "pinned_by", "TEXT NOT NULL DEFAULT ''"},
+		{"servers", "offline_since", "INTEGER NOT NULL DEFAULT 0"},
+		{"servers", "model_proxy", "INTEGER NOT NULL DEFAULT 0"},
+		{"servers", "hb_value", "TEXT NOT NULL DEFAULT ''"},
+		{"servers", "hb_changed", "INTEGER NOT NULL DEFAULT 0"},
+		{"servers", "moved_conn", "TEXT NOT NULL DEFAULT ''"},
+		{"kept_keys", "server_name", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumn(c.table, c.col, c.def); err != nil {
 			return err
@@ -146,7 +160,144 @@ func (s *Store) Setting(k string) string {
 	return v
 }
 
+// settingsGen changes whenever a setting is written, so what is derived
+// from settings can be cached until then.
+func (s *Store) settingsGen() uint64 { return s.gen.Load() }
+
+// markModelProxy remembers that server id calls models through the hub. It
+// is never cleared: a server cannot ask for model keys again by claiming to
+// be older.
+func (s *Store) markModelProxy(id string) {
+	_, _ = s.db.Exec(`UPDATE servers SET model_proxy=1 WHERE id=? AND model_proxy=0`, id)
+}
+
+// recordSent keeps the model choices of the last few settings versions sent
+// to server id, and of the one it reports applied (applied), so the model
+// proxy allows the version the server still runs until it applies a newer
+// one, however often the hub's settings change meanwhile.
+func (s *Store) recordSent(id string, st *hubproto.Settings, applied string) {
+	if st.Version == "" {
+		return
+	}
+	b, _ := json.Marshal(st.Models)
+	res, err := s.db.Exec(`INSERT INTO sent_settings(server_id,version,models,at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`, id, st.Version, string(b), time.Now().Unix())
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return
+	}
+	_, _ = s.db.Exec(`DELETE FROM sent_settings WHERE server_id=? AND version<>? AND version NOT IN (SELECT version FROM sent_settings WHERE server_id=? ORDER BY rowid DESC LIMIT 5)`, id, applied, id)
+}
+
+// sentModels are the model choices of settings version v sent to server id.
+func (s *Store) sentModels(id, v string) map[string]hubproto.ModelRef {
+	var b string
+	if v == "" || s.db.QueryRow(`SELECT models FROM sent_settings WHERE server_id=? AND version=?`, id, v).Scan(&b) != nil {
+		return nil
+	}
+	var m map[string]hubproto.ModelRef
+	_ = json.Unmarshal([]byte(b), &m)
+	return m
+}
+
+// movedConnection is the connection server id created by moving its own
+// model key to the hub (move-keys), if any.
+func (s *Store) movedConnection(id string) string {
+	var v string
+	_ = s.db.QueryRow(`SELECT moved_conn FROM servers WHERE id=?`, id).Scan(&v)
+	return v
+}
+
+func (s *Store) setMovedConnection(id, conn string) {
+	_, _ = s.db.Exec(`UPDATE servers SET moved_conn=? WHERE id=?`, conn, id)
+}
+
+// KeptKey is a model key a server handed over that no connection has: the
+// hub keeps it so the server can delete its copy, until an operator turns it
+// into a connection or deletes it, also after the server is deleted (it is
+// the only copy). Key never leaves the hub.
+type KeptKey struct {
+	ID       int64     `json:"id"`
+	ServerID string    `json:"server_id"`
+	Server   string    `json:"server"`
+	Key      string    `json:"-"`
+	Sum      string    `json:"sum"`
+	SeenWith string    `json:"seen_with,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+const (
+	keptPerServer = 4
+	keptTotal     = 64
+)
+
+// keepKey stores a key server id handed over, once: a key kept before
+// (by any server) is kept already.
+func (s *Store) keepKey(id, name, key, seenWith string) error {
+	sum := hubproto.KeySum(key)
+	var n, total, have int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM kept_keys WHERE sum=?`, sum).Scan(&have)
+	if have > 0 {
+		return nil
+	}
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM kept_keys WHERE server_id=?`, id).Scan(&n)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM kept_keys`).Scan(&total)
+	switch {
+	case n >= keptPerServer:
+		return fmt.Errorf("the hub already keeps %d keys from this server, the most it keeps per server", keptPerServer)
+	case total >= keptTotal:
+		return fmt.Errorf("the hub keeps %d keys from servers, the most it keeps: an operator has to clear some in Settings", keptTotal)
+	}
+	_, err := s.db.Exec(`INSERT INTO kept_keys(server_id, server_name, key, sum, seen_with, at) VALUES(?,?,?,?,?,?)`, id, name, key, sum, seenWith, time.Now().Unix())
+	return err
+}
+
+// KeptKeys lists the kept keys, newest first.
+func (s *Store) KeptKeys() []KeptKey {
+	rows, err := s.db.Query(`SELECT k.id, k.server_id, COALESCE(v.name, k.server_name), k.key, k.sum, k.seen_with, k.at FROM kept_keys k LEFT JOIN servers v ON v.id=k.server_id ORDER BY k.id DESC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []KeptKey
+	for rows.Next() {
+		var k KeptKey
+		var at int64
+		if rows.Scan(&k.ID, &k.ServerID, &k.Server, &k.Key, &k.Sum, &k.SeenWith, &at) == nil {
+			k.At = time.Unix(at, 0).UTC()
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (s *Store) keptKey(id int64) (KeptKey, bool) {
+	for _, k := range s.KeptKeys() {
+		if k.ID == id {
+			return k, true
+		}
+	}
+	return KeptKey{}, false
+}
+
+func (s *Store) dropKeptKey(id int64) bool {
+	res, err := s.db.Exec(`DELETE FROM kept_keys WHERE id=?`, id)
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
+func (s *Store) modelProxyServer(id string) bool {
+	var v int
+	_ = s.db.QueryRow(`SELECT model_proxy FROM servers WHERE id=?`, id).Scan(&v)
+	return v == 1
+}
+
 func (s *Store) SetSetting(k, v string) error {
+	defer s.gen.Add(1)
 	if v == "" {
 		_, err := s.db.Exec(`DELETE FROM settings WHERE k=?`, k)
 		return err
@@ -206,6 +357,8 @@ type Host struct {
 	Hostname      string          `json:"hostname,omitempty"`
 	Version       string          `json:"version,omitempty"`
 	Status        json.RawMessage `json:"status"`
+	// HeartbeatChanged is when the hub last saw the reported heartbeat change.
+	HeartbeatChanged time.Time `json:"-"`
 }
 
 func (s *Store) CreateServer(name, by string, ttl time.Duration) (*Host, string, error) {
@@ -284,7 +437,7 @@ func (s *Store) ValidEnrollToken(token string) bool {
 }
 
 func (s *Store) Revoke(id string) error {
-	_, err := s.db.Exec(`UPDATE servers SET revoked=1, key_hash='', enroll_hash='', enroll_expires=0 WHERE id=?`, id)
+	_, err := s.db.Exec(`UPDATE servers SET revoked=1, key_hash='', enroll_hash='', enroll_expires=0, offline_since=0 WHERE id=?`, id)
 	return err
 }
 
@@ -319,7 +472,7 @@ func (s *Store) GetServer(id string) *Host {
 func (s *Store) Servers() []Host { return s.servers(`ORDER BY name`) }
 
 func (s *Store) servers(where string, args ...any) []Host {
-	rows, err := s.db.Query(`SELECT id,name,created_at,created_by,enroll_hash,enroll_expires,key_hash,enrolled_at,revoked,last_seen,last_ip,hostname,version,status FROM servers `+where, args...)
+	rows, err := s.db.Query(`SELECT id,name,created_at,created_by,enroll_hash,enroll_expires,key_hash,enrolled_at,revoked,last_seen,last_ip,hostname,version,status,hb_changed FROM servers `+where, args...)
 	if err != nil {
 		return nil
 	}
@@ -327,10 +480,10 @@ func (s *Store) servers(where string, args ...any) []Host {
 	var out []Host
 	for rows.Next() {
 		var v Host
-		var created, exp, enrolled, seen int64
+		var created, exp, enrolled, seen, hbChanged int64
 		var eh, kh, status string
 		var revoked int
-		_ = rows.Scan(&v.ID, &v.Name, &created, &v.CreatedBy, &eh, &exp, &kh, &enrolled, &revoked, &seen, &v.LastIP, &v.Hostname, &v.Version, &status)
+		_ = rows.Scan(&v.ID, &v.Name, &created, &v.CreatedBy, &eh, &exp, &kh, &enrolled, &revoked, &seen, &v.LastIP, &v.Hostname, &v.Version, &status, &hbChanged)
 		v.CreatedAt = time.Unix(created, 0)
 		v.Enrolled, v.Revoked = kh != "", revoked == 1
 		v.EnrollPending = eh != "" && exp > time.Now().Unix()
@@ -344,6 +497,9 @@ func (s *Store) servers(where string, args ...any) []Host {
 			v.LastSeen = time.Unix(seen, 0)
 		}
 		v.Status = json.RawMessage(status)
+		if hbChanged > 0 {
+			v.HeartbeatChanged = time.Unix(hbChanged, 0)
+		}
 		out = append(out, v)
 	}
 	return out
@@ -374,7 +530,11 @@ func (s *Store) ApplySyncNotify(id string, req *hubproto.SyncRequest) (bool, err
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
-	if _, err := tx.Exec(`UPDATE servers SET status=?, version=?, hostname=? WHERE id=?`, string(status), trim(req.Status.Version, 60), trim(req.Status.Hostname, 200), id); err != nil {
+	// hb_changed is when the hub saw the reported heartbeat change, on the
+	// hub's clock (SET reads the old hb_value), for the stalled check.
+	hb := trim(req.Status.Heartbeat, 40)
+	if _, err := tx.Exec(`UPDATE servers SET status=?, version=?, hostname=?, hb_changed=CASE WHEN hb_value=? THEN hb_changed ELSE ? END, hb_value=? WHERE id=?`,
+		string(status), trim(req.Status.Version, 60), trim(req.Status.Hostname, 200), hb, now, hb, id); err != nil {
 		return false, err
 	}
 	keep := map[string]map[string]bool{}
@@ -390,7 +550,7 @@ ON CONFLICT(server_id,kind,rid) DO UPDATE SET updated_at=excluded.updated_at, re
 	}
 	defer stmt.Close()
 	for _, r := range req.Records {
-		if r.Kind == "notification" && r.ID != "" && len(r.ID) <= 40 && len(r.Data) <= 64<<10 {
+		if r.Kind == "notification" && r.ID != "" && len(r.ID) <= 40 && len(r.Data) <= 64<<10 && !isHubNote(r.ID) {
 			added, err := addNotification(tx, id, r)
 			if err != nil {
 				return false, err

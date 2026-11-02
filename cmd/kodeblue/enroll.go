@@ -45,7 +45,7 @@ func enrollCmd(cfg config.Config, hubURL, pin, caFile, name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if err := hublink.Call(ctx, client, u.String(), "", http.MethodPost, hubproto.PathEnroll,
-		hubproto.EnrollRequest{Token: token, Name: name, Hostname: host, Version: hubproto.Version}, &resp); err != nil {
+		hubproto.EnrollRequest{Token: token, Name: name, Hostname: host, Version: hubproto.Version, ModelProxy: true}, &resp); err != nil {
 		fatal(fmt.Errorf("enrollment failed: %w", err))
 	}
 	if resp.APIKey == "" {

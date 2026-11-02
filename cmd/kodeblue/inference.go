@@ -141,7 +141,7 @@ func readKey(f string) (string, error) {
 
 // writeKey stores the key as root:kodeblue 0640, the way the installer does:
 // a new file created beside the target (never following a link planted
-// there), synced, then renamed over it.
+// there), synced, then renamed over it. An empty key empties the file.
 func writeKey(path, key string) error {
 	if path == "" {
 		return errors.New("[inference] api_key_file is not set in the config")
@@ -166,9 +166,11 @@ func writeKey(path, key string) error {
 		f.Close()
 		return errors.New("no kodeblue group: is kodeblue installed? (the daemon could not read the key)")
 	}
-	if _, err := f.WriteString(key + "\n"); err != nil {
-		f.Close()
-		return err
+	if key != "" {
+		if _, err := f.WriteString(key + "\n"); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()

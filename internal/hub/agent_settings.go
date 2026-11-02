@@ -303,10 +303,15 @@ func (s *Store) EffectiveSettings(id string) *hubproto.Settings {
 		len(out.ProtectedUsers)+len(out.ProtectedIPs)+len(out.ProtectedUnits) == 0 && out.MaxActionsPerHour == 0 {
 		return &hubproto.Settings{}
 	}
-	b, _ := json.Marshal(out)
-	sum := sha256.Sum256(b)
-	out.Version = hex.EncodeToString(sum[:8])
+	out.Version = settingsVersion(out)
 	return out
+}
+
+// settingsVersion hashes settings whose Version is empty.
+func settingsVersion(s *hubproto.Settings) string {
+	b, _ := json.Marshal(s)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
 }
 
 // ---- operator API ----
@@ -369,12 +374,12 @@ func (s *Server) handleServerSettingsGet(w http.ResponseWriter, r *http.Request,
 		writeErr(w, http.StatusNotFound, "no such server")
 		return
 	}
-	eff := s.st.EffectiveSettings(id)
+	var st hubproto.Status
+	_ = json.Unmarshal(h.Status, &st)
+	eff := s.settingsFor(id, st.ModelProxy)
 	for i := range eff.Connections {
 		eff.Connections[i].APIKey = ""
 	}
-	var st hubproto.Status
-	_ = json.Unmarshal(h.Status, &st)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server":      s.st.ServerAgentSettings(id),
 		"fleet":       s.st.FleetAgentSettings(),

@@ -202,6 +202,23 @@ function modeBadge(m) {
   return h("span", { class: "badge " + cls, title: "containment policy on the server" }, "response: " + (m || "?"));
 }
 function pct(a, b) { return b > 0 ? Math.min(100, Math.round((a / b) * 100)) : 0; }
+// Text a server wrote reaches the hub unverified: an attacker with root on
+// that server can write all of it. fromServer marks it where an operator
+// acts on it.
+function fromServer(text) {
+  return h("div", { class: "untrusted", title: "Reports, reasons and fixes come from the server's own agent. The hub only relays them." }, ic("alert", 12), h("span", null, text));
+}
+// holdsModelKeys: the server holds a key of one of the hub's model
+// connections; model_keys says why (the hub works it out): "old", a kodeblue
+// from before the model proxy, which the hub still sends the keys; "direct",
+// connections servers call themselves; "stale", a key left on it by an
+// older enrollment.
+function holdsModelKeys(s) { return !!s.model_keys; }
+const modelKeysWhy = {
+  old: "This kodeblue predates the hub's model proxy, so the hub still sends it the keys of its model connections. Update it, then rotate those keys at the provider.",
+  direct: "It calls a connection marked \"servers call this endpoint themselves\", so it has that connection's key, where root can read it.",
+  stale: "/etc/kodeblue/inference.key on it still holds a key of one of the hub's connections, left by an older enrollment. Run sudo kodeblue move-keys there (the installer does on every upgrade), then rotate the key at the provider.",
+};
 
 // Minimal markdown → DOM (headings, lists, code fences, tables, inline code,
 // bold). Text only ever becomes text nodes.
@@ -670,6 +687,7 @@ function serverBar(srv, tab) {
       srv.enrolled ? phaseBadge(st.phase) : h("span", { class: "badge" }, srv.revoked ? "revoked" : "not enrolled"),
       st.response_mode ? modeBadge(st.response_mode) : null,
       st.models_enabled === false ? h("span", { class: "badge b-warn", title: "no model endpoint configured, or the agent engine is not running" }, "models off") : null,
+      holdsModelKeys(srv) ? h("span", { class: "badge " + (srv.model_keys === "direct" ? "b-warn" : "b-bad"), title: modelKeysWhy[srv.model_keys] || "" }, "holds model keys") : null,
       h("span", { class: "smeta" },
         h("span", null, srv.online ? "online" : "last seen " + ago(srv.last_seen)),
         srv.hostname ? h("span", null, srv.hostname) : null,
@@ -1766,6 +1784,8 @@ function paintChat(inc, sess, own, notes, decs, srvId) {
   else if ((sess && sess.running) || inc.status === "investigating") items.push(workingStoppable(sess, inc, srvId, sess ? "agent is working…" : "agent is starting…"));
   if (!turns.length && !own.length) items.unshift(h("div", { class: "tp-empty" }, h("p", null, inc.session_id ? "~ Transcript not synced yet." : "~ No agent session for this case."),
     inc.summary ? md(inc.summary) : null));
+  if (turns.length || inc.summary || own.some((m) => m.reply))
+    items.unshift(fromServer("The agent's words here were written on the server. If it may be compromised, an attacker could have written them: confirm on the host before you act on them."));
   add(clear(box), items);
   if (st.first || atBottom) box.scrollTop = box.scrollHeight; else box.scrollTop = top;
   st.first = false;
@@ -1935,6 +1955,7 @@ function approvalControls(srvId, a, decs, after) {
       [h("p", null, decision === "approve" ? `kodeblue on ${name} will run ` : `kodeblue on ${name} will drop the request for `, h("b", null, a.action),
         actTarget(a) ? [" on ", h("code", null, actTarget(a))] : null, decision === "approve" ? ", through its root helper and under the server's own response policy." : ". Nothing on the host changes."),
       a.justification ? h("p", { class: "muted small" }, "Agent's reason: " + a.justification) : null,
+      decision === "approve" && a.justification ? fromServer("Judge the action and target, not the reason: the reason was written on the server, and an attacker with root there could have written it.") : null,
       decision === "approve" ? h("p", { class: "callout" }, actionImpact(a.action)) : null],
       decision === "approve" ? "Approve and run" : "Deny", decision === "approve");
     if (!ok) return;
@@ -2122,6 +2143,7 @@ async function paintExt() {
       inc.status === "needs_human" ? h("div", { class: "callout" }, h("div", { class: "lbl" }, "Needs a human"),
         "The agent could not close this on its own. Review the report, then message the agent in the chat, approve or deny any containment it asked for, or act on the server (",
         h("code", null, "kodeblue ack <finding>"), ").") : null,
+      inc.summary || inc.report ? fromServer("The summary and report were written on the server. If it may be compromised, confirm what they say on the host before you act on them.") : null,
       inc.summary ? h("div", { class: "xsec" }, h("h4", null, "summary"), md(inc.summary)) : null,
       inc.self_eval ? h("div", { class: "callout eval" }, h("div", { class: "lbl" }, inc.kind === "review" ? "Reviewer self-evaluation" : "Agent self-evaluation"), md(inc.self_eval)) : null,
       inc.report ? h("div", { class: "xsec" }, h("h4", null, "report"), md(inc.report)) : null,
@@ -2338,6 +2360,17 @@ async function vFleet(main) {
         outdated.length ? [`${outdated.map((s) => s.name).join(", ")} can be updated from here. `,
           h("button", { class: "btn small", type: "button", on: { click: () => updateAll(outdated, () => { body.dataset.sig = ""; draw(); }) } }, ic("refresh", 12), "Update " + (outdated.length > 1 ? "all " + outdated.length : outdated[0].name))] : null,
         oldAgents.length ? h("div", { class: "faint small" }, `${oldAgents.map((s) => s.name).join(", ")} run${oldAgents.length > 1 ? "" : "s"} a kodeblue before v0.1.7 (or keep${oldAgents.length > 1 ? "" : "s"} upgrades local): upgrade on the server with the install command without --token.`) : null));
+    }
+    const keyed = fleet.filter((s) => s.model_keys === "old");
+    if (keyed.length) {
+      body.appendChild(h("div", { class: "callout" }, h("div", { class: "lbl" }, "Model keys on servers"),
+        `${keyed.map((s) => s.name).join(", ")} run${keyed.length > 1 ? "" : "s"} a kodeblue from before the hub's model proxy, so the hub still sends ${keyed.length > 1 ? "them the keys of their" : "it the keys of its"} model connections, and root on ${keyed.length > 1 ? "any of them" : "it"} can read them. Update ${keyed.length > 1 ? "them" : "it"}. Then, on the hub host, stop handing keys out (`, h("code", null, "echo off | kodeblue-hub fleet set model-keys"), `), rotate each connection's key at the provider and paste the new one in Settings. From then on only the hub holds it.`));
+    }
+    const stale = fleet.filter((s) => s.model_keys === "stale");
+    if (stale.length) {
+      body.appendChild(h("div", { class: "callout" }, h("div", { class: "lbl" }, "Old model keys left on servers"),
+        `${stale.map((s) => s.name).join(", ")} still keep${stale.length > 1 ? "" : "s"} a key of one of the hub's model connections in `, h("code", null, "/etc/kodeblue/inference.key"),
+        `, left by an older enrollment, where root can read it. Run `, h("code", null, "sudo kodeblue move-keys"), ` on ${stale.length > 1 ? "each" : "it"} (upgrading kodeblue does this too), which hands the key to the hub and empties the file, then rotate the key at the provider, since it was on the server.`));
     }
     const waiting = fleet.filter((s) => s.enrolled && !s.revoked && learnWaits(s.status || {}) && !modelSet(s.status || {}) && !modelOnItsWay(s.status || {}));
     if (waiting.length) {
@@ -2612,6 +2645,7 @@ function approveRuleDialog(srv, r, after) {
     r.current ? h("div", { class: "small muted" }, "It replaces: " + ruleSummary(r.current)) : null,
     (r.when || {}).extract ? h("div", { class: "small c-orange" }, "Targets are taken from log text, which a client can write (a forwarded-for header, a user agent). Check the pattern only matches what the server itself records.") : null,
     h("div", null, h("div", { class: "small faint" }, "Why the agent proposes it"), md(r.why || "—")),
+    fromServer("Judge the rule itself, not the reason: the reason was written on the server, and an attacker with root there could have written it."),
     ruleDetail(r),
     h("div", { class: "small muted" }, "Once approved, kodeblue takes this action by itself on every match, without asking, in any response mode except off. Protected addresses and paths are still refused, and you can pause it at any time."))], [go]);
 }
@@ -2784,7 +2818,8 @@ function vulnTable(srv, list, after, withService) {
       if (v.check) btns.push(h("button", { class: "btn small", type: "button", on: { click: () => vulnCommand(srv, v, "vuln_recheck", "", after) } }, "Recheck now"));
       const ex = h("tr", { hidden: !S.open.has(key), class: "ex" }, h("td", { colspan: cols.length }, h("div", { class: "stack" },
         h("div", null, h("div", { class: "small faint" }, "Evidence"), h("details", null, h("summary", null, "View technical evidence"), h("pre", { class: "out" }, v.evidence || "—"))),
-        h("div", null, h("div", { class: "small faint" }, "How to fix it"), md(v.remediation || "—")),
+        h("div", null, h("div", { class: "small faint" }, "How to fix it"), md(v.remediation || "—"),
+          v.remediation ? fromServer("Check every command before you run it: this fix was written on the server, and an attacker with root there could have written it.") : null),
         v.check ? h("div", null, h("div", { class: "small faint" }, "Check (passes once fixed)"), h("pre", { class: "out json" }, prettyJSON(v.check)),
           v.check_output ? h("pre", { class: "out" + (v.check_ok ? "" : " err") }, v.check_output) : null) : null,
         v.status_note ? h("div", { class: "small" }, h("span", { class: "faint" }, v.status.replace(/_/g, " ") + " by " + (v.status_by || "?") + ": "), v.status_note) : null,
@@ -3385,6 +3420,8 @@ function connectionDialog(conn, orUrl) {
       placeholder: conn && conn.has_key ? "Leave empty to keep the stored key" : "Paste the API key" });
     const help = h("div", { class: "note" });
     const baseField = h("label", { class: "field" }, "Base URL", base);
+    const direct = h("input", { type: "checkbox", checked: !!(conn && conn.direct) });
+    const directField = h("label", { class: "chk" }, direct, h("span", null, "Servers call this endpoint themselves. Only for an endpoint the hub cannot reach, such as a gateway on the servers' private network: its key then goes to every server that uses it, where root can read it. Otherwise servers go through the hub, which keeps the key."));
     const msg = statusLine();
     const paint = () => {
       const k = kind();
@@ -3412,7 +3449,12 @@ function connectionDialog(conn, orUrl) {
         key.focus();
         return;
       }
-      const body = { kind: k, name: name.value.trim(), base_url: url, api_key: key.value.trim() };
+      if (conn && conn.has_key && !key.value.trim() && direct.checked && !conn.direct) {
+        msg.say("Servers will receive this connection's key: enter the API key again to confirm.", "bad");
+        key.focus();
+        return;
+      }
+      const body = { kind: k, name: name.value.trim(), base_url: url, api_key: key.value.trim(), direct: direct.checked };
       const r = conn ? await api("PUT", "/api/settings/connections/" + enc(conn.id), body) : await api("POST", "/api/settings/connections", body);
       finish(r);
       m.close();
@@ -3423,6 +3465,7 @@ function connectionDialog(conn, orUrl) {
       h("label", { class: "field" }, "Name", name),
       baseField,
       h("label", { class: "field" }, "API key", key),
+      directField,
       msg.el,
     ], [save], () => finish(null));
     paint();
@@ -3469,7 +3512,8 @@ function connectionsPanel(cat, orUrl, onChange, onAdded) {
       return h("div", { class: "mconn" },
         h("div", { class: "mconn-main" },
           h("div", { class: "setrow" }, h("b", null, c.name || c.id), h("span", { class: "badge" }, kindName(c.kind)),
-            h("span", { class: "badge " + (c.has_key ? "b-ok" : "b-warn") }, c.has_key ? "key stored" : "no key")),
+            h("span", { class: "badge " + (c.has_key ? "b-ok" : "b-warn") }, c.has_key ? "key stored" : "no key"),
+            c.direct ? h("span", { class: "badge b-warn", title: "Servers call this endpoint themselves, so its key goes to every server that uses it, where root can read it." }, "key on servers") : null),
           h("div", { class: "mono small faint" }, c.base_url),
           h("div", { class: "small faint" }, c.used_by && c.used_by.length ? "Used by: " + c.used_by.join(", ") : "Not picked for any model yet"),
           res),
@@ -3484,10 +3528,68 @@ function connectionsPanel(cat, orUrl, onChange, onAdded) {
     msg.say("Connection added. Pick its models under Agent models.", "ok");
     if (onAdded) onAdded(msg);
   });
+  // Keys servers handed over that no connection had: kept here so the
+  // servers could delete theirs.
+  const kept = h("div", { class: "stack" });
+  const paintKept = (list) => {
+    clear(kept);
+    if (!list || !list.length) return;
+    kept.append(h("div", { class: "fhd" }, h("span", { class: "fg" }, "Keys taken from servers")),
+      h("div", { class: "note" }, "Model keys servers held without using them, such as a leftover key file. The hub took them so the servers could delete theirs; nothing uses them. Make one a connection if it is still needed, or delete it."),
+      h("div", { class: "mconns" }, list.map((k) => {
+        const mk = h("button", { class: "btn small", type: "button", disabled: !k.seen_with,
+          title: k.seen_with ? "" : "The server named no endpoint for this key, so the hub never sends it anywhere: it can only be deleted." }, "Make a connection");
+        const rm = h("button", { class: "btn small danger", type: "button" }, "Delete");
+        mk.addEventListener("click", async () => {
+          const r = await keptKeyDialog(k);
+          if (r) { set(r.connections); paintKept(r.kept_keys); msg.say("Connection added. Pick its models under Agent models.", "ok"); }
+        });
+        rm.addEventListener("click", async () => {
+          if (!(await ask("Delete key", ["Delete the key taken from ", h("b", null, k.server || k.server_id), "? The hub holds the only copy."], "Delete", true))) return;
+          busyBtn(rm, msg, async () => { const r = await api("DELETE", "/api/settings/kept-keys/" + k.id); paintKept(r.kept_keys); msg.say("Key deleted.", "ok"); });
+        });
+        return h("div", { class: "mconn" },
+          h("div", { class: "mconn-main" },
+            h("div", { class: "setrow" }, h("b", null, "From " + (k.server || k.server_id)), h("span", { class: "badge mono" }, "key " + k.sum.slice(0, 8)), h("span", { class: "faint small" }, ago(k.at))),
+            h("div", { class: "small faint" }, k.seen_with ? ["Next to the endpoint ", h("span", { class: "mono" }, k.seen_with), " (as the server says)"] : "No endpoint named")),
+          h("div", { class: "btns" }, mk, rm));
+      })));
+  };
+  const loadKept = () => api("GET", "/api/settings/kept-keys").then((r) => paintKept(r.kept_keys)).catch(() => {});
   paint();
+  loadKept();
   return { el: panel("Model connections", h("div", { class: "bd stack" },
-    h("div", { class: "note" }, "Endpoints the agents reach models through. Connect several, an inference manager, OpenRouter and any OpenAI-compatible API, and pick a model from any of them per agent. Keys stay on the hub and go only to servers whose agents use that connection."),
-    rows, h("div", { class: "btns" }, addBtn), msg.el), null, "blue"), refresh: (list) => set(list) };
+    h("div", { class: "note" }, "Endpoints the agents reach models through. Connect several, an inference manager, OpenRouter and any OpenAI-compatible API, and pick a model from any of them per agent. Keys stay on the hub: servers call these endpoints through it. Only a connection marked “servers call this endpoint themselves” sends its key to the servers that use it."),
+    rows, h("div", { class: "btns" }, addBtn), msg.el, kept), null, "blue"), refresh: (list) => { set(list); loadKept(); } };
+}
+// keptKeyDialog makes a connection with a key taken from a server. The key
+// goes only to the host the server used it with.
+function keptKeyDialog(k) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const kinds = ["openai-compatible", "inference-manager", "openrouter"];
+    const radios = kinds.map((x, i) => h("input", { type: "radio", name: "kept-kind", value: x, checked: i === 0 }));
+    const name = h("input", { type: "text", class: "full", maxlength: 64, value: ((k.server || k.server_id) + " key").slice(0, 64) });
+    const base = h("input", { type: "url", class: "full", spellcheck: "false", autocomplete: "off", value: k.seen_with });
+    const msg = statusLine();
+    const save = h("button", { class: "btn primary", type: "button" }, "Add connection");
+    save.addEventListener("click", () => busyBtn(save, msg, async () => {
+      const kind = (radios.find((r) => r.checked) || {}).value;
+      if (origin(base.value.trim()) !== origin(k.seen_with)) { msg.say("This key goes only to " + k.seen_with + ", the endpoint the server used it with.", "bad"); base.focus(); return; }
+      const r = await api("POST", "/api/settings/kept-keys/" + k.id + "/connection", { kind, name: name.value.trim(), base_url: base.value.trim() });
+      finish(r);
+      m.close();
+    }));
+    const m = modal("Make a connection", [
+      h("div", { class: "note" }, "The key stays on the hub, as with every connection; servers call the endpoint through it."),
+      h("div", { class: "choice", role: "radiogroup", "aria-label": "Connection type" }, kinds.map((x, i) => h("label", null, radios[i], kindName(x)))),
+      h("label", { class: "field" }, "Name", name),
+      h("label", { class: "field" }, "Base URL", base),
+      msg.el,
+    ], [save], () => finish(null));
+    name.focus();
+  });
 }
 function ruleSelect(value, first, label) {
   return h("select", { class: "sel", "aria-label": label }, h("option", { value: "" }, first),
