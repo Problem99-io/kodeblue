@@ -129,7 +129,7 @@ func Submit(ctx context.Context, cfg config.Config, st *store.Store, slack notif
 				return fmt.Sprintf("Already requested as %s (incident #%d) and waiting for operator approval: kodeblue respond approve %s. Mention it in your report.", r.ID, r.IncidentID, r.ID), nil
 			}
 		}
-		if err := appendRequest(cfg, req); err != nil {
+		if err := AppendRequest(cfg, req); err != nil {
 			return "", err
 		}
 		st.Journal(actor, "respond.request", fmt.Sprintf("%s %s %v (incident #%d)", req.ID, req.Action, req.Params, req.IncidentID))
@@ -244,7 +244,8 @@ func requestsPath(cfg config.Config) string {
 	return filepath.Join(cfg.Server.StateDir, "response-requests.jsonl")
 }
 
-func appendRequest(cfg config.Config, r respond.Request) error {
+// AppendRequest records r as waiting for an operator's approval.
+func AppendRequest(cfg config.Config, r respond.Request) error {
 	f, err := os.OpenFile(requestsPath(cfg), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {
 		return err

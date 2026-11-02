@@ -96,6 +96,11 @@ type Status struct {
 	// version (hub.accept_upgrades). Upgrade is the last one asked for.
 	AcceptsUpgrades bool           `json:"accepts_upgrades"`
 	Upgrade         *UpgradeStatus `json:"upgrade,omitempty"`
+	// AcceptsSharedBlocks: addresses other servers of the fleet blocked
+	// reach this server (hub.accept_shared_blocks), which blocks them under
+	// its own block_ip rule. SharedBlocksVersion is the list it has.
+	AcceptsSharedBlocks bool   `json:"accepts_shared_blocks,omitempty"`
+	SharedBlocksVersion string `json:"shared_blocks_version,omitempty"`
 	// Models is the model each role uses now; Actions is each enabled
 	// containment action's effective rule (auto | approve | off) after the
 	// root policy and the hub's rules.
@@ -203,7 +208,38 @@ type SyncResponse struct {
 	// it reported differs from the hub's. A Settings with an empty Version
 	// clears what the server applied before.
 	Settings *Settings `json:"settings,omitempty"`
+	// SharedBlocks is sent when the server accepts shared blocks and the
+	// version it reported differs from the hub's. An empty list withdraws
+	// every block shared before (sharing turned off on the hub).
+	SharedBlocks *SharedBlocks `json:"shared_blocks,omitempty"`
 }
+
+// SharedBlock is an address another server of the fleet blocked: a
+// block_ip carried out there and still in effect. The hub relays it; each
+// server decides under its own policy whether it blocks it automatically,
+// asks an operator first, or not at all. Server and Why come from the
+// server that blocked it and are untrusted text.
+type SharedBlock struct {
+	ID     string    `json:"id"` // sb_…: stable for that server's action
+	IP     string    `json:"ip"`
+	Server string    `json:"server"` // the name the hub gives the server that blocked it
+	Why    string    `json:"why,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// SharedBlocks is the fleet's shared blocks for one server: those of every
+// other server, from the last SharedBlockDays days, newest first.
+type SharedBlocks struct {
+	Version string        `json:"version"`
+	Blocks  []SharedBlock `json:"blocks"`
+}
+
+const (
+	// SharedBlockDays is how long a block is shared after it was made.
+	SharedBlockDays = 7
+	// MaxSharedBlocks bounds one list.
+	MaxSharedBlocks = 200
+)
 
 // Model roles: Default covers every role without its own model. Critical is
 // the responder on critical incidents.

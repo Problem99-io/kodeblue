@@ -188,6 +188,14 @@ sudo kodeblue rules reject cr-ssh-bruteforce "our office VPN is in that range"
 sudo kodeblue rules pause cr-ssh-bruteforce "blocked a partner's scanner"
 ```
 
+### Shared blocks
+With a hub, an address one server blocks is blocked across the fleet. An attacker that brute-forces `web-1` is usually scanning `db-1` and `api-1` too.
+
+- **What is shared.** Every `block_ip` a server carried out (an agent's, a rule's, an approved one) that is still in effect and was made in the last 7 days, on a public address. Private addresses are not shared: an attacker on one server's network can be a neighbour on another's. A block that was itself shared is not shared again, and a revoked server's blocks are not shared at all. The hub sends each server the other servers' blocks, one per address, at most 200, on its next sync.
+- **How a server applies one.** As if one of its own agents had asked, under its own policy: where `block_ip` runs without approval (`contain`) the root helper blocks it at once (`requested_by: fleet`); elsewhere it waits for an operator like any request (the hub's Activity, or `kodeblue respond approve <id>`), at most 20 at a time. Protected and infrastructure addresses are refused as always, and shared blocks never use more than half of `max_actions_per_hour`, so the server's own incidents keep room to act; the rest follow as the hour allows. Each batch is one Slack message, not one per address.
+- **Root decides.** `[hub] accept_shared_blocks` (default `true`, root-owned) is the only thing the root helper takes a shared block on; set it `false` and nothing the fleet shares reaches this server. Turning `block_ip` off on the hub, or `mode = "off"`, stops them too.
+- **Undo.** Undoing the block on the server that made it (or sharing turned off on the hub) withdraws the requests still waiting elsewhere. Blocks already in place stay until someone undoes them on each server: `kodeblue respond undo <id>` (the Slack message lists the ids).
+
 ### Guard rails on automated containment
 These were added after end-to-end testing showed where a small model can over-reach:
 - **`kill_process`.** The root helper only kills what looks like attacker tooling:

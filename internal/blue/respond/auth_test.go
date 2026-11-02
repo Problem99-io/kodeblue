@@ -39,33 +39,70 @@ func TestAuthorizeRejectsSpoofedApproval(t *testing.T) {
 	oper := Caller{UID: 0, Via: "socket", agentUID: kb}
 
 	spoof := Request{Action: "block_ip", RequestedBy: "agent+operator"}
-	if err := Authorize("recommend", true, agent, spoof); err == nil {
+	if err := Authorize("recommend", true, false, agent, spoof); err == nil {
 		t.Fatal("agent forged +operator in recommend mode must be refused")
 	}
 	// The same words from a real operator are fine (they are root).
-	if err := Authorize("recommend", true, oper, spoof); err != nil {
+	if err := Authorize("recommend", true, false, oper, spoof); err != nil {
 		t.Fatalf("operator approval refused: %v", err)
 	}
 	// A hub approval is only honored when the root-owned policy accepts it.
 	hub := Request{Action: "block_ip", RequestedBy: "agent+hub:alice+operator"}
-	if err := Authorize("recommend", false, agent, hub); err == nil {
+	if err := Authorize("recommend", false, false, agent, hub); err == nil {
 		t.Fatal("hub approval must be refused when accept_approvals is false")
 	}
-	if err := Authorize("recommend", true, agent, hub); err != nil {
+	if err := Authorize("recommend", true, false, agent, hub); err != nil {
 		t.Fatalf("accepted hub approval refused: %v", err)
 	}
 	// In recommend mode a plain agent request is refused; in contain it runs.
 	plain := Request{Action: "block_ip", RequestedBy: "agent"}
-	if err := Authorize("recommend", true, agent, plain); err == nil {
+	if err := Authorize("recommend", true, false, agent, plain); err == nil {
 		t.Fatal("plain agent request in recommend mode must be refused")
 	}
-	if err := Authorize("contain", true, agent, plain); err != nil {
+	if err := Authorize("contain", true, false, agent, plain); err != nil {
 		t.Fatalf("agent request in contain mode refused: %v", err)
 	}
 	// A caller that is neither operator nor the kodeblue user is refused.
 	stranger := Caller{UID: 1000, Via: "socket", agentUID: kb}
-	if err := Authorize("contain", true, stranger, plain); err == nil {
+	if err := Authorize("contain", true, false, stranger, plain); err == nil {
 		t.Fatal("stranger on the socket must be refused")
+	}
+}
+
+// A block the fleet shared runs without an operator only where root
+// accepts shared blocks and the server runs contain, only as block_ip, and
+// only on a public address. A hub approval of one needs accept_approvals.
+func TestAuthorizeSharedBlock(t *testing.T) {
+	const kb = 999
+	agent := Caller{UID: kb, Via: "socket", agentUID: kb}
+	block := func(by, action, ip string) Request {
+		return Request{Action: action, Params: map[string]string{"ip": ip}, RequestedBy: by}
+	}
+	if err := Authorize("contain", false, true, agent, block(FleetRequester, "block_ip", "203.0.113.7")); err != nil {
+		t.Fatalf("shared block in contain mode refused: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		mode   string
+		shared bool
+		req    Request
+	}{
+		"not accepted":   {"contain", false, block(FleetRequester, "block_ip", "203.0.113.7")},
+		"recommend":      {"recommend", true, block(FleetRequester, "block_ip", "203.0.113.7")},
+		"another action": {"contain", true, Request{Action: "lock_user", Params: map[string]string{"user": "bob"}, RequestedBy: FleetRequester}},
+		"private":        {"contain", true, block(FleetRequester, "block_ip", "10.0.0.5")},
+		"mapped private": {"contain", true, block(FleetRequester, "block_ip", "::ffff:192.168.1.9")},
+		"self approved":  {"recommend", true, block(FleetRequester+"+operator", "block_ip", "203.0.113.7")},
+	} {
+		if Authorize(tc.mode, true, tc.shared, agent, tc.req) == nil {
+			t.Errorf("%s: shared block was authorized", name)
+		}
+	}
+	hub := block(FleetRequester+"+hub:alice+operator", "block_ip", "203.0.113.7")
+	if err := Authorize("recommend", true, false, agent, hub); err != nil {
+		t.Fatalf("hub approval of a shared block refused: %v", err)
+	}
+	if Authorize("recommend", false, true, agent, hub) == nil {
+		t.Fatal("hub approval of a shared block taken without accept_approvals")
 	}
 }
 
