@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, serve
   status TEXT NOT NULL DEFAULT 'queued', created_at INTEGER NOT NULL, delivered_at INTEGER NOT NULL DEFAULT 0,
   replied_at INTEGER NOT NULL DEFAULT 0, reply TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '', cost_usd REAL NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS messages_server ON messages(server_id, status);
+CREATE TABLE IF NOT EXISTS research_jobs(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,site TEXT NOT NULL,day TEXT NOT NULL,expires INTEGER NOT NULL,sources TEXT NOT NULL,through_seq INTEGER NOT NULL,overview TEXT NOT NULL,queries INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS research_councils(id TEXT PRIMARY KEY,site TEXT NOT NULL,version INTEGER NOT NULL,updated INTEGER NOT NULL,data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS research_job_refs(job INTEGER NOT NULL REFERENCES research_jobs(message_id) ON DELETE CASCADE,ref TEXT NOT NULL,PRIMARY KEY(job,ref));
+CREATE TABLE IF NOT EXISTS research_automation(site TEXT PRIMARY KEY,version INTEGER NOT NULL,config TEXT NOT NULL,state TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   server_id TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -77,6 +81,10 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 	}
 	// Columns added after the first release.
 	for _, c := range []struct{ table, col, def string }{
+		{"research_jobs", "native", "INTEGER NOT NULL DEFAULT 0"},
+		{"research_jobs", "enrollments", "TEXT NOT NULL DEFAULT '{}'"},
+		{"research_jobs", "source_only", "INTEGER NOT NULL DEFAULT 0"},
+		{"research_jobs", "auto_kind", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "decision", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "request_id", "TEXT NOT NULL DEFAULT ''"},
 		{"messages", "command", "TEXT NOT NULL DEFAULT ''"},
@@ -88,7 +96,17 @@ CREATE TABLE IF NOT EXISTS case_state (server_id TEXT NOT NULL REFERENCES server
 			return err
 		}
 	}
-	return s.migrateSlack()
+	// Partial index: investigation delivery retention never scans ordinary chats.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS research_message_retention ON messages(created_at) WHERE command='investigate'`); err != nil {
+		return err
+	}
+	if err := s.migrateSlack(); err != nil {
+		return err
+	}
+	if err := s.migrateWarRoom(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) addColumn(table, col, def string) error {
@@ -407,6 +425,11 @@ ON CONFLICT(server_id,kind,rid) DO UPDATE SET updated_at=excluded.updated_at, re
 		if _, err := stmt.Exec(id, r.Kind, r.ID, r.UpdatedAt.Unix(), now, string(r.Data)); err != nil {
 			return false, err
 		}
+		if r.Kind == "finding" {
+			if err := indexWarFinding(tx, id, r.ID, r.Data); err != nil {
+				return false, err
+			}
+		}
 	}
 	for kind, ids := range keep {
 		rows, err := tx.Query(`SELECT rid FROM records WHERE server_id=? AND kind=?`, id, kind)
@@ -711,6 +734,19 @@ func (s *Store) Prune(keep time.Duration) {
 	_, _ = s.db.Exec(`DELETE FROM web_sessions WHERE expires_at<?`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM audit WHERE at<?`, time.Now().Add(-365*24*time.Hour).Unix())
 	_, _ = s.db.Exec(`DELETE FROM notifications WHERE at<?`, cut)
+	// Temporary grants/citations and discussion envelopes have their own short
+	// lifetime. Keep actual case records and ordinary operator chats unchanged.
+	now := time.Now().Unix()
+	researchCut := time.Now().AddDate(0, 0, -30).Unix()
+	_, _ = s.db.Exec(`DELETE FROM research_jobs WHERE expires<?`, now)
+	_, _ = s.db.Exec(`DELETE FROM research_councils WHERE updated<?`, researchCut)
+	_, _ = s.db.Exec(`DELETE FROM messages WHERE id IN (
+ SELECT m.id FROM messages m WHERE m.command='investigate' AND m.created_at<?
+ AND NOT EXISTS (SELECT 1 FROM research_jobs j WHERE j.message_id=m.id)
+ ORDER BY m.created_at LIMIT 200)`, researchCut)
+
+	_, _ = s.db.Exec(`DELETE FROM war_events WHERE NOT EXISTS (SELECT 1 FROM records f WHERE f.server_id=war_events.server_id AND f.kind='finding' AND f.rid=war_events.finding_id)`)
+	_, _ = s.db.Exec(`DELETE FROM war_sources WHERE looked_at<? AND NOT EXISTS(SELECT 1 FROM war_events WHERE war_events.ip=war_sources.ip)`, time.Now().Add(-7*24*time.Hour).Unix())
 }
 
 // ---- messages ----

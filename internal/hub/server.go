@@ -29,16 +29,19 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/upgrade"
+	"github.com/Problem99-io/kodeblue/internal/research"
 )
 
 //go:embed web
 var webFS embed.FS
 
 type Options struct {
-	DataDir   string
-	DistDir   string // agent release files served to installers
-	PublicURL string // how servers and browsers reach the hub (for install commands)
-	Pin       string // TLS public-key pin, when the hub's certificate is self-signed
+	Research            *research.Store // optional, independent behavioral database
+	DisableIPEnrichment bool
+	DataDir             string
+	DistDir             string // agent release files served to installers
+	PublicURL           string // how servers and browsers reach the hub (for install commands)
+	Pin                 string // TLS public-key pin, when the hub's certificate is self-signed
 	// SecureCookies is true whenever browsers reach the hub over https
 	// (direct TLS, or a TLS-terminating proxy).
 	SecureCookies bool
@@ -58,6 +61,7 @@ type Options struct {
 }
 
 type Server struct {
+	war warLifecycle
 	opt Options
 	st  *Store
 	log *slog.Logger
@@ -73,14 +77,19 @@ type Server struct {
 	// trusted are the proxies whose X-Forwarded-For is believed.
 	trusted []netip.Prefix
 
-	mu                sync.Mutex
-	waiters           map[string]chan struct{} // server id -> wake long-poll
-	slackWake         chan struct{}
-	telegramWake      chan struct{}
-	slackReset        chan struct{}
-	telegramReset     chan struct{}
-	models            modelCache
-	telegramTestLimit *limiter
+	mu                  sync.Mutex
+	waiters             map[string]chan struct{} // server id -> wake long-poll
+	slackWake           chan struct{}
+	telegramWake        chan struct{}
+	slackReset          chan struct{}
+	telegramReset       chan struct{}
+	models              modelCache
+	telegramTestLimit   *limiter
+	researchLimit       *limiter
+	researchPublicLimit *limiter
+	researchGlobalLimit *limiter
+	researchSlots       chan struct{}
+	researchAutoWake    chan struct{}
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -103,6 +112,11 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 		enrol: newLimiter(20, 10*time.Minute), waiters: map[string]chan struct{}{}, slackWake: make(chan struct{}, 1), telegramWake: make(chan struct{}, 1), slackReset: make(chan struct{}, 1), telegramReset: make(chan struct{}, 1)}
 	s.models.client = endpointClient(opt.EndpointAllow)
 	s.telegramTestLimit = newLimiter(3, time.Minute)
+	s.researchLimit = newLimiter(120, time.Minute)
+	s.researchPublicLimit = newLimiter(120, time.Minute)
+	s.researchGlobalLimit = newLimiter(600, time.Minute)
+	s.researchSlots = make(chan struct{}, 4)
+	s.researchAutoWake = make(chan struct{}, 1)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -164,6 +178,8 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
+	s.warRoutes()
+	s.researchRoutes()
 	s.slackRoutes()
 	s.settingsRoutes()
 
@@ -346,8 +362,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, id string) {
 		if msgs := s.st.TakeQueued(id); len(msgs) > 0 {
 			out := hubproto.MessagesResponse{}
 			for _, m := range msgs {
+				phase := ""
+				if m.Command == hubproto.CommandInvestigate {
+					phase = s.councilPhase(m.ID)
+				}
 				out.Messages = append(out.Messages, hubproto.OperatorMessage{ID: m.ID, Author: m.Author, Body: m.Body, IncidentID: m.IncidentID,
-					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash})
+					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash, CouncilPhase: phase, CouncilRole: s.councilRole(m.ID)})
 			}
 			writeJSON(w, http.StatusOK, out)
 			return
@@ -378,6 +398,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request, id string) 
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.wakeResearchCouncil()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
