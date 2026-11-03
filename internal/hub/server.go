@@ -35,10 +35,11 @@ import (
 var webFS embed.FS
 
 type Options struct {
-	DataDir   string
-	DistDir   string // agent release files served to installers
-	PublicURL string // how servers and browsers reach the hub (for install commands)
-	Pin       string // TLS public-key pin, when the hub's certificate is self-signed
+	DisableIPEnrichment bool
+	DataDir             string
+	DistDir             string // agent release files served to installers
+	PublicURL           string // how servers and browsers reach the hub (for install commands)
+	Pin                 string // TLS public-key pin, when the hub's certificate is self-signed
 	// SecureCookies is true whenever browsers reach the hub over https
 	// (direct TLS, or a TLS-terminating proxy).
 	SecureCookies bool
@@ -58,6 +59,7 @@ type Options struct {
 }
 
 type Server struct {
+	war warLifecycle
 	opt Options
 	st  *Store
 	log *slog.Logger
@@ -164,6 +166,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
+	s.warRoutes()
 	s.slackRoutes()
 	s.settingsRoutes()
 
