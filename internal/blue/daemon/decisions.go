@@ -66,8 +66,15 @@ func (d *Daemon) followUpDecisions(ctx context.Context) {
 // claimFollowUp marks an incident's follow-up as running (false: one runs,
 // or the last one failed recently).
 func (d *Daemon) claimFollowUp(id int64) bool {
+	d.operatorMu.Lock()
+	defer d.operatorMu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	for _, inc := range d.live {
+		if inc == id {
+			return false
+		}
+	}
 	if d.following[id] || time.Now().Before(d.followRetry[id]) {
 		return false
 	}
@@ -103,6 +110,14 @@ func (d *Daemon) resumeAfterDecisions(ctx context.Context, incID int64, sessionI
 	case <-ctx.Done():
 		return
 	}
+	d.operatorMu.Lock()
+	if _, live := d.LiveSessions()[sessionID]; live {
+		d.operatorMu.Unlock()
+		return
+	}
+	untrack := d.track(sessionID, incID)
+	d.operatorMu.Unlock()
+	defer untrack()
 	if d.overBudget(1.5) {
 		return
 	}
@@ -125,14 +140,12 @@ func (d *Daemon) resumeAfterDecisions(ctx context.Context, incID int64, sessionI
 	}
 	d.st.TouchIncident(incID)
 	d.log.Info("operator decisions handed to the incident agent", "incident", incID, "session", sess.ID, "decisions", len(settled))
-	untrack := d.track(sess.ID, incID)
 	role := hubproto.RoleResponder
 	if severity == detect.SevCritical {
 		role = hubproto.RoleCritical
 	}
 	_, model := d.engineModel(role)
 	out := kc.Wait(ectx, sess, 20*time.Minute)
-	untrack()
 	if ectx.Err() == nil {
 		// Handed over: do not send these decisions again.
 		_ = d.st.Set(decisionsFollowedKey(incID), strconv.Itoa(len(settled)))
