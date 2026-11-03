@@ -51,7 +51,13 @@ server (kodeblue, its own user)                          hub
 
 ### What operators can and cannot do from the hub
 
-Operators can **message** a server's agents. A message about an incident continues that incident's own agent session (full context); anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
+Operators can **message** a server's agents. A message about an idle incident can continue its session. Input to an operator-owned running session is steered between actions; live responder, learner, reviewer and decisions sessions keep their own waiters and receive questions through a separate operator-liaison session. Anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
+
+If this conversation's operator agent is thinking or working, a new message steers that same
+session. Running tools finish before the new input is delivered at the next safe
+boundary; the agent then continues with the updated context. Rapid messages are
+admitted in order, and the conversation remains active until its continuation
+finishes. An idle session receives an ordinary follow-up.
 
 Operators can also **approve or deny** containment an agent requested in `recommend` mode, from the case or the server's Activity tab. The hub only relays the ruling. The server checks the request is still pending (the agent's own request, unchanged), then runs it through the root helper under the root-owned `/etc/kodeblue/kodeblue.toml`, so the policy's allowed actions, protected users, IPs and units, and rate limit still apply. Every ruling is in the hub audit log, the server journal and Slack. On the server the same is `kodeblue respond approve <id>` / `kodeblue respond deny <id>`. A case with several requests has **Approve all**, and its "Waiting for your approval" block folds away (it opens again when the agent asks for something new). The agent never runs actions itself: once nothing waits for a ruling any more, the server hands the incident's agent what was approved, what ran and what was denied, and it checks the result, then resolves the case or says what still needs a human. Approvals made on the server's CLI reach it on the next triage tick.
 
@@ -252,3 +258,9 @@ Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+Operator turns are queued in admission order, including input arriving during
+usage booking. Only the owning conversation can steer its session. Ownership is
+retained through abort and accounting, and new turns check the booked budget
+before launching. Engine I/O runs outside the admission mutex. Decisions claims
+reserve their sessions before dispatch and recheck after semaphore admission.
