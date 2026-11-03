@@ -337,6 +337,8 @@ async function logout() {
 
 function renderLogin(msg) {
   if (S.loginShown) { if (msg) { const e = document.querySelector(".lerr"); if (e && !e.textContent) e.textContent = msg; } return; }
+  closeWarRoom();
+  const warTab = document.getElementById("war-tab"); if (warTab) warTab.hidden = true;
   S.loginShown = true; S.viewKey = "";
   setTimer(null); closePanel();
   document.querySelectorAll(".scrim, .menu").forEach((x) => x.remove());
@@ -440,6 +442,7 @@ async function route() {
     await renderView(r);
   }
   if (my !== routing || !S.me || S.loginShown) return;
+  if(location.hash==="#war-room-research"){openWarRoom();toggleWarResearch(true,true);}
   if (r.view === "board") syncPanel(r); else closePanel();
 }
 window.addEventListener("hashchange", route);
@@ -544,6 +547,7 @@ function header(r) {
   av.addEventListener("click", () => menu(av, [
     h("div", { class: "mwho" }, h("div", { class: "fg" }, me), h("div", { class: "muted small" }, "operator")),
     menuItem("Audit log", { href: "#/audit", icon: "file" }),
+      menuItem("War room · research", { icon: "layers", click: () => { openWarRoom(); toggleWarResearch(true,true); } }),
     menuItem("Sign out", { icon: "logout", cls: "c-red", click: logout }),
   ]));
   return h("header", { class: "hdr" },
@@ -622,6 +626,7 @@ async function openBell(anchor) {
 setInterval(() => { if (!document.hidden) bellLoad(); }, 20000);
 
 async function renderView(r) {
+  mountWarRoom();
   try { await loadServers(); } catch (e) { if (e.status === 401) return; }
   setTimer(null);
   clear(app);
