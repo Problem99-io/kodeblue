@@ -42,24 +42,28 @@ function openWarRoom() {
   WAR.stats = h("div", { class: "war-stats" });
   WAR.map = h("div", { class: "war-map", "aria-label": "World map of source activity" });
   WAR.recent = h("div", { class: "war-recent" });
+  WAR.researchHost = h("div", {id:"war-research-panel",class:"war-research-host", hidden:true});
+  WAR.researchGraph = null;
   WAR.inspector = h("aside", { class: "war-inspector", "aria-label": "Source and incident details", "aria-live": "polite" });
   WAR.config = h("div", { class: "war-config", hidden: true });
   WAR.notice = h("div", { class: "war-notice", hidden: true, role: "status" });
   const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) paintWarSettings(); } } }, ic("sliders", 13), "Enrichment");
   WAR.settingsButton = settings;
+  WAR.researchButton=h("button",{class:"btn small",type:"button","aria-expanded":"false","aria-controls":"war-research-panel",on:{click:()=>toggleWarResearch(!WAR.researchOpen)}},ic("layers",13),"Research layer");
   WAR.shell.append(
-    h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Source activity · fleet intelligence"))), h("div", { class: "sp" }), WAR.status, settings, close),
+    h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Source activity · evidence · agent council"))), h("div", { class: "sp" }), WAR.status, WAR.researchButton, settings, close),
     h("div", { class: "war-filters" }, range, servers, severity, h("div", { class: "sp" }), query), WAR.config, WAR.notice, WAR.stats,
     h("div", { class: "war-grid" }, h("div", { class: "war-theater" },
       h("div", { class: "war-map-top" }, h("span", null, "SOURCE ORIGINS"), h("span", { class: "war-live" }, h("span", { class: "dot on" }), "Live activity")),
       WAR.map,
       h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),
-      WAR.recent), WAR.inspector));
+      WAR.recent,WAR.researchHost), WAR.inspector));
   WAR.shell.addEventListener("keydown", warKeys);
   document.body.append(WAR.backdrop);
   drawer.append(WAR.shell);
   requestAnimationFrame(() => { if (WAR.open) drawer.classList.add("on"); });
   close.focus();
+  const reopenResearch=WAR.researchOpen;WAR.researchOpen=false;if(reopenResearch)toggleWarResearch(true);
   refreshWarRoom();
   WAR.timer = setInterval(() => { if (!document.hidden && WAR.open) refreshWarRoom(); }, 60000);
 }
@@ -67,6 +71,7 @@ function openWarRoom() {
 function closeWarRoom() {
   if (!WAR.open) return;
   WAR.open = false; WAR.request++;
+  window.KodeBlueResearch?.close();WAR.researchGraph=null;
   clearInterval(WAR.timer);
   for (const entry of WAR.background || []) if (entry.el.isConnected) entry.el.inert = entry.inert;
   WAR.background = [];
@@ -86,6 +91,43 @@ function warKeys(e) {
   const first = nodes[0], last = nodes[nodes.length - 1];
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
+function toggleWarResearch(enabled,focusPanel=false){
+  if(!WAR.open || !WAR.researchHost)return;
+  if(WAR.researchOpen===enabled)return;
+  WAR.researchOpen=enabled;WAR.researchHost.hidden=!enabled;
+  WAR.researchButton.setAttribute("aria-expanded",String(enabled));
+  if(!enabled){window.KodeBlueResearch?.close();WAR.researchGraph=null;paintWarRoom();return;}
+  WAR.researchHost.textContent="Loading behavioral evidence…";
+  let first=true;
+  window.KodeBlueResearch.mount(WAR.researchHost,{onGraph:data=>{if(!WAR.open || !WAR.researchOpen)return;WAR.researchGraph=data;paintWarRoom();if(first&&focusPanel)WAR.researchHost.scrollIntoView({block:"start"});first=false;}}).catch(()=>{if(WAR.open && WAR.researchOpen)WAR.researchHost.textContent="Research layer unavailable. Source locations and incidents remain available.";});
+}
+
+// Relationships reuse only already available War room locations. No additional
+// lookup or change to enrichment consent is caused by enabling this layer.
+function paintWarResearchLinks(map,groups){
+  if(!WAR.researchOpen || !WAR.researchGraph)return;
+  const locations=new Map();
+  for(const group of groups){if(!group.located)continue;for(const source of group.sources)locations.set(source.ip,warProject(group.longitude,group.latitude));}
+  const cutoff=Date.now()-Number(WAR.hours)*3600000;
+  const edges=WAR.researchGraph.edges.filter(e=>(!WAR.server||e.producer_id===WAR.server)&&new Date(e.last_at).getTime()>=cutoff);
+  const layer=svg("g",{class:"war-research-links","aria-label":"Behavioral evidence relationships"});let drawn=0;
+  const connect=(a,b,relation,evidence)=>{
+    if(drawn>=40)return;const from=locations.get(a),to=locations.get(b);if(!from||!to||a===b)return;
+    const midX=(from[0]+to[0])/2,midY=(from[1]+to[1])/2-35;
+    const path=svg("path",{d:`M${from[0]} ${from[1]} Q${midX} ${midY} ${to[0]} ${to[1]}`,class:relation==="producer_reported_connection"?"research-connection":"research-similarity",tabindex:"0",role:"button","aria-label":`${relation}: ${a} to ${b}`});
+    const title=svg("title");title.textContent=`${a} → ${b} · ${relation} · identity not established`;path.append(title);
+    const inspect=()=>{const result=h("div",{class:"war-inspector-head"},h("h2",null,"Research relationship"),h("p",null,`${a} → ${b}`),h("p",null,relation==="producer_reported_connection"?"An enrolled source reported this connection. Verify the source evidence and capture point.":"These observations share a fingerprint. This does not establish a connection or the same actor."),h("pre",{class:"war-context"},JSON.stringify({relation,evidence_ids:evidence,identity:"not_established"},null,2)));clear(WAR.inspector).append(result);};
+    path.addEventListener("click",inspect);path.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();inspect();}});layer.append(path);drawn++;
+  };
+  const fingerprints=new Map();
+  for(const edge of edges){
+    if(edge.relation==="producer_reported_connection")connect(edge.source_ip,edge.target_ip,edge.relation,edge.evidence);
+    else if(edge.source_ip){if(!fingerprints.has(edge.target))fingerprints.set(edge.target,[]);fingerprints.get(edge.target).push(edge);}
+  }
+  for(const members of fingerprints.values()){for(let i=1;i<Math.min(members.length,8);i++)connect(members[0].source_ip,members[i].source_ip,"shared_fingerprint",[...members[0].evidence,...members[i].evidence].slice(0,12));}
+  map.append(layer);
 }
 
 async function refreshWarRoom() {
@@ -163,6 +205,7 @@ function paintWarMap(groups) {
     land.append(svg("path", { d, "fill-rule": "evenodd" }));
   }
   map.append(land);
+  paintWarResearchLinks(map,groups);
   for (const group of groups.filter((g) => g.located)) {
     const [x, y] = warProject(group.longitude, group.latitude), radius = 4 + Math.min(8, Math.sqrt(group.events.length) * 1.5);
     const marker = svg("g", { class: "war-marker " + group.severity + (WAR.selected === group.key ? " selected" : ""), transform: `translate(${x},${y})`, tabindex: "0", role: "button", "aria-label": `${group.name}: ${group.sources.length} source IPs, ${group.events.length} findings`, "aria-pressed": String(WAR.selected === group.key) });
@@ -175,7 +218,7 @@ function paintWarMap(groups) {
   // Panning changes only the viewport; source coordinates remain unchanged.
   let drag = null;
   map.addEventListener("pointerdown", (e) => {
-    if (e.target.closest(".war-marker") || e.button !== 0) return;
+    if (e.target.closest(".war-marker,.war-research-links") || e.button !== 0) return;
     drag = { x: e.clientX, y: e.clientY, left: cam.x, top: cam.y };
     map.setPointerCapture(e.pointerId);
   });

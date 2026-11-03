@@ -45,6 +45,7 @@ import (
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
 	"github.com/Problem99-io/kodeblue/internal/hub"
+	"github.com/Problem99-io/kodeblue/internal/research"
 )
 
 func main() {
@@ -59,6 +60,7 @@ func main() {
 	certFile := fs.String("tls-cert", os.Getenv("KODEBLUE_HUB_TLS_CERT"), "TLS certificate (PEM)")
 	keyFile := fs.String("tls-key", os.Getenv("KODEBLUE_HUB_TLS_KEY"), "TLS private key (PEM)")
 	disableIP := fs.Bool("disable-ip-enrichment", envOr("KODEBLUE_HUB_DISABLE_IP_ENRICHMENT", "") == "1", "disable third-party IP enrichment regardless of console settings")
+	researchEnabled := fs.Bool("behavioral-research", os.Getenv("KODEBLUE_HUB_BEHAVIORAL_RESEARCH") == "1", "enable the experimental, independent behavioral evidence store")
 	selfSigned := fs.Bool("self-signed", envOr("KODEBLUE_HUB_SELF_SIGNED", "") == "1", "generate a self-signed certificate in <data>/tls; servers pin its public key")
 	behindProxy := fs.Bool("behind-proxy", envOr("KODEBLUE_HUB_BEHIND_PROXY", "") == "1", "plain HTTP behind a TLS-terminating reverse proxy (believes its X-Forwarded-For)")
 	trustedProxies := fs.String("trusted-proxy", os.Getenv("KODEBLUE_HUB_TRUSTED_PROXIES"), "with --behind-proxy: addresses/CIDRs of the proxies whose X-Forwarded-For is believed (default loopback)")
@@ -84,7 +86,7 @@ func main() {
 
 	switch cmd {
 	case "serve":
-		serve(logger, *data, *listen, *httpListen, *certFile, *keyFile, *selfSigned, *behindProxy, *trustedProxies, *consoleAllow, *endpointAllow, *publicURL, *dist, *enrollTTL, *disableIP)
+		serve(logger, *data, *listen, *httpListen, *certFile, *keyFile, *selfSigned, *behindProxy, *trustedProxies, *consoleAllow, *endpointAllow, *publicURL, *dist, *enrollTTL, *disableIP, *researchEnabled)
 	case "user":
 		st := mustStore(*data)
 		defer st.Close()
@@ -125,7 +127,7 @@ func main() {
 	}
 }
 
-func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile string, selfSigned, behindProxy bool, trustedProxies, consoleAllow, endpointAllow, publicURL, dist string, enrollTTL time.Duration, disableIP bool) {
+func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile string, selfSigned, behindProxy bool, trustedProxies, consoleAllow, endpointAllow, publicURL, dist string, enrollTTL time.Duration, disableIP bool, researchEnabled bool) {
 	opt := hub.Options{DisableIPEnrichment: disableIP, DataDir: data, DistDir: dist, PublicURL: publicURL, BehindProxy: behindProxy, EnrollTTL: enrollTTL}
 	var err error
 	if opt.TrustedProxies, err = hub.ParsePrefixes(trustedProxies); err != nil {
@@ -142,6 +144,14 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	}
 	st := mustStore(data)
 	defer st.Close()
+	if researchEnabled {
+		r, err := research.Open(filepath.Join(data, "research"), research.DefaultLimits())
+		if err != nil {
+			fatal(fmt.Errorf("behavioral research: %w", err))
+		}
+		defer r.Close()
+		opt.Research = r
+	}
 	if publicURL != "" {
 		if _, err := hubproto.CheckURL(publicURL); err != nil {
 			fatal(fmt.Errorf("--public-url: %w", err))
@@ -189,6 +199,7 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	defer stop()
 	go srv.Janitor(ctx)
 	go srv.NotificationForwarder(ctx)
+	go srv.ResearchMaintenance(ctx)
 	srv.StartWarRoom(ctx)
 	hs := &http.Server{Addr: listen, Handler: srv.Handler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
