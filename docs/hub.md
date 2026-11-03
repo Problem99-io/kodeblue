@@ -49,6 +49,60 @@ server (kodeblue, its own user)                          hub
 - **Pinned release hashes.** The install command the console prints carries the sha256 of the `install.sh` the hub serves and checks it before running it as root. That `install.sh` carries the sha256 of each agent tarball (written in by the hub as `KODEBLUE_DIST_SHA256SUMS`), and the installer checks the download against it instead of fetching `SHA256SUMS`. The hub takes these hashes once, when it first needs an installer (it keeps looking until one is published), and keeps them until it restarts. Restart the hub after updating its release files; `kodeblue-hub server add` (a separate process) hashes the files as they are now, so run it only after that restart. A release file swapped under a running hub, with or without a matching `SHA256SUMS`, then fails the check instead of being installed. A tarball that disagrees with `SHA256SUMS` at that moment is not pinned at all, and installs of it fail. Upgrading the hub restarts it.
 - **The hub's own outbound calls** (the model connection test, the model browser, and Slack posts and the Slack test button) refuse loopback, link-local (`169.254.0.0/16`, `fe80::/10`, the metadata service of every major cloud), `fd00:ec2::254`, `100.100.100.200`, unspecified and multicast addresses, whatever a name resolves to. They also do not follow redirects to another host and do not use `HTTPS_PROXY`. Private LAN ranges (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`) stay allowed, because self-hosted gateways live there. For an endpoint on the hub's own host, allow it with `--endpoint-allow 127.0.0.1` (`KODEBLUE_HUB_ENDPOINT_ALLOW`). Servers reach their model endpoints themselves, so a connection such as `http://127.0.0.1:11434` (a model on each server) still works for them.
 
+### War room
+
+The **War room** tab on the right edge opens a world map above the current page.
+The tab travels with the map drawer’s leading edge as it slides open and closed.
+The page slides left and remains in place; close the drawer or press Escape to
+return. Select a map location to see its source IPs, providers, network types,
+linked incidents, event times, server names, evidence and incident summaries.
+Incident links open the existing case panel. Unlocated and private sources remain
+available in the source list without an invented map position.
+
+The map indexes registered findings with explicit source fields (`ip`,
+`source_ip`, `src_ip`, `client_ip`, `remote_ip`, `peer_ip`, `src_addr`), including
+source fields in a finding's structured value. It does not scrape addresses from
+reports, log prose, forwarded-header lists, or destination fields. Findings with
+the same coordinates cluster together. Time filters use finding updates; the
+context panel shows the original event time when available and its last update.
+Raw sensor events that never become findings are not uploaded by the existing
+sync protocol and are not shown. The latest 5,000 source/finding associations are
+returned per view; a notice asks for narrower filters if this limit is reached.
+
+Enrichment is **off by default**, including after upgrades. Opening the drawer
+shows a consent notice. No external lookup happens until an operator enables it
+and confirms. Public source IPs may belong to legitimate users, administrators,
+or the fleet. The provider learns which IPs this hub investigates. Pin lookups
+off with `--disable-ip-enrichment` or `KODEBLUE_HUB_DISABLE_IP_ENRICHMENT=1`;
+console settings cannot override this.
+
+After consent, public IPv4 and IPv6 addresses are enriched on the hub through
+[ipapi.is](https://ipapi.is/developers.html); only the source IP and an optional
+provider key leave the hub. Logs, incident details, server names and private or
+reserved addresses are never sent. The bundled public-domain Natural Earth map
+uses no external tiles, scripts, fonts, or browser geolocation.
+
+Open **Enrichment** inside the drawer to enable or disable lookups or save/clear an optional
+API key. Keys stay on the hub and are never returned to the browser or enrolled
+servers. Anonymous lookups provide ownership and approximate location, with a
+local ceiling of 30 attempts per UTC day. A key enables network classification
+when supplied by the provider and raises the local ceiling to 1,000 attempts.
+Unknown classifications stay unknown. Results are cached for seven days; saving
+a key schedules a refresh for richer data. Requests are paced, failures back off,
+and provider quota/access refusals stop further lookups until the next UTC day.
+These local limits persist across hub restarts. Cached locations remain usable
+during provider outages. IP geolocation can represent an ISP, datacenter, VPN or
+proxy exit; it is not proof of a person's physical location or attribution.
+
+Screenshots below use synthetic findings and illustrative enrichment data, not real
+incidents or verified attribution.
+
+![War room map with source locations and activity](assets/war-room-map.jpg)
+
+![First-open enrichment consent, disabled by default](assets/war-room-consent.jpg)
+
+![Selected location with source intelligence and linked incident context](assets/war-room-details.jpg)
+
 ### What operators can and cannot do from the hub
 
 Operators can **message** a server's agents. A message about an incident continues that incident's own agent session (full context); anything else starts an operator-liaison session (`blue-operator`) per conversation. The agent can investigate, explain, add or tune monitors and allow rules, update the profile, definitions and skills, and *request* containment.
@@ -246,9 +300,24 @@ kodeblue-hub fleet set|clear|status inference-url|inference-model|inference-prov
 kodeblue-hub pin [--tls-cert f]                          # the self-signed certificate's pin, or f's
 ```
 
-Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
+Every flag except `--enroll-ttl` also has a `KODEBLUE_HUB_*` environment variable (`DATA`, `LISTEN`, `TLS_CERT`, `TLS_KEY`, `SELF_SIGNED=1`, `BEHIND_PROXY=1`, `TRUSTED_PROXIES`, `CONSOLE_ALLOW`, `PUBLIC_URL`, `DIST`, `HTTP_LISTEN`, `DISABLE_IP_ENRICHMENT=1`). Lists are comma- or space-separated addresses and CIDRs. Run the CLI as the `kodeblue-hub` user (`sudo -u kodeblue-hub kodeblue-hub … --data /var/lib/kodeblue-hub`) so the database keeps its owner. The hub keeps 90 days of findings, journal and transcripts, and a year of audit log.
 
 Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+The overview refreshes once a minute with 256-character finding previews. Full
+finding and incident context loads on demand. Historical indexing runs in
+background batches using rowid pagination. Unlocated results are cached for
+seven days; lookup failures emit rate-limited warnings.
+
+Map provenance: `world-land.json` is public-domain Natural Earth `ne_110m_land`
+GeoJSON geometry, rounded to three decimal places and compact JSON encoded.
+
+Backfill batches read and write in one transaction, serializing with sync and
+retention. Non-quota enrichment failures back off exponentially from one minute
+to six hours. Expanded context survives refreshes while its record revision is
+unchanged; findings without additional detail do not show a load button.
+
+![Expanded synthetic context retained after a refresh](assets/war-room-retained-context.jpg)
