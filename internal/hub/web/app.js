@@ -192,7 +192,7 @@ function verdictBadge(v) {
   const cls = { true_positive: "b-bad", malicious: "b-bad", suspicious: "b-warn", inconclusive: "b-warn", false_positive: "b-ok", benign_change: "b-ok", benign: "b-ok", error: "b-bad" }[v] || "";
   return h("span", { class: "badge " + cls }, v.replace(/_/g, " "));
 }
-function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "operator", "coverage"].includes(k) ? k : "incident") }, k || "case"); }
+function kindBadge(k) { return h("span", { class: "kind k-" + (["incident", "learning", "review", "research", "operator", "coverage"].includes(k) ? k : "incident") }, (k==="research"?"investigation":k) || "case"); }
 function phaseBadge(p) {
   const cls = { watching: "b-ok", learning: "b-accent", maintenance: "b-warn" }[p] || "b-warn";
   return h("span", { class: "badge " + cls, title: p ? null : "enrolled, but no report received yet" }, p || "not reporting yet");
@@ -547,7 +547,7 @@ function header(r) {
   av.addEventListener("click", () => menu(av, [
     h("div", { class: "mwho" }, h("div", { class: "fg" }, me), h("div", { class: "muted small" }, "operator")),
     menuItem("Audit log", { href: "#/audit", icon: "file" }),
-      menuItem("War room · research", { icon: "layers", click: () => { openWarRoom(); toggleWarResearch(true,true); } }),
+      menuItem("War room", { icon: "layers", click: () => openWarRoom() }),
     menuItem("Sign out", { icon: "logout", cls: "c-red", click: logout }),
   ]));
   return h("header", { class: "hdr" },
@@ -923,7 +923,7 @@ async function vBoard(r, main, srv) {
 const DROP_HINT = { live: "Ask the agent to look again", human: "Move to Needs human", done: "Mark resolved" };
 
 // ----- board filters (kept in this browser) and pins (shared on the hub)
-const KINDS = ["incident", "learning", "review", "operator", "coverage"];
+const KINDS = ["incident", "learning", "review", "research", "operator", "coverage"];
 const sevOf = (t) => (SEV.includes(t.severity) ? t.severity : "info");
 const kindOf = (t) => (KINDS.includes(t.kind) ? t.kind : "incident");
 // needsYou: waiting on a person: approvals, or the Needs human column.
@@ -1258,7 +1258,7 @@ function sevChip(sev) {
   return h("span", { class: "chip2 s-" + k, title: "severity" }, h("i"), k);
 }
 function kindChip(kind) {
-  const k = ["incident", "learning", "review", "operator", "coverage"].includes(kind) ? kind : "incident";
+  const k = ["incident", "learning", "review", "research", "operator", "coverage"].includes(kind) ? kind : "incident";
   return h("span", { class: "chip2 k-" + k }, k);
 }
 function liveRow(text, at) {
@@ -1422,6 +1422,7 @@ function openPanel(r, key) {
   more.addEventListener("click", () => {
     const t = !P.st.isNew && !P.st.placeholder ? caseByKey(P.key) : null;
     menu(more, [
+      menuItem("Discuss in War room",{icon:"layers",click:()=>openWarRoom({server_id:P.st?.srv||parseHash().srv||"",case_id:P.st?.inc?.id||null})}),
       menuItem("Copy link", { icon: "copy", click: () => copyText(location.href, "Link copied") }),
       menuItem("Refresh", { icon: "refresh", click: () => { P.st.chatSig = ""; P.st.apprSig = ""; panelRefresh(true); } }),
       srv ? menuItem("Open server", { icon: "server", href: "#/s/" + enc(srv) + "/overview" }) : null,
@@ -1479,18 +1480,19 @@ function paintRail() {
   P.el.classList.toggle("has-ext", !!P.ext && !off);
 }
 
-function composer() {
-  const ta = h("textarea", { rows: 1, maxlength: 8000, "aria-label": "Message the agent", placeholder: "Message the agent…" });
+function composer(options={}) {
+  const draftKey=options.draftKey||P.key;
+  const ta = h("textarea", { rows: 1, maxlength: options.maxLength||8000, "aria-label": options.label||"Message the agent", placeholder: options.placeholder||"Message the agent…" });
   const send = h("button", { class: "send", type: "button", title: "Send (Enter)", "aria-label": "Send" }, ic("send", 16));
   const chip = h("span", { class: "chip" }, ic("server", 11), h("span", { class: "chip-l" }, "kodeblue"));
   const note = h("span", { class: "cnote", role: "status" }, "enter to send · shift+enter newline");
   const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 220) + "px"; };
-  ta.addEventListener("input", () => { S.drafts[P.key] = ta.value; grow(); send.disabled = !ta.value.trim(); });
+  ta.addEventListener("input", () => { S.drafts[draftKey] = ta.value; grow(); send.disabled = !ta.value.trim(); });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send.click(); } });
-  send.addEventListener("click", () => sendMessage(ta.value));
+  send.addEventListener("click", () => (options.onSend||sendMessage)(ta.value.trim()));
   const el = h("div", { class: "comp" }, h("div", { class: "comp-in" }, h("span", { class: "prompt" }, ">"), ta),
     h("div", { class: "comp-sep" }), h("div", { class: "comp-ft" }, chip, note, h("div", { class: "sp" }), send));
-  setTimeout(() => { ta.value = S.drafts[P.key] || ""; grow(); send.disabled = !ta.value.trim(); });
+  setTimeout(() => { ta.value = S.drafts[draftKey] || options.initialValue||""; grow(); send.disabled = !ta.value.trim(); });
   return { el, ta, send, chip, note, setChip: (t) => { chip.lastChild.textContent = t; }, setNote: (t, bad) => { note.textContent = t; note.classList.toggle("bad", !!bad); } };
 }
 
@@ -1498,6 +1500,10 @@ async function sendMessage(text) {
   text = text.trim();
   if (!text || P.busy) return;
   const st = P.st;
+  if(st.inc?.kind==="research"){
+    openWarRoom({server_id:st.srv,case_id:st.inc.id,question:text});
+    P.comp.setNote("Question carried into War room with this case.");return;
+  }
   let srv = st.srv;
   const body = { body: text, incident_id: 0, conversation_id: "" };
   if (st.isNew) {
@@ -3582,7 +3588,8 @@ async function fleetAgents(box) {
   const agents = h("div", { class: "stack" },
     panel("Agent models", h("div", { class: "bd stack" },
       h("div", { class: "note" }, "The model each agent uses on every server, from any connection. An empty role uses Default; critical incidents use the Responder's model unless set. Servers can override single roles on their Settings tab."),
-      h("div", { class: "frows" }, models.map(([role, f]) => h("div", { class: "frow" }, h("span", { class: "frow-l" }, roleName(role)), f.el)))), null, "cyan"),
+      h("div", { class: "frows" }, models.map(([role, f]) => h("div", { class: "frow" }, h("span", { class: "frow-l" }, roleName(role)), f.el))),
+      h("button",{class:"btn small",type:"button",on:{click:()=>{openWarRoom();toggleWarResearch(true);window.KodeBlueResearch.openAutomation();}}},"Optional traffic automation")), null, "cyan"),
     panel("Agent instructions", h("div", { class: "bd stack" },
       h("div", { class: "note" }, "Extra instructions added after each agent's built-in prompt: “All agents” first, then the agent's own."),
       instr.map(([, b]) => b.el())), null, "green"),

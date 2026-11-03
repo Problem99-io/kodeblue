@@ -75,8 +75,10 @@ type Status struct {
 	CollectorRuns  map[string]int     `json:"collector_runs,omitempty"`
 	Profile        string             `json:"profile,omitempty"`
 	// FindingStats7d is rule -> status -> count: the raw false-positive picture.
-	FindingStats7d  map[string]map[string]int `json:"finding_stats_7d,omitempty"`
-	AcceptsMessages bool                      `json:"accepts_messages"`
+	FindingStats7d       map[string]map[string]int `json:"finding_stats_7d,omitempty"`
+	SupportsWarRoom      bool                      `json:"supports_war_room,omitempty"`
+	SupportsInvestigator bool                      `json:"supports_investigator,omitempty"`
+	AcceptsMessages      bool                      `json:"accepts_messages"`
 	// AcceptsApprovals: hub operators may approve or deny containment the
 	// agent asked for (hub.accept_approvals).
 	AcceptsApprovals bool `json:"accepts_approvals"`
@@ -345,6 +347,9 @@ func ValidProvider(p string) bool { return p == "" || providerRe.MatchString(p) 
 // OperatorMessage is a message an authenticated hub operator sent to this
 // server's kodeblue.
 type OperatorMessage struct {
+	CouncilRole string `json:"council_role,omitempty"`
+	// CouncilPhase controls report presentation only; it grants no additional tools.
+	CouncilPhase   string    `json:"council_phase,omitempty"`
 	ID             int64     `json:"id"`
 	Author         string    `json:"author"`
 	Body           string    `json:"body"`
@@ -375,7 +380,8 @@ type OperatorMessage struct {
 const (
 	// CommandLearn runs the learner agent now on the baseline the server
 	// already has; detection keeps running.
-	CommandLearn = "learn"
+	CommandLearn       = "learn"
+	CommandInvestigate = "investigate"
 	// CommandRelearn runs the whole learning phase again: baseline sweeps
 	// (changes seen meanwhile are absorbed as normal), then the learner.
 	CommandRelearn = "relearn"

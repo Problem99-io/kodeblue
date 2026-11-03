@@ -2,13 +2,17 @@
 (() => {
   "use strict";
   const $ = id => root?.querySelector(`#${id}`);
-  let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null;
+  let root = null, csrf = "", sites = [], generation = 0, onGraph = null, graphResize=null,graphSnapshot=null,onUnavailable=null;
+  let investigatorTimer=null,investigatorRequest=0;
+
+
+  let automationDirty=false,automationSite="",revealAutomation=false;
   const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = String(text); return e; };
   async function api(path, options = {}) {
     const res = await fetch(path, { ...options, headers: { "Content-Type": "application/json", "X-Kodeblue-CSRF": csrf, ...options.headers } });
-    const data = await res.json(); if (!res.ok) throw new Error(data.error || "Research unavailable"); return data;
+    let data;try{data=await res.json();}catch{throw new Error(`Research request failed (HTTP ${res.status})`);} if (!res.ok) throw new Error(data.error || "Research unavailable"); return data;
   }
-  const text = (id, value) => { $(id).textContent = value; };
+  const text = (id, value) => { $(id).textContent = value;if(id==="status")$(id).hidden=value.startsWith("Loaded passive evidence."); };
   function table(target, headings, rows) {
     const t = node("table"), head = node("tr"); headings.forEach(h => head.append(node("th", h))); t.append(head);
     rows.forEach(values => { const r = node("tr"); values.forEach(v => r.append(node("td", v))); t.append(r); });
@@ -61,23 +65,47 @@
       text("coverage",`Accepted since site creation: ${c.accepted}. Rejected batches: ${c.rejected}. Detail evicted by capacity: ${c.detail_evicted}. Summary buckets evicted: ${c.summary_evicted}. Detail TTL: ${c.detail_hours}h; summaries: ${c.summary_days}d. ${c.notes.join(" ")}`);
       graphSnapshot={map,observations:page.observations};graph(map,page.observations);
       onGraph?.(map);
-      text("status","Loaded. No model or external enrichment was called.");
+      text("status","Loaded passive evidence. Model investigation requires a question or an enabled automation policy.");
     } catch(e) { if (mine === generation) text("status",e.message); }
   }
   async function refreshSites() {
     const mounted=root;
     const data = await api("/api/research");
     if (root!==mounted || !root?.isConnected) return;
-    if (!data.enabled) { text("status","Research is disabled. Start the hub with --behavioral-research to enable this experimental module. Existing agents are unchanged."); return; }
+    if (!data.enabled) { text("status","Research is disabled. Start the hub with --behavioral-research to enable this experimental module. Existing agents are unchanged.");onUnavailable?.();return; }
     sites=data.sites; $("configuration").hidden=false; $("workspace").hidden=false;
     const selected=$("site").value; $("site").replaceChildren(...sites.map(s=>{const o=node("option",s.name);o.value=s.id;return o;}));
     if (sites.some(s=>s.id===selected)) $("site").value=selected;
     if (!sites.length) { text("status","No research sites configured. Add a site below; collection starts only when you connect a source."); $("configuration").open=true; }
     else await load();
+    await loadInvestigator();
+    if(revealAutomation&&root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}
+  }
+  async function loadInvestigator(){
+    clearTimeout(investigatorTimer);const mounted=root,site=$("site")?.value;if(!mounted?.isConnected||!site)return;
+    try{const [servers,jobs,automation]=await Promise.all([api("/api/fleet"),api(`/api/research/sites/${encodeURIComponent(site)}/investigations`),api(`/api/research/sites/${encodeURIComponent(site)}/automation`)]);
+      if(root!==mounted||$("site").value!==site)return;
+      if(automationSite!==site||!automationDirty){automationSite=site;automationDirty=false;const policy=automation.settings,source=$("automation-worker"),allowed=sites.find(s=>s.id===site)?.servers||[];
+        source.replaceChildren(node("option","Choose an enrolled source"));source.firstChild.value="";
+        for(const server of servers.filter(s=>allowed.includes(s.id)&&!s.revoked)){const option=node("option",server.name);option.value=server.id;source.append(option);}
+        source.value=policy.worker||"";$("automation-suspicious").checked=policy.auto_suspicious;$("automation-daily").checked=policy.daily_report;$("automation-hour").value=policy.daily_hour;
+        const state=automation.state;text("automation-status",`Last traffic overview: ${state.last_daily_report||"none"}. Automatic jobs: ${state.suspicious_runs||0}/4. ${automation.scope_changed?"Collector scope changed; save to approve it.":""} ${state.suspicious_error||""} ${state.daily_error||""}`);
+      }
+      $("investigator-jobs").replaceChildren(...jobs.map(job=>{const detail=node("details");detail.append(node("summary",`Traffic investigation #${job.id} · ${job.status}`),node("pre",job.reply||"Pending native case report."));return detail;}));
+      if(jobs.some(j=>j.status==="queued"||j.status==="delivered"))investigatorTimer=setTimeout(loadInvestigator,10000);
+    }catch(e){if(root===mounted)text("automation-status",e.message);}
   }
   function bind(){
   $("day").value=new Date(Date.now()-86400000).toISOString().slice(0,10);
-  $("refresh").addEventListener("click",load); $("site").addEventListener("change",load);
+  $("refresh").addEventListener("click",()=>{load();loadInvestigator();}); $("site").addEventListener("change",()=>{load();loadInvestigator();});
+  $("automation-form").addEventListener("input",()=>{automationDirty=true;});
+  $("automation-form").addEventListener("change",()=>{automationDirty=true;});
+  $("automation-form").addEventListener("submit",async e=>{
+    e.preventDefault();const mounted=root,site=$("site").value,button=$("automation-submit");button.disabled=true;
+    try{await api(`/api/research/sites/${encodeURIComponent(site)}/automation`,{method:"PUT",body:JSON.stringify({worker:$("automation-worker").value,auto_suspicious:$("automation-suspicious").checked,daily_report:$("automation-daily").checked,daily_hour:Number($("automation-hour").value)})});if(root!==mounted||$("site").value!==site)return;automationDirty=false;await loadInvestigator();}
+    catch(err){if(root===mounted)text("automation-status",err.message);}
+    finally{if(root===mounted)button.disabled=false;}
+  });
   $("site-form").addEventListener("submit",async e=>{
     e.preventDefault(); const id=$("config-id").value.trim();
     const list=id=>$(id).value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
@@ -86,6 +114,8 @@
   });
   }
   window.KodeBlueResearch = {
+    openAutomation(){revealAutomation=true;if(root?.isConnected){$("automation-settings").open=true;$("automation-settings").scrollIntoView({block:"center"});revealAutomation=false;}},
+    prefillQuestion(question){window.KodeBlueWarRoom?.prefill(question);},
     async mount(host,options={}) {
       const token=++generation;
       const response=await fetch("/assets/research-panel.html");
@@ -95,11 +125,11 @@
       const doc=new DOMParser().parseFromString(markup,"text/html");
       root=document.importNode(doc.querySelector("main.research-page"),true);
       root.querySelector(".research-heading a")?.remove();
-      host.replaceChildren(root);onGraph=options.onGraph||null;bind();
+      host.replaceChildren(root);onGraph=options.onGraph||null;onUnavailable=options.onUnavailable||null;bind();
       graphSnapshot=null;graphResize?.disconnect();graphResize=new ResizeObserver(()=>{if(root?.isConnected&&graphSnapshot)graph(graphSnapshot.map,graphSnapshot.observations);});graphResize.observe($("network"));
       try {const me=await api("/api/me");if(token!==generation)return;csrf=me.csrf;await refreshSites();}
       catch {if(token===generation && root?.isConnected)text("status","Research unavailable; geography and incident evidence remain available.");}
     },
-    close(){generation++;root=null;onGraph=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
+    close(){generation++;investigatorRequest++;automationDirty=false;automationSite="";revealAutomation=false;clearTimeout(investigatorTimer);root=null;onGraph=null;onUnavailable=null;graphSnapshot=null;graphResize?.disconnect();graphResize=null;},
   };
 })();

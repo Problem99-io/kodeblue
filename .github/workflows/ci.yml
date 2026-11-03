@@ -46,6 +46,7 @@ jobs:
           shellcheck -S warning deploy/install.sh deploy/build-dist.sh deploy/hub/install-hub.sh
           node --check internal/hub/web/app.js
           node --check internal/hub/web/warroom.js
+          node --check internal/hub/web/warroom-chat.js
           node --check internal/hub/web/research.js
           node --check internal/hub/web/research-tracker.js
       - name: Test behavioral collection and War room relationships

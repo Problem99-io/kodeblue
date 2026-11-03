@@ -89,6 +89,7 @@ type Server struct {
 	researchPublicLimit *limiter
 	researchGlobalLimit *limiter
 	researchSlots       chan struct{}
+	researchAutoWake    chan struct{}
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -115,6 +116,7 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 	s.researchPublicLimit = newLimiter(120, time.Minute)
 	s.researchGlobalLimit = newLimiter(600, time.Minute)
 	s.researchSlots = make(chan struct{}, 4)
+	s.researchAutoWake = make(chan struct{}, 1)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -360,8 +362,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, id string) {
 		if msgs := s.st.TakeQueued(id); len(msgs) > 0 {
 			out := hubproto.MessagesResponse{}
 			for _, m := range msgs {
+				phase := ""
+				if m.Command == hubproto.CommandInvestigate {
+					phase = s.councilPhase(m.ID)
+				}
 				out.Messages = append(out.Messages, hubproto.OperatorMessage{ID: m.ID, Author: m.Author, Body: m.Body, IncidentID: m.IncidentID,
-					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash})
+					ConversationID: m.ConversationID, CreatedAt: m.CreatedAt, Decision: m.Decision, RequestID: m.RequestID, Command: m.Command, SessionID: m.SessionID, RuleHash: m.RuleHash, CouncilPhase: phase, CouncilRole: s.councilRole(m.ID)})
 			}
 			writeJSON(w, http.StatusOK, out)
 			return
@@ -392,6 +398,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request, id string) 
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.wakeResearchCouncil()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

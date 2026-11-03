@@ -1,7 +1,7 @@
 // War room is a drawer above the current page. All source/provider data is
 // untrusted and rendered through text nodes; the map has no remote tile server.
 "use strict";
-const WAR = { open: false, request: 0, hours: "24", server: "", severity: "", query: "", selected: null, eventLimit: 50, camera: { x: 0, y: 0, width: 1000, height: 500 }, data: null, land: null, timer: null };
+const WAR = { open: false, researchOpen: false, request: 0, hours: "24", server: "", severity: "", query: "", selected: null, eventLimit: 50, camera: { x: 0, y: 0, width: 1000, height: 500 }, data: null, land: null, timer: null };
 
 function mountWarRoom() {
   let tab = document.getElementById("war-tab");
@@ -14,9 +14,13 @@ function mountWarRoom() {
   tab.hidden = !S.me;
 }
 
-function openWarRoom() {
+function openWarRoom(initial) {
+  const active=P.el?.isConnected?P.st:null;
+  const context=initial||{server_id:active?.srv||parseHash().srv||"",case_id:active?.inc?.id||null};
+  if(WAR.open&&initial){window.KodeBlueWarRoom.mount(WAR.chatHost,context);return;}
   if (WAR.open || !S.me) return;
   WAR.open = true;
+  WAR.server=context.server_id||"";
   document.querySelectorAll(".menu").forEach((el) => el.remove());
   const tab = document.getElementById("war-tab");
   const drawer = document.getElementById("war-drawer");
@@ -42,28 +46,33 @@ function openWarRoom() {
   WAR.stats = h("div", { class: "war-stats" });
   WAR.map = h("div", { class: "war-map", "aria-label": "World map of source activity" });
   WAR.recent = h("div", { class: "war-recent" });
+  WAR.chatHost=h("div",{class:"wr-chat-host"});
   WAR.researchHost = h("div", {id:"war-research-panel",class:"war-research-host", hidden:true});
   WAR.researchGraph = null;
   WAR.inspector = h("aside", { class: "war-inspector", "aria-label": "Source and incident details", "aria-live": "polite" });
   WAR.config = h("div", { class: "war-config", hidden: true });
   WAR.notice = h("div", { class: "war-notice", hidden: true, role: "status" });
-  const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) paintWarSettings(); } } }, ic("sliders", 13), "Enrichment");
+  const settings = h("button", { class: "btn small", type: "button", "aria-expanded": "false", on: { click: () => { WAR.config.hidden = !WAR.config.hidden; settings.setAttribute("aria-expanded", String(!WAR.config.hidden)); if (!WAR.config.hidden) {paintWarSettings();} } } }, ic("sliders", 13), "Enrichment");
   WAR.settingsButton = settings;
-  WAR.researchButton=h("button",{class:"btn small",type:"button","aria-expanded":"false","aria-controls":"war-research-panel",on:{click:()=>toggleWarResearch(!WAR.researchOpen)}},ic("layers",13),"Research layer");
-  WAR.shell.append(
-    h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Source activity · evidence · agent council"))), h("div", { class: "sp" }), WAR.status, WAR.researchButton, settings, close),
+  WAR.researchButton=h("button",{class:"btn small",type:"button","aria-expanded":"false","aria-controls":"war-research-panel",on:{click:()=>toggleWarResearch(!WAR.researchOpen)}},ic("layers",13),"Traffic analytics");
+  WAR.mapPane=h("section",{class:"war-map-section wr-map-pane","aria-label":"Activity map"},
+    h("div",{class:"wr-map-tools"},h("span",{class:"small faint"},"SOURCE ACTIVITY"),h("div",{class:"sp"}),settings,WAR.researchButton),WAR.researchHost,
     h("div", { class: "war-filters" }, range, servers, severity, h("div", { class: "sp" }), query), WAR.config, WAR.notice, WAR.stats,
     h("div", { class: "war-grid" }, h("div", { class: "war-theater" },
       h("div", { class: "war-map-top" }, h("span", null, "SOURCE ORIGINS"), h("span", { class: "war-live" }, h("span", { class: "dot on" }), "Live activity")),
       WAR.map,
-      h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),
-      WAR.recent,WAR.researchHost), WAR.inspector));
+      h("div", { class: "war-map-foot" }, h("span", null, "IP locations are approximate; a location may represent a VPN, proxy, or hosting exit."), h("span", null, "Map: Natural Earth")),WAR.recent),WAR.inspector));
+  WAR.shell.append(
+    h("div", { class: "war-heading" }, h("div", { class: "war-wordmark" }, ic("layers", 20), h("div", null, h("h1", { id: "war-title" }, "War room"), h("div", { class: "small faint" }, "Cases · agents · evidence"))), h("div", { class: "sp" }), WAR.status,close),
+    h("div",{class:"wr-workspace"},WAR.mapPane,WAR.chatHost));
+
   WAR.shell.addEventListener("keydown", warKeys);
   document.body.append(WAR.backdrop);
   drawer.append(WAR.shell);
   requestAnimationFrame(() => { if (WAR.open) drawer.classList.add("on"); });
   close.focus();
   const reopenResearch=WAR.researchOpen;WAR.researchOpen=false;if(reopenResearch)toggleWarResearch(true);
+  window.KodeBlueWarRoom.mount(WAR.chatHost,context);
   refreshWarRoom();
   WAR.timer = setInterval(() => { if (!document.hidden && WAR.open) refreshWarRoom(); }, 60000);
 }
@@ -71,7 +80,7 @@ function openWarRoom() {
 function closeWarRoom() {
   if (!WAR.open) return;
   WAR.open = false; WAR.request++;
-  window.KodeBlueResearch?.close();WAR.researchGraph=null;
+  window.KodeBlueResearch?.close();window.KodeBlueWarRoom?.close();WAR.researchGraph=null;
   clearInterval(WAR.timer);
   for (const entry of WAR.background || []) if (entry.el.isConnected) entry.el.inert = entry.inert;
   WAR.background = [];
@@ -87,7 +96,7 @@ function closeWarRoom() {
 function warKeys(e) {
   if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeWarRoom(); }
   if (e.key !== "Tab") return;
-  const nodes = [...WAR.shell.querySelectorAll('a,button,input,select,[tabindex="0"]')].filter((el) => !el.disabled && el.getClientRects().length);
+  const nodes = [...WAR.shell.querySelectorAll('a,button,input,select,textarea,summary,[tabindex="0"]')].filter((el) => !el.disabled && el.getClientRects().length);
   const first = nodes[0], last = nodes[nodes.length - 1];
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
@@ -136,7 +145,7 @@ async function refreshWarRoom() {
     const data = await api("GET", `/api/war-room?hours=${enc(WAR.hours)}&server_id=${enc(WAR.server)}`);
     if (!WAR.open || request !== WAR.request) return;
     WAR.data = data;
- if (!data.settings.enabled && !WAR.consentShown) { WAR.consentShown=true; WAR.config.hidden=false; WAR.settingsButton.setAttribute("aria-expanded","true"); paintWarSettings(); }
+ if (!data.settings.enabled && !data.settings.pinned_off && !WAR.consentShown) { WAR.consentShown=true; WAR.config.hidden=false; WAR.settingsButton.setAttribute("aria-expanded","true"); paintWarSettings(); }
     WAR.status.textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     paintWarRoom();
     if (!WAR.land) {
@@ -253,7 +262,7 @@ function selectWarGroup(key) {
   WAR.selected = key; WAR.eventLimit = 50; paintWarRoom();
   WAR.inspector.scrollTop = 0;
   const heading = WAR.inspector.querySelector("h2"); if (heading) heading.focus({ preventScroll: true });
-  if (window.matchMedia("(max-width: 760px)").matches) WAR.inspector.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  WAR.inspector.scrollIntoView({ block: "nearest", inline:"nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
 }
 
 function paintWarInspector(groups, selected) {
@@ -279,6 +288,7 @@ function paintWarInspector(groups, selected) {
     WAR.inspector.append(h("article", { class: "war-event" },
       h("div", { class: "war-event-meta" }, h("span", { class: "badge " + (event.severity === "critical" || event.severity === "high" ? "b-bad" : "") }, event.severity), h("span", { class: "faint small" }, event.incident_status || event.status)),
       h("a", { class: "war-event-title", href, on: { click: closeWarRoom } }, event.incident_title || event.title),
+      event.incident_id?h("button",{class:"btn small",type:"button",on:{click:()=>openWarRoom({server_id:event.server_id,case_id:event.incident_id})}},"Discuss this case"):null,
       h("div", { class: "small faint" }, event.server_name, event.incident_id ? " · Incident #" + event.incident_id : " · Finding #" + event.finding_id),
       h("div", { class: "war-event-time small mono" }, h("time", { datetime: event.first_at }, when(event.first_at))),
       event.first_at !== event.last_at ? h("div", { class: "small faint" }, "Last updated " + when(event.last_at)) : null,

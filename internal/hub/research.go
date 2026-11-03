@@ -15,6 +15,7 @@ import (
 )
 
 func (s *Server) researchRoutes() {
+	s.researchAgentRoutes()
 	s.mux.HandleFunc("GET /assets/research.html", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/#war-room-research", http.StatusSeeOther)
 	})
@@ -31,7 +32,7 @@ func (s *Server) researchRoutes() {
 			return
 		}
 		bytes, _ := s.opt.Research.PhysicalBytes()
-		writeJSON(w, 200, map[string]any{"enabled": true, "sites": sites, "physical_bytes": bytes, "prototype": true, "investigator_enabled": false})
+		writeJSON(w, 200, map[string]any{"enabled": true, "sites": sites, "physical_bytes": bytes, "prototype": true, "investigator_enabled": true})
 	}))
 	s.mux.HandleFunc("PUT /api/research/sites/{site}", s.op(s.handleResearchSite))
 	s.mux.HandleFunc("DELETE /api/research/sites/{site}", s.op(func(w http.ResponseWriter, r *http.Request, c *opCtx) {
@@ -40,6 +41,14 @@ func (s *Server) researchRoutes() {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
+		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_councils WHERE site=? AND COALESCE(json_extract(data,'$.room.native'),0)=0", r.PathValue("site")); err != nil {
+			s.researchError(w, err)
+			return
+		}
+		if _, err := s.st.db.ExecContext(ctx, "DELETE FROM research_automation WHERE site=?", r.PathValue("site")); err != nil {
+			s.researchError(w, err)
+			return
+		}
 		if err := s.opt.Research.DeleteSite(ctx, r.PathValue("site")); err != nil {
 			s.researchError(w, err)
 			return
@@ -296,22 +305,26 @@ func (s *Server) researchAdmission(w http.ResponseWriter, class string) bool {
 }
 
 func (s *Server) ResearchMaintenance(ctx context.Context) {
-	if s.opt.Research == nil {
-		return
-	}
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var lastMaintenance time.Time
 	for {
-		c, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := s.opt.Research.Maintain(c, time.Now())
-		cancel()
-		if err != nil && ctx.Err() == nil {
-			s.log.Warn("research maintenance delayed")
+		s.researchCouncilTick(ctx)
+		if s.opt.Research != nil && time.Since(lastMaintenance) >= time.Minute {
+			lastMaintenance = time.Now()
+			c, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err := s.opt.Research.Maintain(c, time.Now())
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				s.log.Warn("research maintenance delayed")
+			}
+			s.researchAutomationTick(ctx, time.Now())
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-s.researchAutoWake:
 		}
 	}
 }
