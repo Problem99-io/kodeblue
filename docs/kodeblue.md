@@ -158,6 +158,50 @@ The mode in the root-owned `/etc/kodeblue/kodeblue.toml` is the ceiling. Hub ope
 
 Undo with `kodeblue respond undo <id>`. Every action but `kill_process` can be undone: a killed process cannot be revived, so its notice says where the binary was preserved instead.
 
+### Retained file-change evidence
+
+Native file monitors retain all differences in their compared, bounded samples,
+including entries omitted from the short finding preview. Directory evidence is
+the existing `relative-name size mode mtime` listing; individually monitored files
+retain their compared hash/status signatures. This does not collect additional
+file contents, owner/inode metadata or continuous filesystem events. Existing
+three-level/2,000-entry listing limits and polling blind spots remain; complete
+evidence means complete differences in that sample, not complete disk coverage.
+
+The history is append-only under the existing finding. A later observed change
+while that finding is open adds evidence and increments its existing occurrence
+counter, without creating another alert or restarting its triage. Evidence and
+all scope references commit in one transaction; failure retains the references
+for retry. Each observation's encoded evidence is limited to 4 MiB; exceeding
+that bound reports a monitor failure and does not advance its references.
+Credential-like text is redacted using the existing host-data redactor; stable
+object IDs distinguish names that redact alike. Raw comparison references retain
+their existing local database protections.
+Ambiguous listing names are retained as raw line differences (`listing_line`)
+instead of merging colliding parsed names; non-UTF-8 before/after bytes use
+`encoding: base64` after redaction. These records are evidence, not action paths.
+
+The read-only `file_changes_get` tool takes `finding_id`, `after_id` (default 0),
+`through_id` (omit initially) and `limit` (default 20, maximum 50). Carry the
+returned `through_id` and `next_after_id` through pages until `more=false`.
+Then omit `through_id` and continue after the last cursor to discover later
+observations. Cursor IDs are opaque and may have gaps. An old finding or a
+collection failure may have no captured history: `evidence_available=false`
+does not mean unchanged or benign. Host strings remain untrusted data.
+
+History survives restarts and follows its parent finding's retention. Existing
+pruning already preserves findings attached to unresolved incidents; their
+history is retained with them. Deleting a finding cascades to its evidence.
+This is not an unlimited forensic archive, and observations before the upgrade
+cannot be reconstructed. Later evidence is available for retrieval; this does
+not guarantee a push notification to an already running investigator.
+
+No new monitor option, importance class, sensitivity-assessment workflow or
+approval gate is introduced. Severity, triage classification, response policy,
+containment targets, fast watching and service coverage retain their existing
+behavior. No noise reduction, total model-cost reduction or improved real-model
+verdict accuracy is claimed.
+
 ### Monitor reflexes
 A payload usually runs seconds after it lands, while a model is still reading the first finding. A monitor with `contain: true` therefore acts on its own the moment it fails, with no model in the loop:
 - a `process` monitor with `no_children` kills the processes the service should not have started, and everything they started;
