@@ -49,6 +49,15 @@ func run(t *testing.T, r *Runner, st *store.Store, s Spec) (bool, string) {
 	}
 	b, _ := json.Marshal(s)
 	_ = st.PutMonitor(s.ID, b, "test")
+	if s.Kind == "file" {
+		r.RunDue(context.Background(), true)
+		for _, row := range st.Monitors(false) {
+			if row.ID == s.ID {
+				return row.LastOK, row.LastOutput
+			}
+		}
+		t.Fatal("file monitor did not run")
+	}
 	return r.eval(context.Background(), s)
 }
 
