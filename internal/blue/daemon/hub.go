@@ -183,6 +183,9 @@ func (d *Daemon) reportRemoteChanges(m hubproto.OperatorMessage, since time.Time
 // responder keeps its full context; anything else goes to the operator
 // liaison, one session per hub conversation.
 func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply {
+	if m.Command == hubproto.CommandBob {
+		return d.handleBobMessage(ctx, m)
+	}
 	kc, ectx, release := d.engineFor(ctx)
 	defer release()
 	if kc == nil {
