@@ -1,5 +1,7 @@
 # kodeblue hub
 
+For plain-language explanations of a case, use [Ask Bob](bob.md) in its report header. Bob uses a separate read-only conversation and leaves the original case unchanged.
+
 The hub is the central console for a fleet of kodeblue servers. Operators sign in and see, per server:
 
 | Tab | What it shows |

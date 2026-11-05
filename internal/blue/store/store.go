@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -230,6 +231,16 @@ func (s *Store) Get(k string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT v FROM kv WHERE k=?`, k).Scan(&v)
 	return v
+}
+
+// ReadState distinguishes an absent reference from a failed database read.
+func (s *Store) ReadState(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow("SELECT v FROM kv WHERE k=?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return value, err
 }
 
 func (s *Store) Set(k, v string) error {

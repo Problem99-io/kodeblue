@@ -155,6 +155,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/servers/{id}/records/{kind}/{rid}", s.op(s.handleRecord))
 	m.HandleFunc("GET /api/servers/{id}/messages", s.op(s.handleMessages))
 	m.HandleFunc("POST /api/servers/{id}/messages", s.op(s.handleSendMessage))
+	m.HandleFunc("POST /api/servers/{id}/bob", s.op(s.handleAskBob))
 	m.HandleFunc("POST /api/servers/{id}/actions/{rid}/decision", s.op(s.handleDecision))
 	m.HandleFunc("POST /api/servers/{id}/learn", s.op(s.handleLearn))
 	m.HandleFunc("POST /api/servers/{id}/upgrade", s.op(s.handleUpgrade))
@@ -820,10 +821,27 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request, c *opCtx
 	if srv == nil {
 		return
 	}
+	if raw := r.URL.Query().Get("bob_incident_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "invalid report id")
+			return
+		}
+		writeJSON(w, http.StatusOK, s.st.BobMessages(srv.ID, id))
+		return
+	}
 	writeJSON(w, http.StatusOK, s.st.Messages(srv.ID, 200))
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	s.handleChatMessage(w, r, c, "")
+}
+
+func (s *Server) handleAskBob(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	s.handleChatMessage(w, r, c, hubproto.CommandBob)
+}
+
+func (s *Server) handleChatMessage(w http.ResponseWriter, r *http.Request, c *opCtx, mode string) {
 	srv := s.serverOr404(w, r)
 	if srv == nil {
 		return
@@ -832,6 +850,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, c *op
 		Body           string `json:"body"`
 		IncidentID     int64  `json:"incident_id"`
 		ConversationID string `json:"conversation_id"`
+		Command        string `json:"command"`
 	}
 	if err := readJSON(w, r, 64<<10, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
@@ -850,12 +869,45 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, c *op
 		writeErr(w, http.StatusConflict, "server is not connected to the hub")
 		return
 	}
-	m := &Message{ServerID: srv.ID, Author: c.user.Name, Body: req.Body, IncidentID: req.IncidentID, ConversationID: req.ConversationID}
+	if req.Command != "" && req.Command != mode {
+		writeErr(w, http.StatusBadRequest, "unsupported chat mode")
+		return
+	}
+	req.Command = mode
+	if req.ConversationID != "" {
+		prior := s.st.ConversationStart(srv.ID, req.ConversationID)
+		if prior != nil && (prior.Command == hubproto.CommandBob) != (req.Command == hubproto.CommandBob) {
+			writeErr(w, http.StatusConflict, "Bob and operator conversations cannot be mixed")
+			return
+		}
+		if req.Command == hubproto.CommandBob {
+			if prior == nil || prior.IncidentID != req.IncidentID {
+				writeErr(w, http.StatusConflict, "Bob conversation belongs to a different report or is unavailable")
+				return
+			}
+		}
+	}
+	if req.Command == hubproto.CommandBob {
+		var status hubproto.Status
+		if json.Unmarshal(srv.Status, &status) != nil || !status.AcceptsBob || !status.AcceptsMessages {
+			writeErr(w, http.StatusConflict, "Bob is unavailable on this server. Update the agent or ask an administrator to enable messages and a model.")
+			return
+		}
+		if req.IncidentID <= 0 || s.st.Record(srv.ID, "incident", strconv.FormatInt(req.IncidentID, 10)) == nil {
+			writeErr(w, http.StatusNotFound, "source report not found on this server")
+			return
+		}
+	}
+	m := &Message{ServerID: srv.ID, Author: c.user.Name, Body: req.Body, IncidentID: req.IncidentID, ConversationID: req.ConversationID, Command: req.Command}
 	if err := s.st.AddMessage(m); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.st.Audit(c.user.Name, "message.send", srv.ID, trim(req.Body, 300), c.ip)
+	action := "message.send"
+	if req.Command == hubproto.CommandBob {
+		action = "bob.ask"
+	}
+	s.st.Audit(c.user.Name, action, srv.ID, trim(req.Body, 300), c.ip)
 	s.wake(srv.ID)
 	writeJSON(w, http.StatusOK, m)
 }

@@ -733,8 +733,8 @@ type Message struct {
 	// request, handled by the server without a model.
 	Decision  string `json:"decision,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
-	// Command: a learning command (hubproto.Command*), also handled
-	// without a model.
+	// Command selects a typed workflow (hubproto.Command*). Bob uses a
+	// separate read-only model session; administrative commands are not chat.
 	Command string `json:"command,omitempty"`
 	// RuleHash: the containment rule content an approval names.
 	RuleHash string `json:"rule_hash,omitempty"`
@@ -791,6 +791,20 @@ func (s *Store) AddMessage(m *Message) error {
 	return nil
 }
 
+// ConversationStart is scoped to the same enrolled server; modes and report
+// context cannot be changed by reusing an existing conversation ID.
+func (s *Store) ConversationStart(server, id string) *Message {
+	list := s.messages("WHERE server_id=? AND conversation_id=? ORDER BY id LIMIT 1", server, id)
+	if len(list) == 0 {
+		return nil
+	}
+	return &list[0]
+}
+
+func (s *Store) BobMessages(server string, incident int64) []Message {
+	return s.messages("WHERE server_id=? AND command=? AND incident_id=? ORDER BY id DESC LIMIT 50", server, hubproto.CommandBob, incident)
+}
+
 // TakeQueued marks queued messages for server as delivered and returns them.
 func (s *Store) TakeQueued(server string) []Message {
 	list := s.messages(`WHERE server_id=? AND status='queued' ORDER BY id LIMIT 5`, server)
@@ -825,12 +839,12 @@ func (s *Store) Reply(server string, id int64, r hubproto.MessageReply) error {
 }
 
 func (s *Store) Messages(server string, limit int) []Message {
-	return s.messages(`WHERE server_id=? ORDER BY id DESC LIMIT ?`, server, limit)
+	return s.messages(`WHERE server_id=? AND command<>? ORDER BY id DESC LIMIT ?`, server, hubproto.CommandBob, limit)
 }
 
 // AllMessages lists the newest messages across all servers.
 func (s *Store) AllMessages(limit int) []Message {
-	return s.messages(`ORDER BY id DESC LIMIT ?`, limit)
+	return s.messages(`WHERE command<>? ORDER BY id DESC LIMIT ?`, hubproto.CommandBob, limit)
 }
 
 func (s *Store) messages(where string, args ...any) []Message {
