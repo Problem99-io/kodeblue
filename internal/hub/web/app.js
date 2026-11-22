@@ -339,6 +339,7 @@ function renderLogin(msg) {
   if (S.loginShown) { if (msg) { const e = document.querySelector(".lerr"); if (e && !e.textContent) e.textContent = msg; } return; }
   S.loginShown = true; S.viewKey = "";
   setTimer(null); closePanel();
+  if (typeof closeBob === "function") closeBob();
   document.querySelectorAll(".scrim, .menu").forEach((x) => x.remove());
   clear(app);
   const saved = store("kb.user") || "";
@@ -1694,6 +1695,7 @@ function paintHeader(inc) {
       inc.confidence ? h("span", { class: "badge", title: inc.kind === "review" ? "self-evaluation score" : "agent's confidence in its verdict" },
         inc.kind === "review" ? `score ${Math.round(inc.confidence * 10)}/10` : `confidence ${Math.round(inc.confidence * 100)}%`) : null,
       h("span", { class: "muted" }, usd(inc.cost_usd)),
+      typeof bobButton === "function" ? bobButton(st.srv, inc) : null,
       h("span", { class: "muted" }, "opened " + when(inc.created_at) + " · updated " + ago(inc.updated_at)),
       h("div", { class: "case-summary" }, h("strong", null, inc.status === "needs_human" ? "Action needed: review findings and pending approvals." : live ? "Investigation in progress" : "Investigation result"),
         h("p", null, inc.summary || "A summary will appear when the agent reports its findings.")))));

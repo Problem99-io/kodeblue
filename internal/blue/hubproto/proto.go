@@ -77,6 +77,7 @@ type Status struct {
 	// FindingStats7d is rule -> status -> count: the raw false-positive picture.
 	FindingStats7d  map[string]map[string]int `json:"finding_stats_7d,omitempty"`
 	AcceptsMessages bool                      `json:"accepts_messages"`
+	AcceptsBob      bool                      `json:"accepts_bob,omitempty"` // dedicated read-only explanation sessions
 	// AcceptsApprovals: hub operators may approve or deny containment the
 	// agent asked for (hub.accept_approvals).
 	AcceptsApprovals bool `json:"accepts_approvals"`
@@ -357,7 +358,8 @@ type OperatorMessage struct {
 	// vulnerability command names its vulnerability in RequestID.
 	Decision  string `json:"decision,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
-	// Command (CommandLearn | CommandRelearn | CommandStop, or a
+	// CommandBob selects a separate read-only explanation session. Other
+	// commands (CommandLearn | CommandRelearn | CommandStop, or a
 	// vulnerability or containment rule command) makes this a request to
 	// run learning, stop a session or change a vulnerability or rule, not a
 	// message for the agent.
@@ -376,6 +378,8 @@ const (
 	// CommandLearn runs the learner agent now on the baseline the server
 	// already has; detection keeps running.
 	CommandLearn = "learn"
+	// CommandBob explains a report in a separate read-only session.
+	CommandBob = "bob"
 	// CommandRelearn runs the whole learning phase again: baseline sweeps
 	// (changes seen meanwhile are absorbed as normal), then the learner.
 	CommandRelearn = "relearn"

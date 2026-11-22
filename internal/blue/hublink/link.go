@@ -371,6 +371,7 @@ func (l *Link) status() hubproto.Status {
 		SpendToday: usd, SpendByPurpose: per, Spend7d: week, DailyBudget: l.cfg.Budget.DailyUSD, TokensToday: tokens,
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
 		FindingStats7d: l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
+		AcceptsBob:       l.cfg.Hub.AcceptMessages && l.agent.ModelsEnabled(),
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
 		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
@@ -522,7 +523,7 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 	if m.Decision != "" {
 		return l.decide(ctx, m)
 	}
-	if m.Command != "" {
+	if m.Command != "" && m.Command != hubproto.CommandBob {
 		l.st.Journal("hub:"+m.Author, "operator.command", fmt.Sprintf("#%d %s", m.ID, m.Command))
 		if m.Command == hubproto.CommandStop {
 			return l.agent.StopSession(ctx, m)

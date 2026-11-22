@@ -905,3 +905,9 @@ summary { cursor: pointer; font-weight: 500; padding: 6px 0; }
 .setup { margin-top: 10px; }
 .setup .callout { border-color: rgb(var(--blue) / .3); background: rgb(var(--blue) / .04); }
 @media (min-width: 1000px) { .setup-steps { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+
+/* Plain-language report explanations use the existing accessible dialog. */
+.bob-thread { position: relative; max-height: 42vh; overflow-y: auto; margin: 16px 0; }
+.bob-question, .bob-answer { padding: 12px; margin-bottom: 10px; border: 1px solid rgb(var(--line)); border-radius: 6px; overflow-wrap: anywhere; }
+.bob-question p { white-space: pre-wrap; }
+.bob-answer strong { display: inline-block; margin-bottom: 6px; }
