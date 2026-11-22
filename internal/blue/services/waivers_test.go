@@ -57,7 +57,7 @@ func TestWaiverExpires(t *testing.T) {
 	_ = Waive(st, "redis-server", []string{Health}, "kodeblue cannot reach redis's port from its namespace", "operator", 1)
 	w := LoadWaivers(st)
 	got := w["redis-server"][Health]
-	if got.ExpiresAt.Sub(time.Now()) > 25*time.Hour {
+	if time.Until(got.ExpiresAt) > 25*time.Hour {
 		t.Fatalf("expiry: %v", got.ExpiresAt)
 	}
 	got.ExpiresAt = time.Now().Add(-time.Minute)
