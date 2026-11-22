@@ -252,3 +252,13 @@ Provider transport/5xx failures pause that worker for at most one second, while
 each failed item keeps its own durable exponential retry delay. A 429 pauses the
 provider for Retry-After. Provider wake channels are separate; saving settings
 clears its in-memory pause and makes pending items due again.
+
+## Optional Cloudflare collector evidence
+
+Existing Operator, Responder and Reviewer agents can read sanitized evidence from
+an operator-managed collector using the bundled `cloudflare-evidence` skill and
+normal read-only host tools. Configure the exact evidence directory in trusted
+deployment definitions and mount only those records read-only into the source
+agent. This does not add Cloudflare token settings or API calls to the hub. A
+tunnel alone does not provide analytics, and absent/sampled records remain gaps.
+See [collector boundary and example record contract](cloudflare-evidence.md).
