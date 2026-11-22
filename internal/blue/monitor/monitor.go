@@ -295,9 +295,10 @@ type Runner struct {
 
 	// Containment targets the last eval found (guarded by run), the hook that
 	// acts on them, and when each target was last handed to it.
-	targets []Reflex
-	reflex  func(Spec, *store.Finding, []Reflex) string
-	tried   map[string]time.Time
+	targets         []Reflex
+	fileObservation *fileObservation
+	reflex          func(Spec, *store.Finding, []Reflex) string
+	tried           map[string]time.Time
 }
 
 func NewRunner(st *store.Store, env *sensors.Env) *Runner {
@@ -396,7 +397,13 @@ func (r *Runner) RunDue(ctx context.Context, force bool) []*store.Finding {
 			continue
 		}
 		r.targets = nil
+		r.fileObservation = nil
 		ok, output := r.eval(ctx, s)
+		if ok && r.fileObservation != nil {
+			if err := r.st.CommitFileObservation(nil, r.fileObservation.states, nil); err != nil {
+				ok, output = false, "file evidence: could not persist reference"
+			}
+		}
 		r.st.RecordMonitorRun(s.ID, ok, output)
 		fp := "monitor:" + s.ID
 		r.mu.Lock()
@@ -431,7 +438,14 @@ func (r *Runner) RunDue(ctx context.Context, force bool) []*store.Finding {
 			targets = r.fresh(r.targets)
 		}
 		if f := r.st.OpenFinding(fp); f != nil {
-			r.st.BumpFinding(f.ID)
+			if r.fileObservation != nil {
+				if err := r.st.CommitFileObservation(f, r.fileObservation.states, r.fileObservation.changes); err != nil {
+					r.st.Journal("monitor:"+s.ID, "monitor.evidence_error", "Could not save file-change history; reference retained for retry")
+					continue // retain the old reference so this change is retried
+				}
+			} else {
+				r.st.BumpFinding(f.ID)
+			}
 			if len(targets) > 0 {
 				r.reflex(s, f, targets)
 			}
@@ -463,11 +477,19 @@ func (r *Runner) RunDue(ctx context.Context, force bool) []*store.Finding {
 		if len(targets) > 0 {
 			f.Evidence["contained"] = truncate(r.reflex(s, f, targets), 1500)
 		}
-		if err := r.st.AddFinding(f); err == nil {
+		var saveErr error
+		if r.fileObservation != nil {
+			saveErr = r.st.CommitFileObservation(f, r.fileObservation.states, r.fileObservation.changes)
+		} else {
+			saveErr = r.st.AddFinding(f)
+		}
+		if saveErr == nil {
 			out = append(out, f)
 			if s.condition() {
 				_ = r.st.Set(streakKey(s.ID), strconv.FormatInt(f.ID, 10))
 			}
+		} else if r.fileObservation != nil {
+			r.st.Journal("monitor:"+s.ID, "monitor.evidence_error", "Could not save file-change history; reference retained for retry")
 		}
 	}
 	return out
@@ -615,50 +637,7 @@ func (r *Runner) evalKind(ctx context.Context, s Spec) (bool, string) {
 		}
 		return true, truncate(out, 300)
 	case "file":
-		var changed []string
-		for _, p := range s.Paths {
-			real, err := r.expand(p)
-			if err != nil {
-				return false, err.Error()
-			}
-			h, listing := r.fileState(r.env.Path(real))
-			key := "monitor_file:" + s.ID + ":" + p
-			prev := r.st.Get(key)
-			prevListing := r.st.Get(key + ":ls")
-			_ = r.st.Set(key+":ls", listing)
-			// Before directories were listed, a directory hashed as
-			// "unreadable"; the first listing is a baseline, not a change.
-			if prev == "" || prev == "unreadable" && strings.HasPrefix(h, "dir:") {
-				_ = r.st.Set(key, h)
-				continue
-			}
-			if prev != h {
-				_ = r.st.Set(key, h)
-				what := p
-				if d := diffListings(splitLines(prevListing), splitLines(listing)); d != "" {
-					what += " (" + d + ")"
-				}
-				// Show what was written, so a grown log is judged by its new
-				// lines, not by the fact that it grew.
-				if a := appended(r.env.Path(real), splitLines(prevListing), splitLines(listing)); a != "" {
-					what += "; " + a
-				}
-				changed = append(changed, what)
-				for _, rel := range newFiles(splitLines(prevListing), splitLines(listing)) {
-					r.targets = append(r.targets, Reflex{
-						Action: "quarantine_file", Params: map[string]string{"path": real + "/" + rel},
-						Why: fmt.Sprintf("new file %s appeared in %s", rel, p),
-					})
-				}
-			}
-		}
-		if len(changed) > 0 {
-			r.mu.Lock()
-			r.fail[s.ID] = s.ConsecutiveFailures - 1 // file changes are instant
-			r.mu.Unlock()
-			return false, "changed: " + strings.Join(changed, ", ")
-		}
-		return true, "unchanged"
+		return r.evalFiles(s)
 	case "log":
 		return r.evalLog(s)
 	case "http":

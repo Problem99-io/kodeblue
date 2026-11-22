@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,6 +86,11 @@ CREATE TABLE IF NOT EXISTS findings (
   incident_id INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS findings_fp ON findings(fingerprint);
 CREATE INDEX IF NOT EXISTS findings_status ON findings(status);
+CREATE TABLE IF NOT EXISTS file_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  finding_id INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+  data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS file_changes_finding ON file_changes(finding_id,id);
 CREATE TABLE IF NOT EXISTS incidents (
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
   verdict TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', report TEXT NOT NULL DEFAULT '',
@@ -230,6 +236,16 @@ func (s *Store) Get(k string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT v FROM kv WHERE k=?`, k).Scan(&v)
 	return v
+}
+
+// ReadState distinguishes an absent reference from a failed database read.
+func (s *Store) ReadState(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow("SELECT v FROM kv WHERE k=?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return value, err
 }
 
 func (s *Store) Set(k, v string) error {
@@ -492,6 +508,14 @@ func (s *Store) LastFinding(fp string) *Finding {
 }
 
 func (s *Store) AddFinding(f *Finding) error {
+	return insertFinding(s.db, f)
+}
+
+type findingWriter interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func insertFinding(db findingWriter, f *Finding) error {
 	ev := map[string]string{}
 	for k, v := range f.Evidence {
 		ev[k] = v
@@ -502,7 +526,7 @@ func (s *Store) AddFinding(f *Finding) error {
 	}
 	b, _ := json.Marshal(ev)
 	now := time.Now()
-	res, err := s.db.Exec(`INSERT INTO findings(fingerprint,collector,rule,severity,title,detail,evidence,status,created_at,updated_at,item_id,item_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := db.Exec(`INSERT INTO findings(fingerprint,collector,rule,severity,title,detail,evidence,status,created_at,updated_at,item_id,item_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		f.Fingerprint, f.Collector, f.Rule, f.Severity, f.Title, f.Detail, string(b), orDefault(f.Status, "new"), now.Unix(), now.Unix(), f.ItemID, itemKey(f.ItemID))
 	if err != nil {
 		return err
