@@ -38,9 +38,21 @@ func (a *chatAgent) StopSession(_ context.Context, m hubproto.OperatorMessage) h
 	return hubproto.MessageReply{Status: "done", SessionID: m.SessionID}
 }
 
+func (a *chatAgent) Investigate(ctx context.Context, m hubproto.OperatorMessage) hubproto.MessageReply {
+	return a.HandleOperatorMessage(ctx, m)
+}
+
 // TestStopIsNotQueuedBehindAChat: a chat holds the message queue until its
 // session ends, so a stop for that session must not wait behind it.
 func TestStopIsNotQueuedBehindAChat(t *testing.T) {
+	testStopNotQueued(t, "")
+}
+
+func TestStopIsNotQueuedBehindAnInvestigation(t *testing.T) {
+	testStopNotQueued(t, hubproto.CommandInvestigate)
+}
+
+func testStopNotQueued(t *testing.T, command string) {
 	replies := make(chan int64, 4)
 	polls := 0
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +70,7 @@ func TestStopIsNotQueuedBehindAChat(t *testing.T) {
 		var out hubproto.MessagesResponse
 		switch polls++; polls {
 		case 1:
-			out.Messages = []hubproto.OperatorMessage{{ID: 1, Author: "alice", Body: "what changed?", ConversationID: "c1"}}
+			out.Messages = []hubproto.OperatorMessage{{ID: 1, Author: "alice", Command: command, Body: "what changed?", ConversationID: "c1"}}
 		case 2:
 			out.Messages = []hubproto.OperatorMessage{{ID: 2, Author: "alice", Command: hubproto.CommandStop, SessionID: "s1"}}
 		default:

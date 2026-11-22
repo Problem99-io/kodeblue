@@ -103,7 +103,7 @@ func (a AgentSettings) clean() AgentSettings {
 	models := map[string]hubproto.ModelRef{}
 	for role, r := range a.Models {
 		r = hubproto.ModelRef{Connection: strings.TrimSpace(r.Connection), Provider: strings.ToLower(strings.TrimSpace(r.Provider)), Model: strings.TrimSpace(r.Model)}
-		if r.Model != "" {
+		if r.Model != "" && role != "investigator" {
 			models[role] = r
 		}
 	}
@@ -116,7 +116,9 @@ func (a AgentSettings) clean() AgentSettings {
 		}
 		return out
 	}
-	return AgentSettings{Models: models, Instructions: trim(a.Instructions), Approvals: trim(a.Approvals), ResponseMode: strings.TrimSpace(a.ResponseMode),
+	instructions := trim(a.Instructions)
+	delete(instructions, "investigator")
+	return AgentSettings{Models: models, Instructions: instructions, Approvals: trim(a.Approvals), ResponseMode: strings.TrimSpace(a.ResponseMode),
 		Tuning: trim(a.Tuning), ProtectedUsers: list(a.ProtectedUsers), ProtectedIPs: list(a.ProtectedIPs), ProtectedUnits: list(a.ProtectedUnits),
 		MaxActionsPerHour: max(a.MaxActionsPerHour, 0)}
 }
