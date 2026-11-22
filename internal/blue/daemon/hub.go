@@ -163,7 +163,7 @@ func (d *Daemon) reportRemoteChanges(m hubproto.OperatorMessage, since time.Time
 	for _, j := range d.st.JournalSince(since, 200) {
 		switch {
 		case j.Action == "allow_rule.add", j.Action == "allow_rule.disable", j.Action == "monitor.disable", j.Action == "monitor.put",
-			j.Action == "profile.set", j.Action == "integrity.add", strings.HasPrefix(j.Action, "respond."), strings.HasPrefix(j.Action, "sensor."):
+			j.Action == "profile.set", j.Action == "integrity.add", strings.HasPrefix(j.Action, "respond."), strings.HasPrefix(j.Action, "sensor."), strings.HasPrefix(j.Action, "coverage."):
 			changes = append(changes, j.Action+": "+j.Detail)
 		}
 	}

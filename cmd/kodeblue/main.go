@@ -45,6 +45,7 @@ import (
 	"github.com/Problem99-io/kodeblue/internal/blue/respond"
 	"github.com/Problem99-io/kodeblue/internal/blue/sdnotify"
 	"github.com/Problem99-io/kodeblue/internal/blue/sensors"
+	"github.com/Problem99-io/kodeblue/internal/blue/services"
 	"github.com/Problem99-io/kodeblue/internal/blue/store"
 )
 
@@ -251,6 +252,8 @@ func main() {
 				fmt.Println("forgot", id)
 			}
 		}
+	case "coverage":
+		coverageCmd(cfg, pos)
 	case "relearn":
 		st := mustStore(cfg)
 		_ = st.Set("learned_at", "")
@@ -805,12 +808,71 @@ func sensorsCmd(cfg config.Config, pos []string) {
 	_ = tw.Flush()
 }
 
+// coverageCmd lists, adds and removes coverage waivers: checks of a service
+// that cannot be covered on this server, so kodeblue stops opening coverage
+// cases for them.
+func coverageCmd(cfg config.Config, pos []string) {
+	st := mustStore(cfg)
+	defer st.Close()
+	sub := "waivers"
+	if len(pos) > 0 {
+		sub = pos[0]
+	}
+	split := func(s string) []string {
+		var out []string
+		for _, c := range strings.Split(s, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	switch sub {
+	case "waivers", "list":
+		list := services.LoadWaivers(st).List()
+		if len(list) == 0 {
+			fmt.Println("no coverage waivers")
+			return
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "SERVICE\tCHECK\tBY\tUNTIL\tREASON")
+		for _, l := range list {
+			fmt.Fprintln(tw, l)
+		}
+		_ = tw.Flush()
+	case "waive":
+		if len(pos) < 4 {
+			fatal(errors.New("usage: kodeblue coverage waive <service> <check,check> <reason…>   (service as `kodeblue status` lists it)"))
+		}
+		if err := services.Waive(st, pos[1], split(pos[2]), strings.Join(pos[3:], " "), "operator", 0); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("waived %s for %s for %d days; its coverage case resolves at the next review (or restart)\n", pos[2], pos[1], services.DefaultWaiverDays)
+	case "unwaive":
+		if len(pos) < 2 {
+			fatal(errors.New("usage: kodeblue coverage unwaive <service> [check,check]"))
+		}
+		var checks []string
+		if len(pos) > 2 {
+			checks = split(pos[2])
+		}
+		n, err := services.Unwaive(st, pos[1], checks, "operator")
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("removed %d waiver(s)\n", n)
+	default:
+		fatal(errors.New("usage: kodeblue coverage [waivers] | waive <service> <check,check> <reason…> | unwaive <service> [check,check]"))
+	}
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: kodeblue <command> [--config /etc/kodeblue/kodeblue.toml]
   run | status | incidents [--all] | incident <id> | findings [--status s]
   ack <finding-id> [--allow] | allow <collector> <key-pattern> <reason>
   maintenance <duration>|off | snapshot <collector> | relearn | forget <item-id> | forget match <substring>
   sensors [on <sensor> | off <sensor> <reason>]   what each sensor can see on this server
+  coverage [waivers] | waive <service> <check,check> <reason…> | unwaive <service> [check,check]   checks that cannot be covered here
   respond list|approve <id>|deny <id>|undo <id> | mcp | version
   rules [list] | show <id> | approve <id> | reject <id> <why> | pause <id> <why> | delete <id>   containment rules (approve and delete need sudo)
   vulnerabilities     every known vulnerability on this server (the register in /var/lib/kodeblue/workspace/VULNERABILITIES.md)

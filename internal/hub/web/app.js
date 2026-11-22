@@ -2118,7 +2118,7 @@ async function paintExt() {
     st.extSig = "o" + sig;
     node = [
       inc.status === "needs_human" && inc.kind === "coverage" ? h("div", { class: "callout" }, h("div", { class: "lbl" }, "Coverage gap"),
-        "kodeblue cannot monitor this service well enough. The report says which checks are missing and why. Create the monitors (Relearn, or ask the agent in the chat) or change how kodeblue runs; the case resolves by itself once they are covered.") :
+        "kodeblue cannot monitor this service well enough. The report says which checks are missing and why. Create the monitors (Relearn, or ask the agent in the chat) or change how kodeblue runs; the case resolves by itself once they are covered. If a check cannot be covered on this server at all, waive it on the server's Services tab.") :
       inc.status === "needs_human" ? h("div", { class: "callout" }, h("div", { class: "lbl" }, "Needs a human"),
         "The agent could not close this on its own. Review the report, then message the agent in the chat, approve or deny any containment it asked for, or act on the server (",
         h("code", null, "kodeblue ack <finding>"), ").") : null,
@@ -2798,10 +2798,36 @@ function checkChips(svc) {
   if (!checks.length) return h("span", { class: "faint small" }, svc.role === "system" ? "OS plumbing: the built-in sensors watch it" : "no checks needed");
   return h("div", { class: "checks" }, checks.map((c) => {
     const ok = (c.covered_by || []).length > 0;
+    if (!ok && c.waived) return h("span", { class: "badge b-warn", title: "not watched; waived by " + (c.waived.by || "?") + " until " + when(c.waived.expires_at) + ": " + c.waived.reason }, ic("x", 10), c.check + " (waived)");
     return h("span", { class: "badge " + (ok ? "b-ok" : "b-bad"), title: ok ? "covered by " + c.covered_by.join(", ") : "missing: " + c.need }, ok ? ic("check", 10) : ic("x", 10), c.check);
   }));
 }
+async function coverageCommand(srv, svc, command, checks, note, after) {
+  try {
+    await api("POST", `/api/servers/${enc(srv.id)}/coverage`, { command, service: svc.name, checks, note });
+    toast((command === "coverage_waive" ? "Waiver sent" : "Waiver removed") + "; the server applies it within seconds");
+    setTimeout(after, 4000);
+  } catch (e) { toast(e.message, true); }
+}
+function waiveDialog(srv, svc, after) {
+  const boxes = (svc.missing || []).map((c) => h("input", { type: "checkbox", value: c, checked: true }));
+  const why = h("textarea", { class: "full", rows: 3, placeholder: "e.g. sshd runs in the host's network namespace, so no sockets monitor can be scoped to it; the listener and outbound sensors watch the host" });
+  const go = h("button", { class: "btn primary", type: "button", on: { click: async () => {
+    const checks = boxes.filter((b) => b.checked).map((b) => b.value);
+    if (!checks.length || why.value.trim().length < 20) { why.focus(); return; }
+    m.close();
+    await coverageCommand(srv, svc, "coverage_waive", checks, why.value, after);
+  } } }, "Waive");
+  const m = modal("Waive checks of " + svc.name, [h("div", { class: "stack" },
+    h("div", { class: "small muted" }, "For checks that cannot be covered on this server at all. kodeblue stops opening a coverage case for them; nothing watches them, and the service keeps showing them as waived. The waiver expires after 180 days."),
+    h("div", { class: "checks" }, boxes.map((b) => h("label", { class: "small" }, b, " ", b.value))),
+    h("label", { class: "field" }, "Why they cannot be covered here", why))], [go]);
+  why.focus();
+}
 function servicePanel(srv, svc, vulns, after) {
+  const waived = (svc.checks || []).filter((c) => c.waived && !(c.covered_by || []).length).map((c) => c.check);
+  const waiveBtns = [(svc.missing || []).length ? h("button", { class: "btn sm", type: "button", on: { click: () => waiveDialog(srv, svc, after) } }, "Waive…") : null,
+    waived.length ? h("button", { class: "btn sm", type: "button", on: { click: () => coverageCommand(srv, svc, "coverage_unwaive", waived, "", after) } }, "Remove waiver") : null].filter(Boolean);
   const ports = (svc.listen || []).map((p) => `${p.proto}/${p.port}` + (p.address && !["0.0.0.0", "::"].includes(p.address) ? " on " + p.address : ""));
   const open = vulns.filter((v) => v.status === "open").length;
   const meta = h("div", { class: "small muted" },
@@ -2811,7 +2837,7 @@ function servicePanel(srv, svc, vulns, after) {
   const extra = h("span", { class: "hd-x" }, open ? h("span", { class: "badge b-warn" }, open + " open") : null,
     svc.case ? h("a", { class: "small", href: `#/s/${enc(srv.id)}/t/${svc.case}` }, " coverage case #" + svc.case) : null);
   return panel(svc.name, h("div", { class: "bd stack" }, meta,
-    h("div", null, h("div", { class: "small faint" }, "Monitoring coverage"), checkChips(svc)),
+    h("div", null, h("div", { class: "small faint" }, "Monitoring coverage"), checkChips(svc), waiveBtns.length ? h("div", { class: "btns" }, waiveBtns) : null),
     h("div", null, h("div", { class: "small faint" }, "Vulnerabilities"), vulns.length ? vulnTable(srv, vulns, after) : h("div", { class: "faint small" }, svc.role === "system" ? "None recorded." : "None found yet."))),
   extra, (svc.missing || []).length ? "red" : open ? "orange" : "green");
 }
