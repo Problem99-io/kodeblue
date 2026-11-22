@@ -90,6 +90,10 @@ type Link struct {
 	savedSettings *string
 }
 
+// HubVersionKey is the store key holding the version the hub last said it
+// runs.
+const HubVersionKey = "hub_version"
+
 func New(cfg config.Config, st *store.Store, logger *slog.Logger, agent Agent) (*Link, error) {
 	u, err := hubproto.CheckURL(cfg.Hub.URL)
 	if err != nil {
@@ -324,6 +328,9 @@ func (l *Link) syncOnce(ctx context.Context) error {
 		return err
 	}
 	l.st.MarkNotificationsSynced(queued)
+	if resp.HubVersion != "" && len(resp.HubVersion) <= 64 {
+		_ = l.st.Set(HubVersionKey, resp.HubVersion)
+	}
 	if resp.Settings != nil {
 		l.saveSettings(resp.Settings)
 	}
@@ -372,7 +379,8 @@ func (l *Link) status() hubproto.Status {
 		Baseline: l.st.BaselineCounts(), CollectorRuns: l.st.CollectorRuns(), Profile: l.st.Get("profile_summary"),
 		FindingStats7d: l.st.FindingStats(time.Now().Add(-7 * 24 * time.Hour)), AcceptsMessages: l.cfg.Hub.AcceptMessages,
 		AcceptsApprovals: l.cfg.Hub.AcceptApprovals, AcceptsRuleApprovals: l.cfg.Hub.AcceptApprovals && l.cfg.Response.HubMayAutomate(),
-		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion,
+		AcceptsSettings: l.cfg.Hub.AcceptSettings, SettingsVersion: l.cfg.HubSettingsVersion, ModelProxy: true,
+		InferenceKeySum: l.inferenceKeySum(), SweepSeconds: max(l.cfg.Schedule.SweepSeconds, 10),
 		AcceptsLearning: l.cfg.Hub.AcceptLearning, Learning: l.agent.Learning(),
 		AcceptsUpgrades: l.cfg.Hub.AcceptUpgrades, Upgrade: l.agent.UpgradeStatus(),
 		Models: l.cfg.EffectiveModels(), Actions: map[string]string{}, Tuning: l.cfg.TuningValues(),
@@ -419,13 +427,28 @@ func (l *Link) saveSettings(s *hubproto.Settings) {
 	l.agent.ApplySettings()
 }
 
+// inferenceKeySum identifies this server's own [inference] key for the hub,
+// which flags it when it is one of the hub's connection keys. The key file
+// counts even when no endpoint uses it: root can still read it.
+func (l *Link) inferenceKeySum() string {
+	k, _ := l.cfg.APIKey()
+	if strings.TrimSpace(k) == "" && l.cfg.Inference.APIKeyFile != "" {
+		b, _ := os.ReadFile(l.cfg.Inference.APIKeyFile)
+		k = string(b)
+	}
+	if strings.TrimSpace(k) == "" {
+		return ""
+	}
+	return hubproto.KeySum(k)
+}
+
 // checkSettings bounds what the hub can hand over.
 func checkSettings(s *hubproto.Settings) error {
 	ids := map[string]bool{}
 	for _, c := range s.Connections {
 		u, err := url.Parse(c.BaseURL)
 		if !hubproto.ValidConnectionID(c.ID) || ids[c.ID] || !slices.Contains(hubproto.ConnectionKinds, c.Kind) ||
-			err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			(!c.ViaHub && (err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "")) {
 			return fmt.Errorf("bad model connection %q", c.ID)
 		}
 		ids[c.ID] = true
@@ -765,6 +788,23 @@ type httpError struct {
 }
 
 func (e *httpError) Error() string { return fmt.Sprintf("hub HTTP %d: %s", e.status, e.body) }
+
+// Status is the HTTP status of a hub's refusal from Call, or 0, and the
+// hub's message.
+func Status(err error) (int, string) {
+	var he *httpError
+	if errors.As(err, &he) {
+		msg := he.body
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(msg), &e) == nil && e.Error != "" {
+			msg = e.Error
+		}
+		return he.status, msg
+	}
+	return 0, ""
+}
 
 func (l *Link) call(ctx context.Context, c *http.Client, method, path string, body, out any) error {
 	return Call(ctx, c, l.base, l.key, method, path, body, out)

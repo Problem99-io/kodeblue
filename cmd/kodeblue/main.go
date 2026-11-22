@@ -14,6 +14,7 @@
 //	kodeblue respond list|approve <id>|deny <id>|undo <id>
 //	kodeblue enroll --hub URL [--pin P] connect this server to a kodeblue hub (token in $KODEBLUE_ENROLL_TOKEN)
 //	kodeblue inference [--url U --model M [--provider P]]   show or set the model endpoint
+//	kodeblue move-keys                                   hand this server's model key to its hub and remove it here
 //	kodeblue mcp                      stdio MCP server (spawned by the engine)
 //	kodeblue respond exec             root helper (started by kodeblue-respond.socket)
 package main
@@ -39,6 +40,7 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/config"
 	"github.com/Problem99-io/kodeblue/internal/blue/daemon"
+	"github.com/Problem99-io/kodeblue/internal/blue/hublink"
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/mcpserver"
 	"github.com/Problem99-io/kodeblue/internal/blue/notify"
@@ -106,6 +108,8 @@ func main() {
 		enrollCmd(cfg, *hubURL, *hubPin, *hubCA, *name)
 	case "inference":
 		inferenceCmd(cfg, *infURL, *infProvider, *infModel, *infKeyFile)
+	case "move-keys":
+		moveKeysCmd(cfg)
 	case "mcp":
 		st := mustStore(cfg)
 		defer st.Close()
@@ -282,6 +286,15 @@ func runDaemon(cfg config.Config, logger *slog.Logger) {
 	defer st.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Hub connections go through a loopback forwarder to the hub's model
+	// proxy: triage and the engine get its address and a token, never a key.
+	if cfg.UsesHubModels() {
+		if fw, err := hublink.StartModelForwarder(ctx, cfg, logger); err != nil {
+			logger.Error("model connections via the hub unavailable", "error", err)
+		} else {
+			cfg.Inference.HubProxyURL, cfg.Inference.HubProxyToken = fw.URL, fw.Token
+		}
+	}
 	d := daemon.New(cfg, st, logger)
 	// Read before the engine starts, so its environment never carries the
 	// notify socket.
@@ -432,7 +445,7 @@ func statusCmd(cfg config.Config) {
 
 // helperEnvelope is what the unprivileged side sends to the root helper.
 type helperEnvelope struct {
-	Op      string          `json:"op"` // execute | undo | upgrade | rule_approve | rule_pause | rule_delete
+	Op      string          `json:"op"` // execute | undo | upgrade | move_keys | rule_approve | rule_pause | rule_delete
 	Request respond.Request `json:"request"`
 	UndoID  string          `json:"undo_id"`
 	// Version and By: an upgrade of kodeblue (op upgrade) and who asked.
@@ -542,6 +555,14 @@ func rootHelper(cfg config.Config) {
 	if env.Op == "upgrade" {
 		// Not containment: [response] mode does not govern it.
 		rec, err := startUpgrade(cfg, caller, env)
+		if err != nil {
+			refuse(err.Error())
+		}
+		reply(rec)
+		return
+	}
+	if env.Op == "move_keys" {
+		rec, err := startMoveKeys(cfg, caller)
 		if err != nil {
 			refuse(err.Error())
 		}
@@ -816,5 +837,6 @@ func usage() {
   vulnerabilities     every known vulnerability on this server (the register in /var/lib/kodeblue/workspace/VULNERABILITIES.md)
   upgrade <version>   install that release (from [upgrade] release_url, checked against its SHA256SUMS; as root)
   enroll --hub https://hub.example [--pin sha256//…] [--ca-file f] [--name n]   (token in $KODEBLUE_ENROLL_TOKEN)
-  inference [--url https://… --model m [--provider p]]   show or set the model endpoint`)
+  inference [--url https://… --model m [--provider p]]   show or set the model endpoint
+  move-keys           hand this server's model key to its hub and remove it here (as root; the installer runs it)`)
 }

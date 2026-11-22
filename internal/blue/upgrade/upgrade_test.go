@@ -16,6 +16,27 @@ import (
 	"testing"
 )
 
+func TestBehind(t *testing.T) {
+	for _, tc := range []struct {
+		have, want string
+		behind     bool
+	}{
+		{"v0.2.0", "v0.3.0", true},
+		{"v0.2.9", "v0.2.10", true},
+		{"v0.3.0", "v0.3.0", false},
+		{"v0.3.0-4-gabc", "v0.3.0", false},
+		{"v0.3.1", "v0.3.0", false},
+		{"v1.0.0", "v0.9.9", false},
+		{"dev", "v0.3.0", false},
+		{"v0.2.0", "dev", false},
+		{"", "v0.3.0", false},
+	} {
+		if got := Behind(tc.have, tc.want); got != tc.behind {
+			t.Errorf("Behind(%q, %q) = %t", tc.have, tc.want, got)
+		}
+	}
+}
+
 func TestCheck(t *testing.T) {
 	for _, c := range []struct {
 		to, from string

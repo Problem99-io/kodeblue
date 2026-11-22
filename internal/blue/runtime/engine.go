@@ -128,7 +128,11 @@ func (k *Engine) gatewaysTOML() string {
 	sort.Strings(ids)
 	var b strings.Builder
 	for _, id := range ids {
-		b2, _ := json.Marshal(k.cfg.Inference.Connections[id].BaseURL)
+		base := k.cfg.Inference.Connections[id].BaseURL
+		if u, _, err := k.cfg.Endpoint(id); err == nil {
+			base = u // the hub forwarder for a connection via the hub
+		}
+		b2, _ := json.Marshal(base)
 		fmt.Fprintf(&b, "\n[providers.gateways.%s]\nenabled = true\nbase_url = %s\n", id, b2)
 	}
 	return b.String()

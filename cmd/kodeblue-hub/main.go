@@ -8,6 +8,9 @@
 //	        the model endpoint handed to servers at enrollment (any OpenAI-compatible API)
 //	    slack-webhook
 //	        the fleet's Slack channel; the hub posts all notifications
+//	    model-keys on|off
+//	        off: hand model keys to no server, not even those from before the
+//	        hub's model proxy (on, the default, still does until they update)
 //	kodeblue-hub pin                          print the TLS public-key pin servers use
 //	kodeblue-hub version
 //
@@ -188,6 +191,7 @@ func serve(logger *slog.Logger, data, listen, httpListen, certFile, keyFile stri
 	defer stop()
 	go srv.Janitor(ctx)
 	go srv.NotificationForwarder(ctx)
+	go srv.PresenceWatcher(ctx)
 	hs := &http.Server{Addr: listen, Handler: srv.Handler(), TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	var local *http.Server
@@ -376,6 +380,14 @@ var fleetSettings = map[string]fleetSetting{
 	"inference-provider": {key: hub.SettingInferenceProvider},
 	"inference-key":      {key: hub.SettingInferenceKey, secret: true},
 	"slack-webhook":      {key: "slack_webhook", secret: true, check: hub.ValidateWebhook},
+	// off: servers from before the model proxy no longer get model keys
+	// (their hub models stop until they are updated). Unset is on.
+	"model-keys": {key: hub.SettingModelKeys, check: func(v string) error {
+		if v != "on" && v != "off" {
+			return errors.New("model-keys is on or off")
+		}
+		return nil
+	}},
 }
 
 func fleetCmd(st *hub.Store, pos []string) {
@@ -431,6 +443,8 @@ func fleetCmd(st *hub.Store, pos []string) {
 		st.Audit("cli", "fleet.set", "", pos[1], "")
 		if pos[1] == "slack-webhook" || strings.HasPrefix(pos[1], "telegram-") {
 			fmt.Println(pos[1], "saved: notification destinations are configured on the hub")
+		} else if pos[1] == "model-keys" {
+			fmt.Println("model-keys", v, "applies with each server's next sync")
 		} else {
 			fmt.Println(pos[1], "saved; servers that enroll from now on receive it if they have none")
 		}
@@ -498,7 +512,7 @@ func usage() {
         [--endpoint-allow CIDR,…]        (loopback/link-local addresses the hub may reach model endpoints at; default none)
   user add|del|list <name>          (password read from stdin)
   server add <name> --public-url …  (prints the one-time install command; serve must have run once)
-  fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook|telegram-bot-token|telegram-chat-id
+  fleet set|clear|status inference-url|inference-model|inference-provider|inference-key|slack-webhook|telegram-bot-token|telegram-chat-id|model-keys
                                     (value read from stdin; inference-* set the "default" model connection and default model)
   pin | version`)
 }

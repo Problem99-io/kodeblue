@@ -220,7 +220,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.expectProgress(loopGrace) // engine start, the startup sweep
 	d.wg.Add(1)
 	go func() { defer d.wg.Done(); d.watchdog(ctx) }()
-	if err := d.cfg.ModelsReady(); err != nil {
+	if err := d.cfg.ModelsRunnable(); err != nil {
 		d.log.Warn("model layers disabled: sensors, detection and monitors still run", "reason", err)
 	} else {
 		d.modelsOn = true
@@ -326,6 +326,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.restartNow:
 		}
 		d.maybeUpgrade(ctx)
+		d.maybeMoveKeys(ctx)
 		if d.restartDue() && !d.learning.Load() {
 			d.log.Info("new hub settings saved; restarting to apply them")
 			return ErrRestart
@@ -333,10 +334,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// firstSettingsGap replaces restartGap for the first hub settings a server
+// applies: until then a server whose models come from the hub has none.
+const firstSettingsGap = 30 * time.Second
+
 // restartDue reports whether saved hub settings should restart the daemon
 // now: no agent session runs and it has run for at least restartGap.
 func (d *Daemon) restartDue() bool {
-	return d.restartWanted.Load() && len(d.LiveSessions()) == 0 && d.followUpsRunning() == 0 && time.Since(d.started) >= d.restartGap
+	gap := d.restartGap
+	if d.cfg.HubSettingsVersion == "" {
+		gap = min(gap, firstSettingsGap)
+	}
+	return d.restartWanted.Load() && len(d.LiveSessions()) == 0 && d.followUpsRunning() == 0 && time.Since(d.started) >= gap
 }
 
 // ApplySettings restarts the daemon once no agent session is running, so

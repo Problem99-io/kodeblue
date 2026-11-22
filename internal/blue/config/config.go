@@ -124,6 +124,10 @@ type Inference struct {
 	// (by ID) and its per-role model choices.
 	Connections map[string]hubproto.Connection `toml:"-"`
 	Refs        map[string]hubproto.ModelRef   `toml:"-"`
+	// Set by the daemon, never from the file: the loopback forwarder that
+	// connections via the hub go through (hublink.StartModelForwarder).
+	HubProxyURL   string `toml:"-"`
+	HubProxyToken string `toml:"-"`
 }
 
 type Schedule struct {

@@ -111,6 +111,25 @@ func Newer(to, from string) bool {
 	return false
 }
 
+// Behind reports whether version have is an older release than want. A
+// development build is never behind, nor ahead.
+func Behind(have, want string) bool {
+	h, ok := parse(have)
+	if !ok {
+		return false
+	}
+	w, ok := parse(want)
+	if !ok {
+		return false
+	}
+	for i := range h {
+		if h[i] != w[i] {
+			return h[i] < w[i]
+		}
+	}
+	return false
+}
+
 // Check says why a server running from may not upgrade to to, or nil.
 func Check(to, from string) error {
 	switch {
