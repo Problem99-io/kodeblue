@@ -167,10 +167,10 @@ func TestExecuteRuleChecksItsRule(t *testing.T) {
 func TestAuthorizeRuleRequests(t *testing.T) {
 	agent := Caller{UID: 999, Via: "socket", agentUID: 999}
 	req := ruleReq("cr-ssh-bruteforce", "203.0.113.7")
-	if err := Authorize("recommend", false, agent, req); err != nil {
+	if err := Authorize("recommend", false, false, agent, req); err != nil {
 		t.Fatalf("rule request from the daemon refused before its rule is checked: %v", err)
 	}
-	if Authorize("off", false, agent, req) == nil {
+	if Authorize("off", false, false, agent, req) == nil {
 		t.Fatal("rule acted with response off")
 	}
 	if _, err := RuleApprover(false, agent, "hub:alice"); err == nil {

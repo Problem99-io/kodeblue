@@ -3,6 +3,7 @@ package respond
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"regexp"
 	"strconv"
@@ -81,11 +82,16 @@ func IdentifyCaller(stdin *os.File) (Caller, error) {
 	return Caller{UID: os.Getuid(), Via: "direct", agentUID: agent}, nil
 }
 
+// FleetRequester asks for a block another server of the fleet made, which
+// the hub relayed (hub.accept_shared_blocks).
+const FleetRequester = "fleet"
+
 // What an agent-side request may claim to be: the responder ("agent"), a
-// monitor reflex, or either approved on the hub.
+// monitor reflex, a block shared by the fleet, or any of them approved on
+// the hub.
 var (
 	agentByRe = regexp.MustCompile(`^(agent|monitor:[A-Za-z0-9_.:-]+)$`)
-	hubByRe   = regexp.MustCompile(`^(agent|monitor:[A-Za-z0-9_.:-]+)\+hub:[^\n]{1,200}\+operator$`)
+	hubByRe   = regexp.MustCompile(`^(agent|fleet|monitor:[A-Za-z0-9_.:-]+)\+hub:[^\n]{1,200}\+operator$`)
 )
 
 // Authorize decides whether caller may have req executed under policy mode.
@@ -94,8 +100,12 @@ var (
 // recommend/off mode, and in contain mode only an agent or monitor request —
 // never one that claims its own operator approval. Hub approvals reach the
 // helper through the kodeblue user, so hub.accept_approvals (root-owned) is
-// the only thing vouching for them.
-func Authorize(mode string, hubApprovals bool, c Caller, req Request) error {
+// the only thing vouching for them. Likewise hub.accept_shared_blocks
+// (sharedBlocks) is the only thing vouching for a block the fleet shared,
+// which runs without an operator only in contain mode, and only on a public
+// address: a private one may be a neighbour here that was an attacker on
+// another server's network.
+func Authorize(mode string, hubApprovals, sharedBlocks bool, c Caller, req Request) error {
 	if mode == "off" {
 		return errors.New("response disabled by policy")
 	}
@@ -110,6 +120,20 @@ func Authorize(mode string, hubApprovals bool, c Caller, req Request) error {
 	case ruleByRe.MatchString(by):
 		// A containment rule a person approved: ExecuteRule checks it
 		// against the helper's own copy before anything runs.
+		return nil
+	case by == FleetRequester:
+		if !sharedBlocks {
+			return errors.New("this server does not take blocks shared by the fleet (hub.accept_shared_blocks = false, or no hub)")
+		}
+		if req.Action != "block_ip" {
+			return fmt.Errorf("the fleet shares only block_ip, not %s", req.Action)
+		}
+		if ip, err := netip.ParseAddr(req.Params["ip"]); err != nil || !ip.Unmap().IsGlobalUnicast() || ip.Unmap().IsPrivate() {
+			return errors.New("the fleet shares only public addresses")
+		}
+		if mode != "contain" {
+			return fmt.Errorf("policy mode is %s: operator approval required", mode)
+		}
 		return nil
 	case agentByRe.MatchString(by):
 		if mode != "contain" {

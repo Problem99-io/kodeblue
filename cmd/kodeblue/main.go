@@ -574,10 +574,11 @@ func rootHelper(cfg config.Config) {
 		// hub that is set to accept them; without a hub there is no hub
 		// operator, so "+hub:" could only be a forgery.
 		hubApprovals := cfg.Hub.Enabled() && cfg.Hub.AcceptApprovals
+		sharedBlocks := cfg.Hub.Enabled() && cfg.Hub.AcceptSharedBlocks
 		// Root may let the hub raise the mode ([response] hub_max_mode); the
 		// helper then allows up to that, and the daemon applies the hub's
 		// choice (it never asks the helper for more than it runs).
-		if err := respond.Authorize(cfg.ModeCeiling(), hubApprovals, caller, req); err != nil {
+		if err := respond.Authorize(cfg.ModeCeiling(), hubApprovals, sharedBlocks, caller, req); err != nil {
 			refuse(err.Error())
 		}
 		// incident_linked is computed by the MCP layer from the incident store
