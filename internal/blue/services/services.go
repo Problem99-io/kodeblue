@@ -34,6 +34,10 @@ type Check struct {
 	// Need says what covers it, for whoever has to create the monitor.
 	Need string   `json:"need"`
 	By   []string `json:"covered_by,omitempty"`
+	// Waived is set when a human or an agent said this check cannot be
+	// covered on this server (WaiversKey). A waived check is not missing,
+	// so it opens no coverage case, but nothing watches it either.
+	Waived *Waiver `json:"waived,omitempty"`
 }
 
 // Result is a service with the checks it needs and what covers them.
@@ -82,6 +86,8 @@ type Context struct {
 	// request tap records (none when it does not run).
 	TapDir   string
 	TapPorts []int
+	// Waivers are the checks that cannot be covered here (LoadWaivers).
+	Waivers Waivers
 }
 
 // Take discovers the services and assesses them against the monitors and
@@ -92,6 +98,7 @@ func Take(env *sensors.Env, st *store.Store, tapDir string) Inventory {
 		Coverage: sensors.CheckCoverage(env),
 		Off:      sensors.ParseDisabled(st.Get(sensors.DisabledKey)),
 		TapDir:   tapDir,
+		Waivers:  LoadWaivers(st),
 	}
 	var tap struct {
 		Status string `json:"status"`
@@ -151,6 +158,11 @@ var systemNames = []string{
 // no_children cannot watch them; the auth sensor watches the logins instead.
 var loginNames = []string{"sshd", "ssh", "dropbear", "sshd-session"}
 
+// hostNetNames are services that run in the host's network namespace by
+// design, so no sockets monitor can be scoped to them: remote logins and
+// the container runtime (which opens ports for every published container).
+var hostNetNames = append([]string{"dockerd", "docker", "containerd", "docker-proxy", "podman"}, loginNames...)
+
 func names(s sensors.Service) []string {
 	out := []string{s.Name, strings.TrimSuffix(s.Unit, ".service")}
 	if i := strings.Index(out[1], "@"); i > 0 {
@@ -208,7 +220,11 @@ func Assess(svcs []sensors.Service, c Context) Inventory {
 			ch := Check{Check: n, Need: needText(n, s)}
 			ch.By = coveredBy(n, s, c, sensorOn)
 			if len(ch.By) == 0 {
-				r.Missing = append(r.Missing, n)
+				if w, ok := c.Waivers[s.Name][n]; ok {
+					ch.Waived = &w
+				} else {
+					r.Missing = append(r.Missing, n)
+				}
 			}
 			r.Checks = append(r.Checks, ch)
 		}
@@ -328,6 +344,13 @@ func coveredBy(check string, s sensors.Service, c Context, sensorOn map[string]b
 		by = append(by, "sensor:auth")
 	case check == Start && sensorOn["process"]:
 		by = append(by, "sensor:process")
+	case check == Network && s.Net == "" && isOneOf(s, hostNetNames) && sensorOn["listener"] && sensorOn["outbound"]:
+		// A service that owns the host's network (remote logins, the
+		// container runtime) shares kodeblue's namespace, where a sockets
+		// monitor sees every socket on the host and cannot be scoped to
+		// it. The listener and outbound sensors already report a new port
+		// it opens and a new program it connects out with.
+		by = append(by, "sensor:listener", "sensor:outbound")
 	}
 	return by
 }

@@ -402,6 +402,20 @@ const (
 // VulnCommands are the vulnerability commands.
 var VulnCommands = []string{CommandVulnAccept, CommandVulnReopen, CommandVulnRecheck}
 
+// Coverage commands an operator can send from the hub. RequestID names the
+// service, Body is the reason (waive) and SessionID carries the checks,
+// comma-separated. The server applies them without a model.
+const (
+	// CommandCoverageWaive records that checks of a service cannot be
+	// covered on this server, so kodeblue stops opening coverage cases.
+	CommandCoverageWaive = "coverage_waive"
+	// CommandCoverageUnwaive asks for the checks again.
+	CommandCoverageUnwaive = "coverage_unwaive"
+)
+
+// CoverageCommands are the coverage commands.
+var CoverageCommands = []string{CommandCoverageWaive, CommandCoverageUnwaive}
+
 // Containment rule commands an operator can send from the hub. RequestID
 // names the rule and Body is the operator's note. Approving and deleting
 // need hub.accept_approvals on the server; the root helper checks them.

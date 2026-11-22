@@ -262,6 +262,19 @@ func (s *Server) register() {
 			Fn: s.coverageCase,
 		},
 		{
+			Name: "coverage_waive",
+			Description: "Waive checks of a service that cannot be covered on this server at all, so kodeblue stops opening a coverage case for them: a limitation of how kodeblue runs here, not a gap someone could close with a monitor. " +
+				"Only after monitor_test showed every monitor the check's `need` names fails or cannot be scoped to the service. Not for coverage you did not try, and never to quiet a monitor that fires: tune that instead. " +
+				"The waiver is posted to the team and expires (at most 90 days); the service keeps showing the check as not watched.",
+			Schema: obj(map[string]any{
+				"service": str("the service's name as service_inventory lists it"),
+				"checks":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "the uncovered checks to waive (health, exec, network, files, requests, start)"},
+				"reason":  str("why no monitor can cover it here, with the monitor_test result"),
+				"days":    num("how long; default and max 90"),
+			}, "service", "checks", "reason"),
+			Fn: s.coverageWaive,
+		},
+		{
 			Name: "vulnerability_report",
 			Description: "Record a vulnerability in one of the server's services that someone can fix: an outdated package or runtime with known CVEs, a misconfiguration (debug mode, default credentials, directory listing, weak TLS), a service exposed wider than it needs, a readable secret, loose file permissions. " +
 				"Give the evidence you observed and how to fix it. Add a check where one can be written: a command, http or sockets monitor spec that FAILS while the weakness exists and PASSES once it is fixed (e.g. command stat -c %a on the key file with expect_match ^600$). " +

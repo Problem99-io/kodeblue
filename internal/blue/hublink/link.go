@@ -530,6 +530,9 @@ func (l *Link) handle(ctx context.Context, m hubproto.OperatorMessage) hubproto.
 		if slices.Contains(hubproto.VulnCommands, m.Command) {
 			return l.vulnCommand(ctx, m)
 		}
+		if slices.Contains(hubproto.CoverageCommands, m.Command) {
+			return l.coverageCommand(m)
+		}
 		if slices.Contains(hubproto.RuleCommands, m.Command) {
 			return l.ruleCommand(ctx, m)
 		}
@@ -601,6 +604,48 @@ func (l *Link) vulnCommand(ctx context.Context, m hubproto.OperatorMessage) hubp
 		return hubproto.MessageReply{Status: "refused", Text: err.Error()}
 	}
 	return hubproto.MessageReply{Status: "done", Text: v.ID + ": " + res + "."}
+}
+
+// coverageCommand waives or unwaives checks of a service. No model is
+// involved: saying a check cannot be covered here is the team's decision.
+func (l *Link) coverageCommand(m hubproto.OperatorMessage) hubproto.MessageReply {
+	if !l.cfg.Hub.AcceptMessages {
+		return hubproto.MessageReply{Status: "refused", Text: "This server does not take changes from the hub (hub.accept_messages = false in /etc/kodeblue/kodeblue.toml)."}
+	}
+	by, svc := "hub:"+m.Author, strings.TrimSpace(m.RequestID)
+	var checks []string
+	for _, c := range strings.Split(m.SessionID, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			checks = append(checks, c)
+		}
+	}
+	if m.Command == hubproto.CommandCoverageUnwaive {
+		n, err := services.Unwaive(l.st, svc, checks, by)
+		if err != nil {
+			return hubproto.MessageReply{Status: "failed", Text: err.Error()}
+		}
+		if n == 0 {
+			return hubproto.MessageReply{Status: "refused", Text: "No waiver for " + svc + "."}
+		}
+		l.syncCoverage()
+		return hubproto.MessageReply{Status: "done", Text: fmt.Sprintf("kodeblue asks for %d waived check(s) of %s again.", n, svc)}
+	}
+	if err := services.Waive(l.st, svc, checks, m.Body, by, 0); err != nil {
+		return hubproto.MessageReply{Status: "refused", Text: err.Error()}
+	}
+	l.syncCoverage()
+	return hubproto.MessageReply{Status: "done", Text: fmt.Sprintf("Waived %s for %s for %d days.", strings.Join(checks, ", "), svc, services.DefaultWaiverDays)}
+}
+
+// syncCoverage brings the coverage cases and the inventory the hub shows in
+// line with a changed waiver now, rather than at the next review.
+func (l *Link) syncCoverage() {
+	env := &sensors.Env{Root: l.cfg.Server.Root}
+	services.Sync(l.st, services.Take(env, l.st, l.cfg.RequestsDir()))
+	inv := services.Take(env, l.st, l.cfg.RequestsDir())
+	if b, err := json.Marshal(inv); err == nil {
+		_ = l.st.Set(services.InventoryKey, string(b))
+	}
 }
 
 // ruleCommand applies an operator's ruling on a containment rule. No model

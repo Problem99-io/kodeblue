@@ -139,6 +139,8 @@ func report(g Gap) string {
 		for _, c := range r.Checks {
 			if len(c.By) > 0 {
 				fmt.Fprintf(&b, "- %s: covered by %s\n", c.Check, strings.Join(c.By, ", "))
+			} else if c.Waived != nil {
+				fmt.Fprintf(&b, "- %s: not watched, waived by %s until %s: %s\n", c.Check, c.Waived.By, c.Waived.ExpiresAt.Format("2006-01-02"), c.Waived.Reason)
 			} else {
 				fmt.Fprintf(&b, "- **%s: missing**. Needs %s\n", c.Check, c.Need)
 			}
@@ -150,7 +152,7 @@ func report(g Gap) string {
 	if g.Notes != "" {
 		fmt.Fprintf(&b, "\n## Why it is not covered (%s)\n\n%s\n", g.By, g.Notes)
 	}
-	b.WriteString("\n## What to do\n\nCreate the missing monitors (relearn, or an operator session), or change how kodeblue runs so it can see the service. kodeblue resolves this case by itself once monitors cover every missing check.\n")
+	b.WriteString("\n## What to do\n\nCreate the missing monitors (relearn, or an operator session), or change how kodeblue runs so it can see the service. kodeblue resolves this case by itself once monitors cover every missing check. If a check cannot be covered on this server at all, waive it with the reason (Waive on the service in the hub, or `kodeblue coverage waive`): the case resolves and does not come back, and the service still shows the check as not watched.\n")
 	return b.String()
 }
 
@@ -210,7 +212,12 @@ func Sync(st *store.Store, inv Inventory) (opened, resolved []store.Incident) {
 		}
 		var by []string
 		for _, c := range r.Checks {
-			if slices.Contains(m.Checks, c.Check) {
+			if !slices.Contains(m.Checks, c.Check) {
+				continue
+			}
+			if len(c.By) == 0 && c.Waived != nil {
+				by = append(by, c.Check+": waived by "+c.Waived.By+" ("+c.Waived.Reason+")")
+			} else {
 				by = append(by, c.Check+": "+strings.Join(c.By, ", "))
 			}
 		}

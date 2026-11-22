@@ -161,6 +161,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/servers/{id}/stop-session", s.op(s.handleStop))
 	m.HandleFunc("POST /api/servers/{id}/vulnerabilities/{rid}", s.op(s.handleVuln))
 	m.HandleFunc("POST /api/servers/{id}/rules/{rid}", s.op(s.handleRule))
+	m.HandleFunc("POST /api/servers/{id}/coverage", s.op(s.handleCoverage))
 	m.HandleFunc("GET /api/tasks", s.op(s.handleTasks))
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
@@ -1116,6 +1117,54 @@ func (s *Server) handleVuln(w http.ResponseWriter, r *http.Request, c *opCtx) {
 		return
 	}
 	s.st.Audit(c.user.Name, "vulnerability."+strings.TrimPrefix(req.Command, "vuln_"), srv.ID, rid+" "+req.Note, c.ip)
+	s.wake(srv.ID)
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleCoverage relays an operator's coverage waiver: checks of a service
+// that cannot be covered on that server, so it stops opening coverage cases
+// for them (or unwaive, to ask for them again). The server applies it
+// without a model.
+func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request, c *opCtx) {
+	srv := s.serverOr404(w, r)
+	if srv == nil {
+		return
+	}
+	var req struct {
+		Command string   `json:"command"`
+		Service string   `json:"service"`
+		Checks  []string `json:"checks"`
+		Note    string   `json:"note"`
+	}
+	if err := readJSON(w, r, 8<<10, &req); err != nil || !slices.Contains(hubproto.CoverageCommands, req.Command) {
+		writeErr(w, http.StatusBadRequest, "command must be one of "+strings.Join(hubproto.CoverageCommands, ", "))
+		return
+	}
+	req.Note, req.Service = strings.TrimSpace(req.Note), strings.TrimSpace(req.Service)
+	for _, ch := range req.Checks {
+		if ch == "" || strings.ContainsAny(ch, ", ") {
+			writeErr(w, http.StatusBadRequest, "bad check name")
+			return
+		}
+	}
+	if req.Command == hubproto.CommandCoverageWaive && (len(req.Checks) == 0 || len(req.Note) < 20) {
+		writeErr(w, http.StatusBadRequest, "name the checks and say why they cannot be covered on this server")
+		return
+	}
+	if s.st.Record(srv.ID, "service", req.Service) == nil {
+		writeErr(w, http.StatusNotFound, "no such service")
+		return
+	}
+	if !srv.Enrolled || srv.Revoked {
+		writeErr(w, http.StatusConflict, "server is not connected to the hub")
+		return
+	}
+	m := &Message{ServerID: srv.ID, Author: c.user.Name, Command: req.Command, RequestID: req.Service, SessionID: strings.Join(req.Checks, ","), Body: req.Note}
+	if err := s.st.AddMessage(m); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.st.Audit(c.user.Name, "coverage."+strings.TrimPrefix(req.Command, "coverage_"), srv.ID, req.Service+" "+strings.Join(req.Checks, ",")+" "+req.Note, c.ip)
 	s.wake(srv.ID)
 	writeJSON(w, http.StatusOK, m)
 }

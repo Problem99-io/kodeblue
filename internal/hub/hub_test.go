@@ -578,6 +578,48 @@ func TestServicesAndVulnerabilities(t *testing.T) {
 	}
 }
 
+// A coverage waiver is relayed to the server with the service and checks;
+// the hub refuses one without a reason or for a service it does not know.
+func TestCoverageWaiverCommand(t *testing.T) {
+	_, st, ts := newHub(t)
+	_ = st.AddUser("alice", "correct horse battery")
+	jar, _ := cookiejar.New(nil)
+	c := ts.Client()
+	c.Jar = jar
+	_, b := do(t, c, "POST", ts.URL+"/api/login", "", "", map[string]string{"name": "alice", "password": "correct horse battery"})
+	var me struct {
+		CSRF string `json:"csrf"`
+	}
+	_ = json.Unmarshal(b, &me)
+	_, tok, _ := st.CreateServer("web-1", "test", time.Hour)
+	srv, _, _ := st.Enroll(tok, "web-1", "")
+	_ = st.ApplySync(srv.ID, &hubproto.SyncRequest{Replace: []string{"service"}, Records: []hubproto.Record{
+		{Kind: "service", ID: "ssh", UpdatedAt: time.Now(), Data: json.RawMessage(`{"name":"ssh","missing":["network"]}`)}}})
+	cov := func(body any) (int, []byte) {
+		return do(t, c, "POST", ts.URL+"/api/servers/"+srv.ID+"/coverage", "", me.CSRF, body)
+	}
+	const why = "sshd runs in the host network namespace"
+	if code, _ := cov(map[string]any{"command": "coverage_delete", "service": "ssh"}); code != 400 {
+		t.Fatalf("unknown command: %d", code)
+	}
+	if code, _ := cov(map[string]any{"command": "coverage_waive", "service": "ssh", "checks": []string{"network"}}); code != 400 {
+		t.Fatalf("a waiver needs a reason: %d", code)
+	}
+	if code, _ := cov(map[string]any{"command": "coverage_waive", "service": "ssh", "checks": []string{"network,files"}, "note": why}); code != 400 {
+		t.Fatalf("a check name cannot smuggle a list: %d", code)
+	}
+	if code, _ := cov(map[string]any{"command": "coverage_waive", "service": "nope", "checks": []string{"network"}, "note": why}); code != 404 {
+		t.Fatalf("unknown service: %d", code)
+	}
+	if code, b := cov(map[string]any{"command": "coverage_waive", "service": "ssh", "checks": []string{"network"}, "note": why}); code != 200 {
+		t.Fatalf("waive: %d %s", code, b)
+	}
+	msgs := st.TakeQueued(srv.ID)
+	if len(msgs) != 1 || msgs[0].Command != hubproto.CommandCoverageWaive || msgs[0].RequestID != "ssh" || msgs[0].SessionID != "network" || msgs[0].Body != why {
+		t.Fatalf("queued: %+v", msgs)
+	}
+}
+
 // A containment rule ruling is relayed with the content the operator saw; an
 // approval of a rule that changed since is refused on the hub already.
 func TestContainmentRuleCommands(t *testing.T) {
