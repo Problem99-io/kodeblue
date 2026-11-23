@@ -537,9 +537,13 @@ func (k *Engine) WaitSession(ctx context.Context, s *Session, timeout time.Durat
 				var out struct {
 					Status string `json:"status"`
 					Text   string `json:"text"`
+					Error  string `json:"error"`
+					Class  string `json:"error_class"`
+					Resets string `json:"resets_at"`
 				}
 				if err := k.do(ctx, http.MethodGet, "/v1/sessions/"+s.ID+"/runs/"+last+"/outcome", nil, &out); err == nil && out.Status != "running" {
-					return Outcome{Status: out.Status, Text: out.Text}
+					resets, _ := time.Parse(time.RFC3339, out.Resets)
+					return Outcome{Status: out.Status, Text: out.Text, Error: out.Error, ErrorClass: out.Class, ResetsAt: resets}
 				}
 			}
 		}

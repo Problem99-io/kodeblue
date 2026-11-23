@@ -264,6 +264,9 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 		if cur := d.st.GetIncident(rec.ID); cur != nil {
 			if cur.Kind == "operator" {
 				cur.Status, cur.Report, cur.Summary = "resolved", out.Text, "operator conversation "+out.Status
+				if why := out.FailureReason(); why != "" {
+					cur.Summary += ": " + why
+				}
 			}
 			cur.CostUSD += spent
 			_ = d.st.UpdateIncident(cur)
@@ -278,6 +281,9 @@ func (d *Daemon) HandleOperatorMessage(ctx context.Context, m hubproto.OperatorM
 		text = "(stopped before the agent replied)"
 	} else if text == "" {
 		text = "(the agent finished without a reply; status " + out.Status + ")"
+	}
+	if why := out.FailureReason(); why != "" && status == "failed" {
+		text += "\n\n" + why
 	}
 	return hubproto.MessageReply{Status: status, Text: text, SessionID: sess.ID, CostUSD: spent}
 }

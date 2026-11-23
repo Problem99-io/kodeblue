@@ -820,8 +820,8 @@ func (d *Daemon) investigate(ctx context.Context, in *store.Incident, findings [
 		final.Status = "needs_human"
 		final.Verdict = "inconclusive"
 		final.Summary = "The investigation session ended (" + out.Status + ") without resolving the incident."
-		if out.Error != "" {
-			final.Summary += " " + clipText(out.Error, 400)
+		if why := out.FailureReason(); why != "" {
+			final.Summary += " " + why
 		}
 		final.Report = out.Text
 		for _, f := range d.st.FindingsForIncident(in.ID) {
